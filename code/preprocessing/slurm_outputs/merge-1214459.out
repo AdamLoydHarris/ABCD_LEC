@@ -1,0 +1,26 @@
+Script started: Fri Aug  8 10:18:04 UTC 2025
+Running merge, preprocess and KiloSort file
+Conda environment activated
+Running Python pipeline
+Preprocessing data for ly05 on dates 2025-06-20_2025-06-23 and saving to /ceph/behrens/adam_harris/Taskspace_abstraction_lEC/data/preprocessed/ephys/ly05/2025-06-20_2025-06-23_preprocessed_2
+
+Successfully merged 18 recordings.
+ConcatenateSegmentRecording: 384 channels - 30.0kHz - 1 segments - 701,552,933 samples 
+                             23,385.10s (6.50 hours) - int16 dtype - 501.79 GiB
+Assigning bad channels...
+No outside_brain channels found on shank 1
+No noisey channels found on shank 1
+No dead channels found on shank 1
+No outside_brain channels found on shank 2
+No noisey channels found on shank 2
+No dead channels found on shank 2
+No outside_brain channels found on shank 3
+No noisey channels found on shank 3
+No dead channels found on shank 3
+No outside_brain channels found on shank 4
+1 noisey channel(s) found on shank 4
+No dead channels found on shank 4
+saving preprocessed traces for visual inspection
+Preprocessed recording: ChannelsAggregationRecording: 383 channels - 30.0kHz - 1 segments - 701,552,933 samples 
+                              23,385.10s (6.50 hours) - int16 dtype - 500.48 GiB
+All done! Fri Aug  8 10:26:18 UTC 2025

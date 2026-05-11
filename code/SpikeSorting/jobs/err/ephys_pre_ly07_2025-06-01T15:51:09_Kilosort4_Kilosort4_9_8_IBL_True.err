@@ -1,0 +1,27 @@
+/nfs/nhome/live/pdoohan/.conda/envs/maze_ephys/lib/python3.10/site-packages/spikeinterface/widgets/traces.py:147: UserWarning: You have selected a time after the end of the segment. The range will be clipped to 483.41
+  warnings.warn(
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+  File "/ceph/behrens/adam_harris/LEC_probe_map/code/SpikeSorting/spikesort_session.py", line 98, in preprocess_ephys_session
+    preprocessed_rec = pre_kilosort_processing(
+  File "/ceph/behrens/adam_harris/LEC_probe_map/code/SpikeSorting/spikesort_session.py", line 203, in pre_kilosort_processing
+    fig = _plot_preprocessed_trace_qc(split_recordings, preprocessed_recs)
+  File "/ceph/behrens/adam_harris/LEC_probe_map/code/SpikeSorting/spikesort_session.py", line 227, in _plot_preprocessed_trace_qc
+    sw.plot_traces(
+  File "/nfs/nhome/live/pdoohan/.conda/envs/maze_ephys/lib/python3.10/site-packages/spikeinterface/widgets/traces.py", line 161, in __init__
+    times_in_range, list_traces, frame_range, channel_ids = _get_trace_list(
+  File "/nfs/nhome/live/pdoohan/.conda/envs/maze_ephys/lib/python3.10/site-packages/spikeinterface/widgets/traces.py", line 688, in _get_trace_list
+    traces = rec.get_traces(
+  File "/nfs/nhome/live/pdoohan/.conda/envs/maze_ephys/lib/python3.10/site-packages/spikeinterface/core/baserecording.py", line 342, in get_traces
+    traces = rs.get_traces(start_frame=start_frame, end_frame=end_frame, channel_indices=channel_indices)
+  File "/nfs/nhome/live/pdoohan/.conda/envs/maze_ephys/lib/python3.10/site-packages/spikeinterface/core/channelslice.py", line 99, in get_traces
+    traces = self._parent_recording_segment.get_traces(start_frame, end_frame, parent_indices)
+  File "/nfs/nhome/live/pdoohan/.conda/envs/maze_ephys/lib/python3.10/site-packages/spikeinterface/core/channelslice.py", line 99, in get_traces
+    traces = self._parent_recording_segment.get_traces(start_frame, end_frame, parent_indices)
+  File "/nfs/nhome/live/pdoohan/.conda/envs/maze_ephys/lib/python3.10/site-packages/spikeinterface/preprocessing/filter.py", line 154, in get_traces
+    filtered_traces = scipy.signal.sosfiltfilt(self.coeff, traces_chunk, axis=0)
+  File "/nfs/nhome/live/pdoohan/.conda/envs/maze_ephys/lib/python3.10/site-packages/scipy/signal/_signaltools.py", line 4479, in sosfiltfilt
+    edge, ext = _validate_pad(padtype, padlen, x, axis,
+  File "/nfs/nhome/live/pdoohan/.conda/envs/maze_ephys/lib/python3.10/site-packages/scipy/signal/_signaltools.py", line 4248, in _validate_pad
+    raise ValueError("The length of the input vector x must be greater "
+ValueError: The length of the input vector x must be greater than padlen, which is 18.

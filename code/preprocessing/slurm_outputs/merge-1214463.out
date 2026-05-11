@@ -1,0 +1,49 @@
+Script started: Fri Aug  8 23:14:07 UTC 2025
+Running merge, preprocess and KiloSort file
+Conda environment activated
+Running Python pipeline
+Preprocessing data for ly07 on dates 2025-06-13_2025-06-15 and saving to /ceph/behrens/adam_harris/Taskspace_abstraction_lEC/data/preprocessed/ephys/ly07/2025-06-13_2025-06-15_preprocessed
+
+Successfully merged 18 recordings.
+ConcatenateSegmentRecording: 384 channels - 30.0kHz - 1 segments - 756,633,824 samples 
+                             25,221.13s (7.01 hours) - int16 dtype - 541.19 GiB
+Assigning bad channels...
+No outside_brain channels found on shank 1
+No noisey channels found on shank 1
+4 dead channel(s) found on shank 1
+No outside_brain channels found on shank 2
+No noisey channels found on shank 2
+1 dead channel(s) found on shank 2
+No outside_brain channels found on shank 3
+No noisey channels found on shank 3
+No dead channels found on shank 3
+No outside_brain channels found on shank 4
+No noisey channels found on shank 4
+1 dead channel(s) found on shank 4
+saving preprocessed traces for visual inspection
+Preprocessed recording: ChannelsAggregationRecording: 378 channels - 30.0kHz - 1 segments - 756,633,824 samples 
+                              25,221.13s (7.01 hours) - int16 dtype - 532.73 GiB
+write_binary_recording 
+n_jobs=40 - samples_per_chunk=30,000 - chunk_memory=21.63 MiB - total_memory=865.17 MiB - chunk_duration=1.00s
+Saved preprocessed recording to BinaryFolderRecording: 378 channels - 30.0kHz - 1 segments - 756,633,824 samples 
+                       25,221.13s (7.01 hours) - int16 dtype - 532.73 GiB
+saved noise levels to noise_levels_microV.png
+saved spike drift figure spikes_drifts.png
+saved probe map with spike densities to probe_map_densities.png
+Found 4 shanks in the recording
+Running kilosort with parameters: {'batch_size': 60000, 'nblocks': 1, 'Th_universal': 9, 'Th_learned': 8, 'do_CAR': False, 'invert_sign': False, 'nt': 61, 'shift': None, 'scale': None, 'artifact_threshold': None, 'nskip': 25, 'whitening_range': 32, 'highpass_cutoff': 300, 'binning_depth': 5, 'sig_interp': 20, 'drift_smoothing': [0.5, 0.5, 0.5], 'nt0min': None, 'dmin': None, 'dminx': 32, 'min_template_size': 10, 'template_sizes': 5, 'nearest_chans': 10, 'nearest_templates': 100, 'max_channel_distance': None, 'templates_from_data': True, 'n_templates': 6, 'n_pcs': 6, 'Th_single_ch': 6, 'acg_threshold': 0.2, 'ccg_threshold': 0.25, 'cluster_downsampling': 20, 'cluster_pcs': 64, 'x_centers': None, 'duplicate_spike_ms': 0.25, 'scaleproc': None, 'save_preprocessed_copy': False, 'torch_device': 'auto', 'bad_channels': None, 'clear_cache': False, 'save_extra_vars': False, 'do_correction': True, 'keep_good_only': False, 'skip_kilosort_preprocessing': False, 'use_binary_file': None, 'delete_recording_dat': True}
+Skipping common average reference.
+kilosort4 run time 41044.83s
+Sorting completed. Found 509 units precuincluding mua.
+Creating Analyzer
+calculating templates
+calculating noise levels
+calculating correlograms
+calculating unit locations
+calculating spike amplitudes
+calculating spike locations
+calculating template similarity
+computing quality metrics df
+exporting cluster reports
+Found 73 single units, passing quality control
+All done! Sat Aug  9 21:53:04 UTC 2025

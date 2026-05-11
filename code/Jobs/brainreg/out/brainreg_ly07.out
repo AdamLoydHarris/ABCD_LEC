@@ -1,0 +1,247 @@
+gpu-sr675-31
+Loading Brainglobe module
+Fri Aug 22 06:13:30 2025       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 560.35.03              Driver Version: 560.35.03      CUDA Version: 12.6     |
+|-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA L40S                    Off |   00000000:02:00.0 Off |                    0 |
+| N/A   30C    P8             32W /  350W |       1MiB /  46068MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+                                                                                         
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI        PID   Type   Process name                              GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+Running brainreg
+[2;36m2025-08-22 06:13:35 AM[0m[2;36m [0m[34mINFO    [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m06:13:35[0m AM - INFO -  ]8;id=595418;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/fancylog/fancylog.py\[2mfancylog.py[0m]8;;\[2m:[0m]8;id=153681;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/fancylog/fancylog.py#321\[2m321[0m]8;;\
+[2;36m                       [0m         MainProcess fancylog.py:[1;36m321[0m -    [2m               [0m
+[2;36m                       [0m         Starting logging                 [2m               [0m
+[2;36m                      [0m[2;36m [0m[34mINFO    [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m06:13:35[0m AM - INFO -  ]8;id=772917;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/fancylog/fancylog.py\[2mfancylog.py[0m]8;;\[2m:[0m]8;id=510174;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/fancylog/fancylog.py#322\[2m322[0m]8;;\
+[2;36m                       [0m         MainProcess fancylog.py:[1;36m322[0m -    [2m               [0m
+[2;36m                       [0m         Not logging multiple processes   [2m               [0m
+[2;36m                      [0m[2;36m [0m[34mINFO    [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m06:13:35[0m AM - INFO -       ]8;id=4557;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/cli.py\[2mcli.py[0m]8;;\[2m:[0m]8;id=424374;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/cli.py#232\[2m232[0m]8;;\
+[2;36m                       [0m         MainProcess cli.py:[1;36m232[0m - Starting     [2m          [0m
+[2;36m                       [0m         registration                          [2m          [0m
+[2;36m                      [0m[2;36m [0m[32mDEBUG   [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m06:13:35[0m AM - DEBUG -   ]8;id=519288;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainglobe_utils/general/system.py\[2msystem.py[0m]8;;\[2m:[0m]8;id=514824;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainglobe_utils/general/system.py#139\[2m139[0m]8;;\
+[2;36m                       [0m         MainProcess system.py:[1;36m139[0m -        [2m             [0m
+[2;36m                       [0m         Determining the maximum number of  [2m             [0m
+[2;36m                       [0m         CPU cores to use                   [2m             [0m
+[2;36m2025-08-22 06:13:36 AM[0m[2;36m [0m[32mDEBUG   [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m06:13:36[0m AM - DEBUG -   ]8;id=198083;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainglobe_utils/general/system.py\[2msystem.py[0m]8;;\[2m:[0m]8;id=50363;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainglobe_utils/general/system.py#144\[2m144[0m]8;;\
+[2;36m                       [0m         MainProcess system.py:[1;36m144[0m - Number [2m             [0m
+[2;36m                       [0m         of CPU cores available is: [1;36m4[0m       [2m             [0m
+[2;36m                      [0m[2;36m [0m[32mDEBUG   [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m06:13:36[0m AM - DEBUG -   ]8;id=794985;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainglobe_utils/general/system.py\[2msystem.py[0m]8;;\[2m:[0m]8;id=592406;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainglobe_utils/general/system.py#171\[2m171[0m]8;;\
+[2;36m                       [0m         MainProcess system.py:[1;36m171[0m -        [2m             [0m
+[2;36m                       [0m         Setting number of processes to: [1;36m4[0m  [2m             [0m
+[2;36m                      [0m[2;36m [0m[34mINFO    [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m06:13:36[0m AM - INFO -       ]8;id=544700;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/main.py\[2mmain.py[0m]8;;\[2m:[0m]8;id=503243;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/main.py#55\[2m55[0m]8;;\
+[2;36m                       [0m         MainProcess main.py:[1;36m55[0m - Loading raw  [2m          [0m
+[2;36m                       [0m         image data                            [2m          [0m
+[2;36m                      [0m[2;36m [0m[32mDEBUG   [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m06:13:36[0m AM - DEBUG -      ]8;id=120226;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainglobe_utils/image_io/load.py\[2mload.py[0m]8;;\[2m:[0m]8;id=610653;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainglobe_utils/image_io/load.py#69\[2m69[0m]8;;\
+[2;36m                       [0m         MainProcess load.py:[1;36m69[0m - Data type    [2m          [0m
+[2;36m                       [0m         is: directory of files                [2m          [0m
+[2;36m                      [0m[2;36m [0m[32mDEBUG   [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m06:13:36[0m AM - DEBUG -   ]8;id=965239;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainglobe_utils/general/system.py\[2msystem.py[0m]8;;\[2m:[0m]8;id=468262;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainglobe_utils/general/system.py#139\[2m139[0m]8;;\
+[2;36m                       [0m         MainProcess system.py:[1;36m139[0m -        [2m             [0m
+[2;36m                       [0m         Determining the maximum number of  [2m             [0m
+[2;36m                       [0m         CPU cores to use                   [2m             [0m
+[2;36m                      [0m[2;36m [0m[32mDEBUG   [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m06:13:36[0m AM - DEBUG -   ]8;id=500372;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainglobe_utils/general/system.py\[2msystem.py[0m]8;;\[2m:[0m]8;id=796054;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainglobe_utils/general/system.py#144\[2m144[0m]8;;\
+[2;36m                       [0m         MainProcess system.py:[1;36m144[0m - Number [2m             [0m
+[2;36m                       [0m         of CPU cores available is: [1;36m4[0m       [2m             [0m
+[2;36m                      [0m[2;36m [0m[32mDEBUG   [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m06:13:36[0m AM - DEBUG -   ]8;id=774680;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainglobe_utils/general/system.py\[2msystem.py[0m]8;;\[2m:[0m]8;id=469250;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainglobe_utils/general/system.py#171\[2m171[0m]8;;\
+[2;36m                       [0m         MainProcess system.py:[1;36m171[0m -        [2m             [0m
+[2;36m                       [0m         Setting number of processes to: [1;36m4[0m  [2m             [0m
+[2;36m2025-08-22 06:25:04 AM[0m[2;36m [0m[34mINFO    [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m06:25:04[0m AM - INFO -        ]8;id=107126;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/backend/niftyreg/run.py\[2mrun.py[0m]8;;\[2m:[0m]8;id=16375;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/backend/niftyreg/run.py#85\[2m85[0m]8;;\
+[2;36m                       [0m         MainProcess run.py:[1;36m85[0m - Registering    [2m         [0m
+[2;36m                      [0m[2;36m [0m[34mINFO    [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m06:25:04[0m AM - INFO -       ]8;id=295951;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/backend/niftyreg/run.py\[2mrun.py[0m]8;;\[2m:[0m]8;id=328274;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/backend/niftyreg/run.py#103\[2m103[0m]8;;\
+[2;36m                       [0m         MainProcess run.py:[1;36m103[0m - Starting     [2m          [0m
+[2;36m                       [0m         affine registration                   [2m          [0m
+[2;36m2025-08-22 07:05:27 AM[0m[2;36m [0m[34mINFO    [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m07:05:27[0m AM - INFO -       ]8;id=706371;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/backend/niftyreg/run.py\[2mrun.py[0m]8;;\[2m:[0m]8;id=647195;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/backend/niftyreg/run.py#106\[2m106[0m]8;;\
+[2;36m                       [0m         MainProcess run.py:[1;36m106[0m - Starting     [2m          [0m
+[2;36m                       [0m         freeform registration                 [2m          [0m
+[2;36m2025-08-22 07:10:01 AM[0m[2;36m [0m[34mINFO    [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m07:10:01[0m AM - INFO -       ]8;id=267925;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/backend/niftyreg/run.py\[2mrun.py[0m]8;;\[2m:[0m]8;id=797017;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/backend/niftyreg/run.py#109\[2m109[0m]8;;\
+[2;36m                       [0m         MainProcess run.py:[1;36m109[0m - Starting     [2m          [0m
+[2;36m                       [0m         segmentation                          [2m          [0m
+[2;36m2025-08-22 07:10:48 AM[0m[2;36m [0m[34mINFO    [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m07:10:48[0m AM - INFO -       ]8;id=719876;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/backend/niftyreg/run.py\[2mrun.py[0m]8;;\[2m:[0m]8;id=380266;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/backend/niftyreg/run.py#112\[2m112[0m]8;;\
+[2;36m                       [0m         MainProcess run.py:[1;36m112[0m - Segmenting   [2m          [0m
+[2;36m                       [0m         hemispheres                           [2m          [0m
+[2;36m2025-08-22 07:11:18 AM[0m[2;36m [0m[34mINFO    [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m07:11:18[0m AM - INFO -       ]8;id=575132;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/backend/niftyreg/run.py\[2mrun.py[0m]8;;\[2m:[0m]8;id=656270;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/backend/niftyreg/run.py#115\[2m115[0m]8;;\
+[2;36m                       [0m         MainProcess run.py:[1;36m115[0m - Generating   [2m          [0m
+[2;36m                       [0m         inverse [1m([0msample to atlas[1m)[0m transforms  [2m          [0m
+[2;36m                      [0m[2;36m [0m[32mDEBUG   [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m07:11:18[0m AM -     ]8;id=114110;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/backend/niftyreg/registration.py\[2mregistration.py[0m]8;;\[2m:[0m]8;id=909757;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/backend/niftyreg/registration.py#133\[2m133[0m]8;;\
+[2;36m                       [0m         DEBUG - MainProcess          [2m                   [0m
+[2;36m                       [0m         registration.py:[1;36m133[0m -        [2m                   [0m
+[2;36m                       [0m         Generating inverse affine    [2m                   [0m
+[2;36m                       [0m         transform                    [2m                   [0m
+[2;36m                      [0m[2;36m [0m[32mDEBUG   [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m07:11:18[0m AM -     ]8;id=421878;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/backend/niftyreg/registration.py\[2mregistration.py[0m]8;;\[2m:[0m]8;id=108087;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/backend/niftyreg/registration.py#172\[2m172[0m]8;;\
+[2;36m                       [0m         DEBUG - MainProcess          [2m                   [0m
+[2;36m                       [0m         registration.py:[1;36m172[0m -        [2m                   [0m
+[2;36m                       [0m         Registering sample to atlas  [2m                   [0m
+[2;36m2025-08-22 07:18:28 AM[0m[2;36m [0m[34mINFO    [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m07:18:28[0m AM - INFO -       ]8;id=981313;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/backend/niftyreg/run.py\[2mrun.py[0m]8;;\[2m:[0m]8;id=640680;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/backend/niftyreg/run.py#118\[2m118[0m]8;;\
+[2;36m                       [0m         MainProcess run.py:[1;36m118[0m - Transforming [2m          [0m
+[2;36m                       [0m         image to standard space               [2m          [0m
+[2;36m2025-08-22 07:19:28 AM[0m[2;36m [0m[34mINFO    [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m07:19:28[0m AM - INFO -       ]8;id=129811;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/backend/niftyreg/run.py\[2mrun.py[0m]8;;\[2m:[0m]8;id=570301;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/backend/niftyreg/run.py#124\[2m124[0m]8;;\
+[2;36m                       [0m         MainProcess run.py:[1;36m124[0m - Generating   [2m          [0m
+[2;36m                       [0m         deformation field                     [2m          [0m
+[2;36m                      [0m[2;36m [0m[34mINFO    [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m07:19:28[0m AM -     ]8;id=980509;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/backend/niftyreg/registration.py\[2mregistration.py[0m]8;;\[2m:[0m]8;id=175201;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/backend/niftyreg/registration.py#280\[2m280[0m]8;;\
+[2;36m                       [0m         INFO - MainProcess           [2m                   [0m
+[2;36m                       [0m         registration.py:[1;36m280[0m -        [2m                   [0m
+[2;36m                       [0m         Generating deformation field [2m                   [0m
+[2;36m2025-08-22 07:19:49 AM[0m[2;36m [0m[34mINFO    [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m07:19:49[0m AM - INFO -       ]8;id=233328;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/backend/niftyreg/run.py\[2mrun.py[0m]8;;\[2m:[0m]8;id=548528;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/backend/niftyreg/run.py#127\[2m127[0m]8;;\
+[2;36m                       [0m         MainProcess run.py:[1;36m127[0m - Exporting    [2m          [0m
+[2;36m                       [0m         images as tiff                        [2m          [0m
+[2;36m                      [0m[2;36m [0m[32mDEBUG   [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m07:19:49[0m AM - DEBUG -     ]8;id=892511;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainglobe_utils/image_io/load.py\[2mload.py[0m]8;;\[2m:[0m]8;id=509617;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainglobe_utils/image_io/load.py#105\[2m105[0m]8;;\
+[2;36m                       [0m         MainProcess load.py:[1;36m105[0m - Data type  [2m           [0m
+[2;36m                       [0m         is: NifTI                            [2m           [0m
+[2;36m                      [0m[2;36m [0m[34mINFO    [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m07:19:49[0m AM -   ]8;id=228806;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/nibabel/batteryrunners.py\[2mbatteryrunners.py[0m]8;;\[2m:[0m]8;id=669405;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/nibabel/batteryrunners.py#268\[2m268[0m]8;;\
+[2;36m                       [0m         INFO - MainProcess         [2m                     [0m
+[2;36m                       [0m         batteryrunners.py:[1;36m268[0m -    [2m                     [0m
+[2;36m                       [0m         pixdim[1m[[0m[1;36m0[0m[1m][0m [1m([0mqfac[1m)[0m should be [2m                     [0m
+[2;36m                       [0m         [1;36m1[0m [1m([0mdefault[1m)[0m or [1;36m-1[0m; setting [2m                     [0m
+[2;36m                       [0m         qfac to [1;36m1[0m                  [2m                     [0m
+[2;36m2025-08-22 07:20:46 AM[0m[2;36m [0m[32mDEBUG   [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m07:20:46[0m AM - DEBUG -     ]8;id=189487;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainglobe_utils/image_io/load.py\[2mload.py[0m]8;;\[2m:[0m]8;id=382012;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainglobe_utils/image_io/load.py#105\[2m105[0m]8;;\
+[2;36m                       [0m         MainProcess load.py:[1;36m105[0m - Data type  [2m           [0m
+[2;36m                       [0m         is: NifTI                            [2m           [0m
+[2;36m                      [0m[2;36m [0m[34mINFO    [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m07:20:46[0m AM -   ]8;id=621386;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/nibabel/batteryrunners.py\[2mbatteryrunners.py[0m]8;;\[2m:[0m]8;id=68321;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/nibabel/batteryrunners.py#268\[2m268[0m]8;;\
+[2;36m                       [0m         INFO - MainProcess         [2m                     [0m
+[2;36m                       [0m         batteryrunners.py:[1;36m268[0m -    [2m                     [0m
+[2;36m                       [0m         pixdim[1m[[0m[1;36m0[0m[1m][0m [1m([0mqfac[1m)[0m should be [2m                     [0m
+[2;36m                       [0m         [1;36m1[0m [1m([0mdefault[1m)[0m or [1;36m-1[0m; setting [2m                     [0m
+[2;36m                       [0m         qfac to [1;36m1[0m                  [2m                     [0m
+[2;36m2025-08-22 07:21:07 AM[0m[2;36m [0m[32mDEBUG   [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m07:21:07[0m AM - DEBUG -     ]8;id=95279;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainglobe_utils/image_io/load.py\[2mload.py[0m]8;;\[2m:[0m]8;id=284852;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainglobe_utils/image_io/load.py#105\[2m105[0m]8;;\
+[2;36m                       [0m         MainProcess load.py:[1;36m105[0m - Data type  [2m           [0m
+[2;36m                       [0m         is: NifTI                            [2m           [0m
+[2;36m                      [0m[2;36m [0m[34mINFO    [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m07:21:07[0m AM -   ]8;id=429679;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/nibabel/batteryrunners.py\[2mbatteryrunners.py[0m]8;;\[2m:[0m]8;id=482017;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/nibabel/batteryrunners.py#268\[2m268[0m]8;;\
+[2;36m                       [0m         INFO - MainProcess         [2m                     [0m
+[2;36m                       [0m         batteryrunners.py:[1;36m268[0m -    [2m                     [0m
+[2;36m                       [0m         pixdim[1m[[0m[1;36m0[0m[1m][0m [1m([0mqfac[1m)[0m should be [2m                     [0m
+[2;36m                       [0m         [1;36m1[0m [1m([0mdefault[1m)[0m or [1;36m-1[0m; setting [2m                     [0m
+[2;36m                       [0m         qfac to [1;36m1[0m                  [2m                     [0m
+[2;36m2025-08-22 07:21:39 AM[0m[2;36m [0m[32mDEBUG   [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m07:21:39[0m AM - DEBUG -     ]8;id=887797;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainglobe_utils/image_io/load.py\[2mload.py[0m]8;;\[2m:[0m]8;id=292701;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainglobe_utils/image_io/load.py#105\[2m105[0m]8;;\
+[2;36m                       [0m         MainProcess load.py:[1;36m105[0m - Data type  [2m           [0m
+[2;36m                       [0m         is: NifTI                            [2m           [0m
+[2;36m                      [0m[2;36m [0m[34mINFO    [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m07:21:39[0m AM -   ]8;id=111702;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/nibabel/batteryrunners.py\[2mbatteryrunners.py[0m]8;;\[2m:[0m]8;id=193338;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/nibabel/batteryrunners.py#268\[2m268[0m]8;;\
+[2;36m                       [0m         INFO - MainProcess         [2m                     [0m
+[2;36m                       [0m         batteryrunners.py:[1;36m268[0m -    [2m                     [0m
+[2;36m                       [0m         pixdim[1m[[0m[1;36m0[0m[1m][0m [1m([0mqfac[1m)[0m should be [2m                     [0m
+[2;36m                       [0m         [1;36m1[0m [1m([0mdefault[1m)[0m or [1;36m-1[0m; setting [2m                     [0m
+[2;36m                       [0m         qfac to [1;36m1[0m                  [2m                     [0m
+[2;36m2025-08-22 07:36:16 AM[0m[2;36m [0m[34mINFO    [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m07:36:16[0m AM - INFO -       ]8;id=152054;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/backend/niftyreg/run.py\[2mrun.py[0m]8;;\[2m:[0m]8;id=756343;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/backend/niftyreg/run.py#175\[2m175[0m]8;;\
+[2;36m                       [0m         MainProcess run.py:[1;36m175[0m - Saving       [2m          [0m
+[2;36m                       [0m         additional downsampled images         [2m          [0m
+[2;36m                      [0m[2;36m [0m[34mINFO    [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m07:36:16[0m AM - INFO -       ]8;id=616247;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/backend/niftyreg/run.py\[2mrun.py[0m]8;;\[2m:[0m]8;id=473885;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/backend/niftyreg/run.py#177\[2m177[0m]8;;\
+[2;36m                       [0m         MainProcess run.py:[1;36m177[0m - Processing:  [2m          [0m
+[2;36m                       [0m         [1;36m2[0m                                     [2m          [0m
+[2;36m                      [0m[2;36m [0m[32mDEBUG   [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m07:36:16[0m AM - DEBUG -      ]8;id=896168;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainglobe_utils/image_io/load.py\[2mload.py[0m]8;;\[2m:[0m]8;id=911283;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainglobe_utils/image_io/load.py#69\[2m69[0m]8;;\
+[2;36m                       [0m         MainProcess load.py:[1;36m69[0m - Data type    [2m          [0m
+[2;36m                       [0m         is: directory of files                [2m          [0m
+[2;36m                      [0m[2;36m [0m[32mDEBUG   [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m07:36:16[0m AM - DEBUG -   ]8;id=171193;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainglobe_utils/general/system.py\[2msystem.py[0m]8;;\[2m:[0m]8;id=441196;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainglobe_utils/general/system.py#139\[2m139[0m]8;;\
+[2;36m                       [0m         MainProcess system.py:[1;36m139[0m -        [2m             [0m
+[2;36m                       [0m         Determining the maximum number of  [2m             [0m
+[2;36m                       [0m         CPU cores to use                   [2m             [0m
+[2;36m                      [0m[2;36m [0m[32mDEBUG   [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m07:36:16[0m AM - DEBUG -   ]8;id=530584;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainglobe_utils/general/system.py\[2msystem.py[0m]8;;\[2m:[0m]8;id=933308;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainglobe_utils/general/system.py#144\[2m144[0m]8;;\
+[2;36m                       [0m         MainProcess system.py:[1;36m144[0m - Number [2m             [0m
+[2;36m                       [0m         of CPU cores available is: [1;36m4[0m       [2m             [0m
+[2;36m                      [0m[2;36m [0m[32mDEBUG   [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m07:36:16[0m AM - DEBUG -   ]8;id=205731;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainglobe_utils/general/system.py\[2msystem.py[0m]8;;\[2m:[0m]8;id=625415;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainglobe_utils/general/system.py#171\[2m171[0m]8;;\
+[2;36m                       [0m         MainProcess system.py:[1;36m171[0m -        [2m             [0m
+[2;36m                       [0m         Setting number of processes to: [1;36m4[0m  [2m             [0m
+[2;36m2025-08-22 07:41:13 AM[0m[2;36m [0m[34mINFO    [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m07:41:13[0m AM - INFO -       ]8;id=201750;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/backend/niftyreg/run.py\[2mrun.py[0m]8;;\[2m:[0m]8;id=632493;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/backend/niftyreg/run.py#222\[2m222[0m]8;;\
+[2;36m                       [0m         MainProcess run.py:[1;36m222[0m - Transforming [2m          [0m
+[2;36m                       [0m         to standard space                     [2m          [0m
+[2;36m2025-08-22 07:42:07 AM[0m[2;36m [0m[32mDEBUG   [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m07:42:07[0m AM - DEBUG -     ]8;id=426829;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainglobe_utils/image_io/load.py\[2mload.py[0m]8;;\[2m:[0m]8;id=947045;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainglobe_utils/image_io/load.py#105\[2m105[0m]8;;\
+[2;36m                       [0m         MainProcess load.py:[1;36m105[0m - Data type  [2m           [0m
+[2;36m                       [0m         is: NifTI                            [2m           [0m
+[2;36m                      [0m[2;36m [0m[34mINFO    [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m07:42:07[0m AM -   ]8;id=810493;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/nibabel/batteryrunners.py\[2mbatteryrunners.py[0m]8;;\[2m:[0m]8;id=155507;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/nibabel/batteryrunners.py#268\[2m268[0m]8;;\
+[2;36m                       [0m         INFO - MainProcess         [2m                     [0m
+[2;36m                       [0m         batteryrunners.py:[1;36m268[0m -    [2m                     [0m
+[2;36m                       [0m         pixdim[1m[[0m[1;36m0[0m[1m][0m [1m([0mqfac[1m)[0m should be [2m                     [0m
+[2;36m                       [0m         [1;36m1[0m [1m([0mdefault[1m)[0m or [1;36m-1[0m; setting [2m                     [0m
+[2;36m                       [0m         qfac to [1;36m1[0m                  [2m                     [0m
+[2;36m2025-08-22 07:42:36 AM[0m[2;36m [0m[34mINFO    [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m07:42:36[0m AM - INFO -       ]8;id=695144;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/main.py\[2mmain.py[0m]8;;\[2m:[0m]8;id=33659;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/main.py#95\[2m95[0m]8;;\
+[2;36m                       [0m         MainProcess main.py:[1;36m95[0m - Calculating  [2m          [0m
+[2;36m                       [0m         volumes of each brain area            [2m          [0m
+[2;36m                      [0m[2;36m [0m[32mDEBUG   [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m07:42:36[0m AM - DEBUG -      ]8;id=469093;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainglobe_utils/image_io/load.py\[2mload.py[0m]8;;\[2m:[0m]8;id=496254;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainglobe_utils/image_io/load.py#93\[2m93[0m]8;;\
+[2;36m                       [0m         MainProcess load.py:[1;36m93[0m - Data type    [2m          [0m
+[2;36m                       [0m         is: tif stack                         [2m          [0m
+[2;36m                      [0m[2;36m [0m[32mDEBUG   [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m07:42:36[0m AM - DEBUG -     ]8;id=483977;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainglobe_utils/image_io/load.py\[2mload.py[0m]8;;\[2m:[0m]8;id=280638;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainglobe_utils/image_io/load.py#152\[2m152[0m]8;;\
+[2;36m                       [0m         MainProcess load.py:[1;36m152[0m - Loading:   [2m           [0m
+[2;36m                       [0m         ..[35m/data/preprocessed_data/brainreg/l[0m [2m           [0m
+[2;36m                       [0m         [35my07/allen_mouse_10um/[0m[95mregistered_atla[0m [2m           [0m
+[2;36m                       [0m         [95ms.tiff[0m                               [2m           [0m
+[2;36m2025-08-22 07:43:01 AM[0m[2;36m [0m[32mDEBUG   [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m07:43:01[0m AM - DEBUG -      ]8;id=161848;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainglobe_utils/image_io/load.py\[2mload.py[0m]8;;\[2m:[0m]8;id=174511;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainglobe_utils/image_io/load.py#93\[2m93[0m]8;;\
+[2;36m                       [0m         MainProcess load.py:[1;36m93[0m - Data type    [2m          [0m
+[2;36m                       [0m         is: tif stack                         [2m          [0m
+[2;36m                      [0m[2;36m [0m[32mDEBUG   [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m07:43:01[0m AM - DEBUG -     ]8;id=631830;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainglobe_utils/image_io/load.py\[2mload.py[0m]8;;\[2m:[0m]8;id=246051;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainglobe_utils/image_io/load.py#152\[2m152[0m]8;;\
+[2;36m                       [0m         MainProcess load.py:[1;36m152[0m - Loading:   [2m           [0m
+[2;36m                       [0m         ..[35m/data/preprocessed_data/brainreg/l[0m [2m           [0m
+[2;36m                       [0m         [35my07/allen_mouse_10um/[0m[95mregistered_hemi[0m [2m           [0m
+[2;36m                       [0m         [95mspheres.tiff[0m                         [2m           [0m
+[2;36m2025-08-22 07:44:47 AM[0m[2;36m [0m[31mWARNING [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m07:44:47[0m AM - WARNING -  ]8;id=45359;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/utils/volume.py\[2mvolume.py[0m]8;;\[2m:[0m]8;id=491980;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/utils/volume.py#90\[2m90[0m]8;;\
+[2;36m                       [0m         MainProcess volume.py:[1;36m90[0m - Atlas    [2m            [0m
+[2;36m                       [0m         value: [1;36m83[0m not found in registered   [2m            [0m
+[2;36m                       [0m         atlas. Setting registered volume to [2m            [0m
+[2;36m                       [0m         [1;36m0[0m.                                  [2m            [0m
+[2;36m                      [0m[2;36m [0m[31mWARNING [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m07:44:47[0m AM - WARNING -  ]8;id=453352;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/utils/volume.py\[2mvolume.py[0m]8;;\[2m:[0m]8;id=587610;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/utils/volume.py#90\[2m90[0m]8;;\
+[2;36m                       [0m         MainProcess volume.py:[1;36m90[0m - Atlas    [2m            [0m
+[2;36m                       [0m         value: [1;36m91[0m not found in registered   [2m            [0m
+[2;36m                       [0m         atlas. Setting registered volume to [2m            [0m
+[2;36m                       [0m         [1;36m0[0m.                                  [2m            [0m
+[2;36m                      [0m[2;36m [0m[31mWARNING [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m07:44:47[0m AM - WARNING -  ]8;id=518576;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/utils/volume.py\[2mvolume.py[0m]8;;\[2m:[0m]8;id=830426;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/utils/volume.py#90\[2m90[0m]8;;\
+[2;36m                       [0m         MainProcess volume.py:[1;36m90[0m - Atlas    [2m            [0m
+[2;36m                       [0m         value: [1;36m225[0m not found in registered  [2m            [0m
+[2;36m                       [0m         atlas. Setting registered volume to [2m            [0m
+[2;36m                       [0m         [1;36m0[0m.                                  [2m            [0m
+[2;36m                      [0m[2;36m [0m[31mWARNING [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m07:44:47[0m AM - WARNING -  ]8;id=539630;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/utils/volume.py\[2mvolume.py[0m]8;;\[2m:[0m]8;id=363661;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/utils/volume.py#90\[2m90[0m]8;;\
+[2;36m                       [0m         MainProcess volume.py:[1;36m90[0m - Atlas    [2m            [0m
+[2;36m                       [0m         value: [1;36m667[0m not found in registered  [2m            [0m
+[2;36m                       [0m         atlas. Setting registered volume to [2m            [0m
+[2;36m                       [0m         [1;36m0[0m.                                  [2m            [0m
+[2;36m                      [0m[2;36m [0m[31mWARNING [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m07:44:47[0m AM - WARNING -  ]8;id=637710;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/utils/volume.py\[2mvolume.py[0m]8;;\[2m:[0m]8;id=921644;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/utils/volume.py#90\[2m90[0m]8;;\
+[2;36m                       [0m         MainProcess volume.py:[1;36m90[0m - Atlas    [2m            [0m
+[2;36m                       [0m         value: [1;36m765[0m not found in registered  [2m            [0m
+[2;36m                       [0m         atlas. Setting registered volume to [2m            [0m
+[2;36m                       [0m         [1;36m0[0m.                                  [2m            [0m
+[2;36m                      [0m[2;36m [0m[31mWARNING [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m07:44:47[0m AM - WARNING -  ]8;id=264593;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/utils/volume.py\[2mvolume.py[0m]8;;\[2m:[0m]8;id=820124;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/utils/volume.py#90\[2m90[0m]8;;\
+[2;36m                       [0m         MainProcess volume.py:[1;36m90[0m - Atlas    [2m            [0m
+[2;36m                       [0m         value: [1;36m781[0m not found in registered  [2m            [0m
+[2;36m                       [0m         atlas. Setting registered volume to [2m            [0m
+[2;36m                       [0m         [1;36m0[0m.                                  [2m            [0m
+[2;36m                      [0m[2;36m [0m[31mWARNING [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m07:44:47[0m AM - WARNING -  ]8;id=162803;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/utils/volume.py\[2mvolume.py[0m]8;;\[2m:[0m]8;id=995158;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/utils/volume.py#90\[2m90[0m]8;;\
+[2;36m                       [0m         MainProcess volume.py:[1;36m90[0m - Atlas    [2m            [0m
+[2;36m                       [0m         value: [1;36m1051[0m not found in registered [2m            [0m
+[2;36m                       [0m         atlas. Setting registered volume to [2m            [0m
+[2;36m                       [0m         [1;36m0[0m.                                  [2m            [0m
+[2;36m                      [0m[2;36m [0m[31mWARNING [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m07:44:47[0m AM - WARNING -  ]8;id=196553;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/utils/volume.py\[2mvolume.py[0m]8;;\[2m:[0m]8;id=173888;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/utils/volume.py#90\[2m90[0m]8;;\
+[2;36m                       [0m         MainProcess volume.py:[1;36m90[0m - Atlas    [2m            [0m
+[2;36m                       [0m         value: [1;36m589508455[0m not found in       [2m            [0m
+[2;36m                       [0m         registered atlas. Setting           [2m            [0m
+[2;36m                       [0m         registered volume to [1;36m0[0m.             [2m            [0m
+[2;36m                      [0m[2;36m [0m[34mINFO    [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m07:44:47[0m AM - INFO -      ]8;id=212342;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/main.py\[2mmain.py[0m]8;;\[2m:[0m]8;id=69954;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/main.py#107\[2m107[0m]8;;\
+[2;36m                       [0m         MainProcess main.py:[1;36m107[0m - Generating [2m           [0m
+[2;36m                       [0m         boundary image                       [2m           [0m
+[2;36m                      [0m[2;36m [0m[32mDEBUG   [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m07:44:47[0m AM - DEBUG -      ]8;id=587501;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainglobe_utils/image_io/load.py\[2mload.py[0m]8;;\[2m:[0m]8;id=91319;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainglobe_utils/image_io/load.py#93\[2m93[0m]8;;\
+[2;36m                       [0m         MainProcess load.py:[1;36m93[0m - Data type    [2m          [0m
+[2;36m                       [0m         is: tif stack                         [2m          [0m
+[2;36m                      [0m[2;36m [0m[32mDEBUG   [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m07:44:47[0m AM - DEBUG -     ]8;id=63308;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainglobe_utils/image_io/load.py\[2mload.py[0m]8;;\[2m:[0m]8;id=903788;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainglobe_utils/image_io/load.py#152\[2m152[0m]8;;\
+[2;36m                       [0m         MainProcess load.py:[1;36m152[0m - Loading:   [2m           [0m
+[2;36m                       [0m         ..[35m/data/preprocessed_data/brainreg/l[0m [2m           [0m
+[2;36m                       [0m         [35my07/allen_mouse_10um/[0m[95mregistered_atla[0m [2m           [0m
+[2;36m                       [0m         [95ms.tiff[0m                               [2m           [0m
+[2;36m2025-08-22 07:45:18 AM[0m[2;36m [0m[32mDEBUG   [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m07:45:18[0m AM - DEBUG  ]8;id=789480;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/utils/boundaries.py\[2mboundaries.py[0m]8;;\[2m:[0m]8;id=814154;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/utils/boundaries.py#21\[2m21[0m]8;;\
+[2;36m                       [0m         - MainProcess boundaries.py:[1;36m21[0m  [2m                [0m
+[2;36m                       [0m         - Saving segmentation boundary  [2m                [0m
+[2;36m                       [0m         image                           [2m                [0m
+[2;36m2025-08-22 07:45:19 AM[0m[2;36m [0m[34mINFO    [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m07:45:19[0m AM - INFO -      ]8;id=100119;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/main.py\[2mmain.py[0m]8;;\[2m:[0m]8;id=373008;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/main.py#110\[2m110[0m]8;;\
+[2;36m                       [0m         MainProcess main.py:[1;36m110[0m - brainreg   [2m           [0m
+[2;36m                       [0m         completed. Results can be found      [2m           [0m
+[2;36m                       [0m         here:                                [2m           [0m
+[2;36m                       [0m         ..[35m/data/preprocessed_data/brainreg/l[0m [2m           [0m
+[2;36m                       [0m         [35my07/[0m[95mallen_mouse_10um[0m                 [2m           [0m
+[2;36m                      [0m[2;36m [0m[34mINFO    [0m [1;36m2025[0m-[1;36m08[0m-[1;36m22[0m [1;92m07:45:19[0m AM - INFO -       ]8;id=801762;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/cli.py\[2mcli.py[0m]8;;\[2m:[0m]8;id=209902;file:///ceph/apps/ubuntu-20/packages/brainglobe/2024-03-01/lib/python3.10/site-packages/brainreg/core/cli.py#251\[2m251[0m]8;;\
+[2;36m                       [0m         MainProcess cli.py:[1;36m251[0m - Finished.    [2m          [0m
+[2;36m                       [0m         Total time taken: [1;92m1:31:43[0m.[1;36m755134[0m      [2m          [0m

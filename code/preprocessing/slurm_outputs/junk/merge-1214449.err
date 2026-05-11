@@ -1,0 +1,17 @@
+/var/lib/slurm/slurmd/job1214449/slurm_script: line 16: module: command not found
+Traceback (most recent call last):
+  File "/ceph/behrens/adam_harris/Taskspace_abstraction_lEC/code/merge_preprocess_kilosort_spikeinterface.py", line 502, in <module>
+    preprocessed_merged = preprocessed_merged.save(folder=f"/ceph/behrens/adam_harris/Taskspace_abstraction_lEC/data/preprocessed/ephys/{mouse}/{dates_string}_preprocessed/binary", format='binary', **job_kwargs)
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nfs/nhome/live/aharris/.conda/envs/maze_ephys/lib/python3.12/site-packages/spikeinterface/core/base.py", line 877, in save
+    loaded_extractor = self.save_to_folder(**kwargs)
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nfs/nhome/live/aharris/.conda/envs/maze_ephys/lib/python3.12/site-packages/spikeinterface/core/base.py", line 984, in save_to_folder
+    cached = self._save(folder=folder, verbose=verbose, **save_kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nfs/nhome/live/aharris/.conda/envs/maze_ephys/lib/python3.12/site-packages/spikeinterface/core/baserecording.py", line 555, in _save
+    write_binary_recording(self, file_paths=file_paths, dtype=dtype, verbose=verbose, **job_kwargs)
+  File "/nfs/nhome/live/aharris/.conda/envs/maze_ephys/lib/python3.12/site-packages/spikeinterface/core/recording_tools.py", line 135, in write_binary_recording
+    with open(file_path, "wb+") as file:
+         ^^^^^^^^^^^^^^^^^^^^^^
+OSError: [Errno 122] Disk quota exceeded

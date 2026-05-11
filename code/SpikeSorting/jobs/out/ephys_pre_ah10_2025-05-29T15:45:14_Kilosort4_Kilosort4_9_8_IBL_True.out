@@ -1,0 +1,37 @@
+Starting ephys preprocessing...
+Checking ../data/preprocessed_data/spikesorting/ah10/config_3/2025-05-29T15:45:14 for DONE.txt
+Not DONE... preprocessing data
+Assigning bad channels...
+No outside_brain channels found on shank 1
+No noisey channels found on shank 1
+1 dead channel(s) found on shank 1
+No outside_brain channels found on shank 2
+No noisey channels found on shank 2
+2 dead channel(s) found on shank 2
+No outside_brain channels found on shank 3
+No noisey channels found on shank 3
+No dead channels found on shank 3
+No outside_brain channels found on shank 4
+No noisey channels found on shank 4
+No dead channels found on shank 4
+saving preprocessed traces for visual inspection
+Caching preprocessed data
+write_binary_recording 
+n_jobs=80 - samples_per_chunk=30,000 - chunk_memory=21.80 MiB - total_memory=1.70 GiB - chunk_duration=1.00s
+running spikesorting
+running Kilosort4
+Skipping common average reference.
+kilosort4 run time 434.90s
+Computing quality metrics...
+calculating templates
+calculating noise levels
+calculating correlograms
+calculating unit locations
+calculating spike amplitudes
+calculating spike locations
+calculating template similarity
+computing quality metrics df
+exporting cluster reports
+Found 86 single units, passing quality control
+completed ephys preprocessing for ah10 2025-05-29T15:45:14
+Done for all probes

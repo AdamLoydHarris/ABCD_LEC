@@ -1,0 +1,12 @@
+/var/lib/slurm/slurmd/job1214461/slurm_script: line 16: module: command not found
+Traceback (most recent call last):
+  File "/ceph/behrens/adam_harris/Taskspace_abstraction_lEC/code/merge_preprocess_kilosort_spikeinterface.py", line 502, in <module>
+    preprocessed_merged = preprocessed_merged.save(folder=f"/ceph/behrens/adam_harris/Taskspace_abstraction_lEC/data/preprocessed/ephys/{mouse}/{dates_string}_preprocessed/binary", format='binary', **job_kwargs)
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nfs/nhome/live/aharris/.conda/envs/maze_ephys/lib/python3.12/site-packages/spikeinterface/core/base.py", line 877, in save
+    loaded_extractor = self.save_to_folder(**kwargs)
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nfs/nhome/live/aharris/.conda/envs/maze_ephys/lib/python3.12/site-packages/spikeinterface/core/base.py", line 968, in save_to_folder
+    assert not folder.exists(), f"folder {folder} already exists, choose another name or use overwrite=True"
+           ^^^^^^^^^^^^^^^^^^^
+AssertionError: folder /ceph/behrens/adam_harris/Taskspace_abstraction_lEC/data/preprocessed/ephys/ly05/2025-06-13_2025-06-15_preprocessed/binary already exists, choose another name or use overwrite=True

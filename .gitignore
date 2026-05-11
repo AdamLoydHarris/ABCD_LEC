@@ -1,0 +1,9 @@
+/*
+!.gitignore
+!README.md
+!/code
+
+# Notebooks with large embedded outputs
+code/LEC_sploratory_analysis_with_glm_and_population.ipynb
+code/PFC_sploratory_analysis_with_glm_and_population.ipynb
+code/mEC_task_correlations copy.ipynb
