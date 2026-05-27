@@ -1,6 +1,5 @@
 """
 Library for submitting ephys preprocessing jobs to the HPC. For main spike-sorting library see spikesort_session.py
-@peterdoohan
 """
 
 # %% Imports
