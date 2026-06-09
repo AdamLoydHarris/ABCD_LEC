@@ -389,6 +389,13 @@ def prepare_session_data(session_data, gp_n_bins=10):
         dist_from = np.zeros(max_len)
         dist_to = np.zeros(max_len)
 
+    # Distance-based goal progress: fraction of the inter-reward path travelled.
+    # NaN at samples where the animal didn't move at all in the interval
+    # (total path = 0); zero-mask them downstream.
+    total_path = dist_from + dist_to
+    with np.errstate(divide='ignore', invalid='ignore'):
+        gp_distance_cont = np.where(total_path > 0, dist_from / total_path, np.nan)
+
     return {
         'FR': FR,
         'Locs': Locs,
@@ -397,6 +404,7 @@ def prepare_session_data(session_data, gp_n_bins=10):
         'Acc': Acc,
         'State': State,
         'GP_binned': GP_binned,
+        'GP_dist_continuous': gp_distance_cont,
         'time_from_reward': time_from,
         'time_to_reward': time_to,
         'dist_from_reward': dist_from,
@@ -467,13 +475,14 @@ def apply_onehot(values, edges):
 # resolution near the low end of the range (i.e. near the reward event for
 # reward-relative variables); 'linear' spreads resolution evenly.
 _RAISED_COSINE_SPACING = {
-    'speed':                'linear',
-    'acceleration':         'linear',
-    'goal_progress':        'linear',
-    'time_from_reward':     'log',
-    'time_to_reward':       'log',
-    'distance_from_reward': 'log',
-    'distance_to_reward':   'log',
+    'speed':                  'linear',
+    'acceleration':           'linear',
+    'goal_progress':          'linear',
+    'goal_progress_distance': 'linear',
+    'time_from_reward':       'log',
+    'time_to_reward':         'log',
+    'distance_from_reward':   'log',
+    'distance_to_reward':     'log',
 }
 
 
@@ -569,6 +578,32 @@ analysis_regressor_names = [
 ]
 
 
+# Optional regressors. NOT in `analysis_regressor_names`, so
+# `regressors_to_include=None` continues to give the 9-regressor default
+# (backwards-compatible). To include one, list it explicitly in
+# `regressors_to_include`. `goal_progress_distance` is the path-length analogue
+# of time-based `goal_progress`: progress through an inter-reward interval
+# measured by integrated path (`dist_from / (dist_from + dist_to)`) rather than
+# elapsed time. Shares `gp_n_bins` with time-GP → automatically column-matched.
+_OPTIONAL_REGRESSORS = ['goal_progress_distance']
+_ALL_REGRESSORS = analysis_regressor_names + _OPTIONAL_REGRESSORS
+
+# Canonical column ordering when a fit includes a mix of default + optional
+# regressors. Distance-GP sits adjacent to time-GP for semantic clarity.
+_CANONICAL_ORDER = [
+    'place',
+    'head_direction',
+    'goal_progress',
+    'goal_progress_distance',
+    'speed',
+    'acceleration',
+    'time_from_reward',
+    'time_to_reward',
+    'distance_from_reward',
+    'distance_to_reward',
+]
+
+
 # User-facing aliases → canonical names. Lets users type "time_since_reward"
 # instead of "time_from_reward" (clearer phrasing, same underlying variable).
 _REGRESSOR_NAME_ALIASES = {
@@ -580,15 +615,16 @@ _REGRESSOR_NAME_ALIASES = {
 # Pretty display labels for plots / printouts. Falls back to the canonical name
 # if a key is missing.
 _REGRESSOR_DISPLAY_NAMES = {
-    'place':                'place',
-    'head_direction':       'head direction',
-    'goal_progress':        'goal progress',
-    'speed':                'speed',
-    'acceleration':         'acceleration',
-    'time_from_reward':     'time since reward',
-    'time_to_reward':       'time to reward',
-    'distance_from_reward': 'distance since reward',
-    'distance_to_reward':   'distance to reward',
+    'place':                  'place',
+    'head_direction':         'head direction',
+    'goal_progress':          'goal progress',
+    'goal_progress_distance': 'goal progress (distance)',
+    'speed':                  'speed',
+    'acceleration':           'acceleration',
+    'time_from_reward':       'time since reward',
+    'time_to_reward':         'time to reward',
+    'distance_from_reward':   'distance since reward',
+    'distance_to_reward':     'distance to reward',
 }
 
 
@@ -626,9 +662,12 @@ def _resolve_regressor_groups(regressors_to_include, gp_n_bins=10,
                             room for the intercept. Total cols at gp_n_bins=10:
                             1 + 20 + 35 + 9 + 6·9 = 119 (full rank).
     """
-    # Per-regressor column counts, with goal_progress overridden by gp_n_bins.
+    # Per-regressor column counts. Defaults come from the 9-regressor
+    # `regressor_groups`; optional regressors (e.g. `goal_progress_distance`)
+    # are not in that map, so add them explicitly.
     n_cols_per = {name: len(regressor_groups[name]) for name in analysis_regressor_names}
     n_cols_per['goal_progress'] = gp_n_bins
+    n_cols_per['goal_progress_distance'] = gp_n_bins  # shares the gp_n_bins knob
     if parameterization == 'reference_coded':
         n_cols_per = {k: v - 1 for k, v in n_cols_per.items()}
     elif parameterization != 'all_bins':
@@ -640,16 +679,17 @@ def _resolve_regressor_groups(regressors_to_include, gp_n_bins=10,
             return regressor_groups, list(analysis_regressor_names)
         ordered = list(analysis_regressor_names)
     else:
-        # Map aliases → canonical names
+        # Map aliases → canonical names; validate against the full set
+        # (default + optional regressors like goal_progress_distance).
         resolved = [_REGRESSOR_NAME_ALIASES.get(r, r) for r in regressors_to_include]
 
-        invalid = [r for r in resolved if r not in analysis_regressor_names]
+        invalid = [r for r in resolved if r not in _ALL_REGRESSORS]
         if invalid:
             raise ValueError(f"Unknown regressor names: {invalid}. "
-                             f"Valid names: {analysis_regressor_names} "
+                             f"Valid names: {_ALL_REGRESSORS} "
                              f"(aliases: {list(_REGRESSOR_NAME_ALIASES.keys())})")
 
-        ordered = [r for r in analysis_regressor_names if r in resolved]
+        ordered = [r for r in _CANONICAL_ORDER if r in resolved]
 
     local = {}
     cursor = 1 if parameterization == 'reference_coded' else 0
@@ -786,6 +826,7 @@ def run_glm_analysis(mouse_recdays, data_dic,
         all_tf, all_tt       = [], []
         all_df, all_dt       = [], []
         all_locs, all_hd, all_gp = [], [], []
+        all_gpd              = []  # distance-based goal progress (continuous 0–1, NaN where no motion)
         session_filters = []  # (session, node_filter) for reconstructing FR
 
         for session in sessions_for_glm:
@@ -800,6 +841,7 @@ def run_glm_analysis(mouse_recdays, data_dic,
             all_locs.append(prep['Locs'][nf])
             all_hd.append(prep['HD'][nf])
             all_gp.append(prep['GP_binned'][nf])
+            all_gpd.append(prep['GP_dist_continuous'][nf])
             session_filters.append((session, nf))
 
         speed_all = np.concatenate(all_speed)
@@ -811,6 +853,7 @@ def run_glm_analysis(mouse_recdays, data_dic,
         locs_all  = np.concatenate(all_locs).astype(int)
         hd_all    = np.concatenate(all_hd)
         gp_all    = np.concatenate(all_gp)
+        gpd_all   = np.concatenate(all_gpd)
 
         # ----------------------------------------------------------------
         # Decile edges from all available data
@@ -842,6 +885,15 @@ def run_glm_analysis(mouse_recdays, data_dic,
         if continuous_basis == 'onehot':
             # GP: gp_n_bins equal-width bins → gp_n_bins cols
             GP_enc = (gp_all[:, None] == np.arange(0, gp_n_bins)).astype(float)
+            # Distance-based GP: same gp_n_bins, NaN samples zeroed out
+            gpd_finite = np.isfinite(gpd_all)
+            gpd_binned = np.zeros(len(gpd_all), dtype=int)
+            gpd_binned[gpd_finite] = np.clip(
+                np.floor(gpd_all[gpd_finite] * gp_n_bins).astype(int),
+                0, gp_n_bins - 1,
+            )
+            GPd_enc = (gpd_binned[:, None] == np.arange(0, gp_n_bins)).astype(float)
+            GPd_enc[~gpd_finite] = 0
             # Continuous vars: decile one-hot bins → 10 cols each
             Sp_enc = apply_onehot(speed_all, speed_edges)
             Ac_enc = apply_onehot(acc_all,   acc_edges)
@@ -862,6 +914,12 @@ def run_glm_analysis(mouse_recdays, data_dic,
                 gp_all.astype(float), n_basis=gp_n_bins,
                 spacing=_RAISED_COSINE_SPACING['goal_progress']
             )
+            # Distance-GP raised-cosine: known [0,1] range; NaN handled by basis
+            GPd_enc = make_raised_cosine_basis(
+                gpd_all, n_basis=gp_n_bins,
+                spacing=_RAISED_COSINE_SPACING['goal_progress_distance'],
+                value_range=(0.0, 1.0),
+            )
             Sp_enc = _rc(speed_all,             'speed')
             Ac_enc = _rc(acc_all,               'acceleration')
             TF_enc = _rc(tf_all,                'time_from_reward')
@@ -875,15 +933,16 @@ def run_glm_analysis(mouse_recdays, data_dic,
             )
 
         onehots = {
-            'place':                place_onehot,
-            'head_direction':       HD_onehot,
-            'goal_progress':        GP_enc,
-            'speed':                Sp_enc,
-            'acceleration':         Ac_enc,
-            'time_from_reward':     TF_enc,
-            'time_to_reward':       TT_enc,
-            'distance_from_reward': DF_enc,
-            'distance_to_reward':   DT_enc,
+            'place':                  place_onehot,
+            'head_direction':         HD_onehot,
+            'goal_progress':          GP_enc,
+            'goal_progress_distance': GPd_enc,
+            'speed':                  Sp_enc,
+            'acceleration':           Ac_enc,
+            'time_from_reward':       TF_enc,
+            'time_to_reward':         TT_enc,
+            'distance_from_reward':   DF_enc,
+            'distance_to_reward':     DT_enc,
         }
         if parameterization == 'reference_coded':
             # Drop the first column of each block (the reference bin) and
@@ -1010,7 +1069,8 @@ def run_glm_analysis(mouse_recdays, data_dic,
 
 # Regressors where betas are ordered by bin — slope captures ramp direction
 _ORDERED_REGRESSORS = {
-    'goal_progress', 'speed', 'acceleration',
+    'goal_progress', 'goal_progress_distance',
+    'speed', 'acceleration',
     'time_from_reward', 'time_to_reward',
     'distance_from_reward', 'distance_to_reward',
 }
@@ -1727,3 +1787,221 @@ def plot_decile_distributions(mouse_recdays, data_dic,
     plt.show()
 
     return pooled_finite
+# ============================================================================
+# Save / load + light publication style
+# ============================================================================
+#
+# Lightweight section-level wrappers for caching fits and exporting figures.
+# Convention: every artifact lives under
+#     {save_dir}/{section_name}__{key}.pkl    (result dicts)
+#     {save_dir}/{section_name}__{name}.pdf   (figures)
+# Persistent dir, section-prefixed filenames; re-running a fit overwrites the
+# pickle, and `run_or_load_glm` short-circuits the fit when all expected
+# pickles already exist.
+#
+# Figure styling follows the .claude/skills/gridmaze-plotter SKILL: Arial 8pt,
+# top/right spines hidden, Type-42 fonts for editable PDFs. Colors of the
+# existing plotting functions are left alone (per user pick).
+
+
+def apply_gridmaze_style():
+    """Idempotent rcParams setter applying the gridmaze-plotter publication
+    style: Arial 8pt + hidden top/right spines + Type-42 PDF fonts. Call once
+    at notebook top (before any plotting) so every subsequent figure picks it up.
+
+    Does NOT change color settings — the existing plot functions' steelblue /
+    crimson / darkorange / etc. references stay as-is.
+    """
+    import matplotlib as mpl
+
+    rc = {
+        # Fonts — Arial primary with a portable fallback for headless boxes.
+        'font.family':       'sans-serif',
+        'font.sans-serif':   ['Arial', 'DejaVu Sans'],
+        'font.size':          8,
+        'figure.titlesize':   8,
+        'axes.titlesize':     8,
+        'axes.labelsize':     8,
+        'xtick.labelsize':    8,
+        'ytick.labelsize':    8,
+        'legend.fontsize':    8,
+
+        # Axes furniture
+        'axes.linewidth':     0.8,
+        'axes.spines.top':    False,
+        'axes.spines.right':  False,
+
+        # Editable PDFs (embed Type-42; required for Illustrator round-trips).
+        'pdf.fonttype':       42,
+        'ps.fonttype':        42,
+    }
+    mpl.rcParams.update(rc)
+
+
+# ----- low-level pickle / fs helpers -------------------------------------
+
+def _ensure_dir(path):
+    import os
+    os.makedirs(path, exist_ok=True)
+
+
+def _save_pickle(obj, path):
+    import os, pickle
+    _ensure_dir(os.path.dirname(path) or '.')
+    with open(path, 'wb') as f:
+        pickle.dump(obj, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+
+def _load_pickle(path):
+    import pickle
+    with open(path, 'rb') as f:
+        return pickle.load(f)
+
+
+def _artifact_path(save_dir, section_name, key, ext):
+    import os
+    return os.path.join(save_dir, f'{section_name}__{key}.{ext}')
+
+
+# ----- section-level save -----------------------------------------------
+
+# Result keys that `save_section` / `load_glm_results` understand for fitted
+# artifacts. Extra entries in `results` are saved verbatim under their key.
+_GLM_RESULT_KEYS = ('glm_results', 'permutation_results', 'cpd_results',
+                    'tuned_dict', 'mouse_tuning_concat')
+
+
+def save_section(section_name, save_dir, *, results=None,
+                 fig_names=None, close_after=False):
+    """Save one section's outputs in one call.
+
+    Parameters
+    ----------
+    section_name : str
+        Filename prefix and cache key (e.g. 'baseline', 'extended_cpd').
+    save_dir : str
+        Output directory. Created if missing.
+    results : dict {str: obj}, optional
+        Each value is pickled to `{save_dir}/{section_name}__{key}.pkl`.
+        Use the canonical keys when applicable so `run_or_load_glm` /
+        `load_glm_results` can pick them up:
+        {_GLM_RESULT_KEYS}.
+    fig_names : list of str, optional
+        Names for currently-open figures in `plt.get_fignums()` order. Saved
+        as `{save_dir}/{section_name}__{name}.pdf`. Missing/extra names
+        fall back to `fig1`, `fig2`, ... `None` → use auto-names for all.
+    close_after : bool, default False
+        Close saved figures after saving (memory hygiene for long notebooks;
+        breaks inline display so leave False in Jupyter).
+
+    Returns
+    -------
+    written : list of str
+        Absolute paths of every file written.
+    """
+    import matplotlib.pyplot as plt
+    import matplotlib as mpl
+
+    _ensure_dir(save_dir)
+    written = []
+
+    # ---- pickle each result dict --------------------------------------
+    if results:
+        for key, obj in results.items():
+            path = _artifact_path(save_dir, section_name, key, 'pkl')
+            _save_pickle(obj, path)
+            written.append(path)
+
+    # ---- save every currently-open figure as PDF ----------------------
+    fignums = plt.get_fignums()
+    if fig_names is None:
+        fig_names = []
+    save_rc = {
+        'savefig.bbox':       None,
+        'savefig.pad_inches': 0.0,
+        'pdf.fonttype':       42,
+        'ps.fonttype':        42,
+    }
+    with mpl.rc_context(save_rc):
+        for i, num in enumerate(fignums):
+            name = fig_names[i] if i < len(fig_names) and fig_names[i] else f'fig{i+1}'
+            path = _artifact_path(save_dir, section_name, name, 'pdf')
+            fig = plt.figure(num)
+            fig.savefig(path, bbox_inches=None)
+            written.append(path)
+            if close_after:
+                plt.close(fig)
+
+    print(f'save_section({section_name!r}): wrote {len(written)} file(s) to {save_dir}')
+    return written
+
+
+# ----- run-or-load (skip-if-exists fit wrapper) -------------------------
+
+def run_or_load_glm(mouse_recdays, data_dic, save_dir, section_name,
+                    *, force_refit=False, **kwargs):
+    """Skip-if-exists wrapper around `run_glm_analysis`.
+
+    If `{save_dir}/{section_name}__glm_results.pkl` (plus permutation_results
+    and, when `compute_cpd=True`, cpd_results) already exist and
+    `force_refit=False`, loads them and returns the same tuple shape
+    `run_glm_analysis(**kwargs)` would. Otherwise fits, pickles, returns.
+
+    Use the SAME `section_name` for both `run_or_load_glm` and `save_section`
+    so the cache key is consistent.
+    """
+    import os
+    compute_cpd = bool(kwargs.get('compute_cpd', False))
+
+    needed = ['glm_results', 'permutation_results']
+    if compute_cpd:
+        needed.append('cpd_results')
+
+    paths = {k: _artifact_path(save_dir, section_name, k, 'pkl') for k in needed}
+
+    if not force_refit and all(os.path.exists(p) for p in paths.values()):
+        print(f'run_or_load_glm({section_name!r}): loading cached results from {save_dir}')
+        loaded = tuple(_load_pickle(paths[k]) for k in needed)
+        return loaded
+
+    print(f'run_or_load_glm({section_name!r}): no cache (or force_refit) — fitting')
+    result = run_glm_analysis(mouse_recdays, data_dic, **kwargs)
+
+    _ensure_dir(save_dir)
+    for k in needed:
+        idx = needed.index(k)
+        _save_pickle(result[idx], paths[k])
+    print(f'run_or_load_glm({section_name!r}): saved {len(needed)} pickle(s) to {save_dir}')
+    return result
+
+
+# ----- manual loader ----------------------------------------------------
+
+def load_glm_results(save_dir, section_name):
+    """Return whichever section pickles exist as a dict.
+
+    Looks for the canonical `_GLM_RESULT_KEYS` plus any other `*.pkl` files
+    whose name starts with `{section_name}__`. Returns
+    `{key: unpickled_object}`; missing keys are simply omitted.
+    """
+    import os, glob
+
+    out = {}
+    prefix = f'{section_name}__'
+
+    # canonical keys first (stable order)
+    for k in _GLM_RESULT_KEYS:
+        p = _artifact_path(save_dir, section_name, k, 'pkl')
+        if os.path.exists(p):
+            out[k] = _load_pickle(p)
+
+    # plus any other section pickles
+    for p in sorted(glob.glob(os.path.join(save_dir, f'{prefix}*.pkl'))):
+        key = os.path.basename(p)[len(prefix):-len('.pkl')]
+        if key in out:
+            continue
+        out[key] = _load_pickle(p)
+
+    if not out:
+        print(f'load_glm_results({section_name!r}): no pickles found in {save_dir}')
+    return out
