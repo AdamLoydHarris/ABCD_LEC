@@ -1756,6 +1756,268 @@ def plot_cpd_time_vs_progress(CPD_results, group_by_mouse=True, normalize='none'
     return cpd_gp, cpd_time
 
 
+def plot_cpd_task_state_vs_place(CPD_results, group_by_mouse=True, normalize='none'):
+    """Compare per-neuron CPD for task_state vs place.
+
+    Task state (A/B/C/D) correlates with place within a task but should
+    decorrelate across tasks (state remaps). This plot shows per-neuron
+    variance explained by each, with one point per neuron.
+
+    Parameters
+    ----------
+    CPD_results : dict {mouse_recday: {neuron_idx: cpd_dict}}
+        Output of `run_glm_analysis(..., compute_cpd=True)` with task_state
+        included in regressors.
+    group_by_mouse : bool, default True
+        If True, produce one scatter panel per mouse + a pooled panel.
+        If False, produce a single pooled panel.
+    normalize : {'none', 'r2_full'}, default 'none'
+        'none': raw CPD = ΔRSS / RSS_reduced.
+        'r2_full': ΔR²_reg / R²_full (unique variance as fraction of model's explainable variance).
+
+    Returns
+    -------
+    cpd_ts, cpd_place : np.ndarray
+        Pooled per-neuron CPD arrays (task_state and place).
+    """
+    cpd_ts, cpd_place, mouse_tag = [], [], []
+
+    for mr, neuron_dict in CPD_results.items():
+        mouse = mr.split('_')[0]
+        for cpd in neuron_dict.values():
+            ts = _cpd_value(cpd, 'task_state', normalize)
+            pl = _cpd_value(cpd, 'place', normalize)
+            if np.isfinite(ts) and np.isfinite(pl):
+                cpd_ts.append(ts)
+                cpd_place.append(pl)
+                mouse_tag.append(mouse)
+
+    cpd_ts = np.array(cpd_ts)
+    cpd_place = np.array(cpd_place)
+    mouse_tag = np.array(mouse_tag)
+
+    mice = sorted(np.unique(mouse_tag))
+    n_mice = len(mice)
+    n_panels = n_mice + 1 if group_by_mouse else 1
+    fig, axes = plt.subplots(1, n_panels, figsize=(6 * n_panels, 5), squeeze=False)
+    axes = axes.flatten()
+
+    # Per-mouse scatter plots
+    for i, mouse in enumerate(mice):
+        ax = axes[i]
+        msk = mouse_tag == mouse
+        ax.scatter(cpd_place[msk], cpd_ts[msk], alpha=0.6, s=18, color='steelblue')
+        lim = max(0.001, max(cpd_place[msk].max(), cpd_ts[msk].max()) * 1.05)
+        ax.plot([0, lim], [0, lim], 'k--', lw=1)
+        ax.set_xlim(0, lim)
+        ax.set_ylim(0, lim)
+        ax.set_aspect('equal')
+        ax.set_xlabel('CPD place')
+        ax.set_ylabel('CPD task_state')
+        ax.set_title(f'{mouse} (n={msk.sum()})')
+
+    # Pooled scatter
+    if group_by_mouse:
+        ax = axes[-1]
+        for i, mouse in enumerate(mice):
+            msk = mouse_tag == mouse
+            ax.scatter(cpd_place[msk], cpd_ts[msk], alpha=0.6, s=18,
+                      color=plt.get_cmap('tab10')(i % 10), label=mouse)
+        lim = max(0.001, max(cpd_place.max(), cpd_ts.max()) * 1.05)
+        ax.plot([0, lim], [0, lim], 'k--', lw=1)
+        ax.set_xlim(0, lim)
+        ax.set_ylim(0, lim)
+        ax.set_aspect('equal')
+        ax.set_xlabel('CPD place')
+        ax.set_ylabel('CPD task_state')
+        ax.set_title(f'Pooled (n={len(cpd_ts)})')
+        ax.legend(fontsize=8, title='Mouse')
+
+    # Difference histogram (single panel below or on the right)
+    d = cpd_ts - cpd_place
+    fig2, ax2 = plt.subplots(figsize=(8, 5))
+    ax2.hist(d, bins=40, color='steelblue', alpha=0.7, edgecolor='black', linewidth=0.5)
+    ax2.axvline(0, color='black', ls='--', lw=1.5)
+    ax2.axvline(d.mean(), color='red', lw=2, label=f'Mean Δ = {d.mean():+.5f}')
+    from scipy import stats as _st
+    tval, pval = _st.ttest_1samp(d, 0)
+    ax2.text(0.05, 0.95, f'n={len(d)}\nt={tval:.2f}\np={pval:.2e}',
+            transform=ax2.transAxes, va='top',
+            bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    ax2.set_xlabel('CPD_task_state − CPD_place')
+    ax2.set_ylabel('# neurons')
+    ax2.set_title('Task state vs place: ΔR² (task_state favours negative)')
+    ax2.legend(fontsize=9)
+    plt.tight_layout()
+
+    fig.suptitle('Task state vs place: per-neuron CPD', fontweight='bold', y=1.02)
+    plt.tight_layout()
+
+    return cpd_ts, cpd_place
+
+
+def plot_task_state_place_correlation_heatmap(mouse_recdays, data_dic,
+                                               downsample_factor=10,
+                                               max_recdays=None):
+    """Heatmap of |correlations| between task_state and place one-hot columns.
+
+    Shows a 4×21 matrix: task_state one-hots (rows; states A/B/C/D) vs
+    place one-hots (columns; nodes 1-21). Entry [i,j] = |correlation|
+    between state_i and place_j, pooled across all recdays/sessions/tasks.
+
+    High correlation (warm colors) in a cell suggests that state i is
+    systematically associated with a particular place; values close to 0
+    (cool colors) suggest good decorrelation.
+
+    Parameters
+    ----------
+    mouse_recdays, data_dic : as in `run_glm_analysis`.
+    downsample_factor : int
+        Match what you pass to `run_glm_analysis`.
+    max_recdays : int or None
+        Cap on recdays to pool (None = all).
+
+    Returns
+    -------
+    corr_matrix : ndarray (4 × 21)
+        Absolute correlation values.
+    """
+    recdays_used = mouse_recdays[:max_recdays] if max_recdays else list(mouse_recdays)
+    all_state = []
+    all_locs = []
+
+    for mr in recdays_used:
+        sessions, _ = get_sessions_for_glm(data_dic[mr])
+        for s in sessions:
+            prep = prepare_session_data(data_dic[mr][s])
+            prep = truncate_all_arrays(prep)
+            prep = downsample_session_data(prep, downsample_factor)
+            nf = prep['Locs'] <= 21
+            all_state.append(prep['State'][nf])
+            all_locs.append(prep['Locs'][nf])
+
+    state_pooled = np.concatenate(all_state).astype(int)
+    locs_pooled = np.concatenate(all_locs).astype(int)
+
+    # One-hot encode
+    state_onehot = (state_pooled[:, None] == np.arange(_N_TASK_STATES)).astype(float)
+    place_onehot = (locs_pooled[:, None] == np.arange(1, 22)).astype(float)
+
+    # Compute correlation matrix
+    from scipy.stats import pearsonr
+    corr_matrix = np.zeros((_N_TASK_STATES, 21))
+    for i in range(_N_TASK_STATES):
+        for j in range(21):
+            r, _ = pearsonr(state_onehot[:, i], place_onehot[:, j])
+            corr_matrix[i, j] = abs(r)
+
+    # Plot
+    fig, ax = plt.subplots(figsize=(12, 4))
+    im = ax.imshow(corr_matrix, aspect='auto', cmap='hot', vmin=0, vmax=1)
+    ax.set_xticks(np.arange(21))
+    ax.set_xticklabels(np.arange(1, 22))
+    ax.set_yticks(np.arange(_N_TASK_STATES))
+    ax.set_yticklabels(['A (state 0)', 'B (state 1)', 'C (state 2)', 'D (state 3)'])
+    ax.set_xlabel('Place (node)')
+    ax.set_ylabel('Task state')
+    ax.set_title(f'|Correlation| between task_state and place (recdays={len(recdays_used)})')
+    plt.colorbar(im, ax=ax, label='|r|')
+
+    # Add text annotations (correlation values)
+    for i in range(_N_TASK_STATES):
+        for j in range(21):
+            text = ax.text(j, i, f'{corr_matrix[i, j]:.2f}',
+                          ha="center", va="center", color="black" if corr_matrix[i, j] < 0.5 else "white",
+                          fontsize=6)
+
+    plt.tight_layout()
+
+    return corr_matrix
+
+
+def plot_task_state_place_tuning_overlap(Permutation_results,
+                                         p_threshold=95):
+    """Plot tuning overlap: "task_state" vs "place" populations.
+
+    Produces a 2×2 contingency table showing the four populations:
+    - tuned to task_state only
+    - tuned to place only
+    - tuned to both
+    - tuned to neither
+
+    This reveals whether neurons that encode task state also encode place
+    (would expect high overlap if they're correlated within-task, but
+    overlap should drop if state remaps across tasks).
+
+    Parameters
+    ----------
+    Permutation_results : dict {mouse_recday: {neuron_idx: (F_real_dict, F_perm_dict)}}
+        Output of `run_glm_analysis(..., compute_cpd=True)`.
+    p_threshold : float, default 95
+        Percentile of F_perm for "tuned" classification (default: p < 0.05).
+
+    Returns
+    -------
+    contingency : ndarray (2 × 2)
+        Counts: [[neither, place_only], [task_state_only, both]]
+    """
+    tuned_ts = []
+    tuned_place = []
+
+    for mr, neuron_dict in Permutation_results.items():
+        for neuron, (F_real, F_perm) in neuron_dict.items():
+            f_ts = F_real.get('task_state')
+            f_pl = F_real.get('place')
+            f_ts_null = F_perm.get('task_state')
+            f_pl_null = F_perm.get('place')
+
+            if f_ts is not None and f_ts_null is not None:
+                tuned_ts.append(f_ts > np.percentile(f_ts_null, p_threshold))
+            else:
+                tuned_ts.append(False)
+
+            if f_pl is not None and f_pl_null is not None:
+                tuned_place.append(f_pl > np.percentile(f_pl_null, p_threshold))
+            else:
+                tuned_place.append(False)
+
+    tuned_ts = np.array(tuned_ts)
+    tuned_place = np.array(tuned_place)
+
+    # Contingency table
+    neither = np.sum(~tuned_ts & ~tuned_place)
+    place_only = np.sum(~tuned_ts & tuned_place)
+    ts_only = np.sum(tuned_ts & ~tuned_place)
+    both = np.sum(tuned_ts & tuned_place)
+    contingency = np.array([[neither, place_only], [ts_only, both]])
+
+    # Plot as a heatmap-style table
+    fig, ax = plt.subplots(figsize=(8, 6))
+    im = ax.imshow(contingency, cmap='YlOrRd', aspect='auto')
+
+    # Add counts and percentages to each cell
+    for i in range(2):
+        for j in range(2):
+            count = contingency[i, j]
+            pct = 100 * count / (np.sum(contingency) + 1e-10)
+            text = ax.text(j, i, f'{count}\n({pct:.1f}%)',
+                          ha="center", va="center", color="black" if count < np.sum(contingency) / 2 else "white",
+                          fontsize=12, fontweight='bold')
+
+    ax.set_xticks([0, 1])
+    ax.set_yticks([0, 1])
+    ax.set_xticklabels(['Not tuned to place', 'Tuned to place'], fontsize=11)
+    ax.set_yticklabels(['Not tuned to task_state', 'Tuned to task_state'], fontsize=11)
+    ax.set_ylabel('Task state tuning', fontsize=12, fontweight='bold')
+    ax.set_xlabel('Place tuning', fontsize=12, fontweight='bold')
+    ax.set_title(f'Tuning overlap: task_state vs place (p < {100-p_threshold:.1f}%, n={np.sum(contingency)} neurons)',
+                fontsize=13, fontweight='bold')
+    plt.colorbar(im, ax=ax, label='# neurons')
+    plt.tight_layout()
+
+    return contingency
+
+
 def plot_full_model_r2(CPD_results):
     """Histogram of per-neuron full-model R² (from `compute_cpd=True` fits).
 
