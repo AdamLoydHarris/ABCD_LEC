@@ -19,3 +19,6 @@ code/LEC_glm_tuning_variables_backup.ipynb
 code/LEC_glm_tuning_variables_dep.ipynb
 code/rave_visualiser copy.py
 code/rave_visualiser copy.ipynb
+code/LEC_elasticnet_regression_v3.ipynb
+mFC_data/code/PFC_elasticnet_regression_v3.ipynb
+mFC_data/glm_outputs/PFC_time_vs_progress/design_tables.pkl
