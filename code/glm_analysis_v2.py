@@ -111,6 +111,275 @@ def smooth_and_calculate_scalar_derivatives(data_matrix, sigma=3, dt=1.0):
 
 
 # ============================================================================
+# Maze graph + per-transition filter (correct-path + time-bounded)
+# ============================================================================
+#
+# The 3×3 grid maze has 12 edges (matches the (12, 2) Edge_grid.npy file). Used
+# to classify each inter-reward transition as "correct" (animal took a shortest
+# path between the two consecutive reward ports) and/or "fast" (transition
+# duration below a threshold). Samples in transitions that fail either filter
+# are masked out before fitting.
+
+_MAZE_EDGES = frozenset({
+    (1, 2), (2, 3), (1, 4), (2, 5), (3, 6), (4, 5),
+    (5, 6), (4, 7), (5, 8), (6, 9), (7, 8), (8, 9),
+})
+
+
+def _build_maze_graph(edges=_MAZE_EDGES):
+    """Build a {node: set(neighbours)} adjacency dict from a set of node-pair
+    tuples. Symmetric — each edge contributes both directions."""
+    graph = {}
+    for a, b in edges:
+        graph.setdefault(a, set()).add(b)
+        graph.setdefault(b, set()).add(a)
+    return graph
+
+
+def _shortest_distance(graph, src, dst):
+    """BFS unweighted shortest distance between two nodes. Returns int or -1
+    if unreachable. Trivially 0 when src == dst."""
+    if src == dst:
+        return 0
+    if src not in graph or dst not in graph:
+        return -1
+    visited = {src}
+    frontier = [(src, 0)]
+    while frontier:
+        node, d = frontier.pop(0)
+        for nbr in graph[node]:
+            if nbr == dst:
+                return d + 1
+            if nbr not in visited:
+                visited.add(nbr)
+                frontier.append((nbr, d + 1))
+    return -1
+
+
+def compute_transition_filter_mask(
+    trial_times_bins,
+    locs,
+    task,
+    *,
+    require_shortest_path=True,
+    max_duration_bins=None,
+    graph=None,
+):
+    """Build a per-sample boolean mask marking transitions to KEEP for the GLM.
+
+    Iterates state segments in `trial_times_bins.flatten()` order (consecutive
+    sorted boundaries). For each segment:
+      - state index s = i % num_states; src = task[s], dst = task[(s+1) % num_states]
+      - duration = boundary[i+1] - boundary[i] (raw bins)
+      - path: extract Locs in the segment, keep entries in [1..9] (nodes only),
+        compress consecutive duplicates. Pass if first==src, last==dst, and
+        compressed length-1 equals graph shortest distance (= no backtracking).
+
+    Samples in segments that pass BOTH filters are set True; the rest False.
+
+    Parameters
+    ----------
+    trial_times_bins : array (n_trials, n_states+1) of bin indices (raw rate)
+    locs             : array (T,) of Locs values (1..9 = nodes, 10..21 = bridges)
+    task             : sequence of length num_states with reward node ids
+    require_shortest_path : if True, apply correct-path filter
+    max_duration_bins     : int or None; if int, apply duration <= bound filter
+    graph                  : prebuilt maze graph or None (default 3×3 grid)
+
+    Returns
+    -------
+    mask  : np.ndarray of dtype bool, length len(locs)
+    stats : dict with aggregate + per-transition info (see module docs)
+    """
+    T = len(locs)
+    mask = np.zeros(T, dtype=bool)
+    if graph is None:
+        graph = _build_maze_graph()
+
+    task = list(task)
+    num_states = trial_times_bins.shape[1] - 1
+    boundaries = np.sort(trial_times_bins.flatten()).astype(int)
+
+    n_transitions_total = 0
+    n_pass_path = 0
+    n_pass_time = 0
+    n_pass_both = 0
+    n_samples_kept = 0
+    per_transition = []
+
+    for i in range(len(boundaries) - 1):
+        start = int(boundaries[i])
+        end   = int(boundaries[i + 1])
+        if start >= end or start >= T:
+            continue
+        end = min(end, T)
+        if start < 0:
+            start = 0
+
+        n_transitions_total += 1
+        state_idx = i % num_states
+        src = int(task[state_idx])
+        dst = int(task[(state_idx + 1) % num_states])
+        duration_bins = end - start
+
+        # Path filter
+        seg_locs = locs[start:end]
+        finite = np.isfinite(seg_locs)
+        node_only = seg_locs[finite]
+        # cast to int (may be float dtype if NaN present); guarantee 1..9 selection
+        node_only = node_only.astype(int)
+        node_only = node_only[(node_only >= 1) & (node_only <= 9)]
+        # compress consecutive duplicates
+        compressed = []
+        for v in node_only:
+            v_int = int(v)
+            if not compressed or compressed[-1] != v_int:
+                compressed.append(v_int)
+        shortest = _shortest_distance(graph, src, dst)
+        if compressed and compressed[0] == src and compressed[-1] == dst \
+                and shortest >= 0 \
+                and (len(compressed) - 1) == shortest:
+            pass_path = True
+        else:
+            pass_path = False
+
+        # Time filter
+        if max_duration_bins is None:
+            pass_time = True
+        else:
+            pass_time = duration_bins <= int(max_duration_bins)
+
+        # Aggregate
+        if pass_path:    n_pass_path += 1
+        if pass_time:    n_pass_time += 1
+        path_ok = (not require_shortest_path) or pass_path
+        time_ok = pass_time
+        if path_ok and time_ok:
+            n_pass_both += 1
+            mask[start:end] = True
+            n_samples_kept += (end - start)
+
+        per_transition.append({
+            'src': src, 'dst': dst,
+            'duration_bins': int(duration_bins),
+            'n_unique_nodes': len(compressed),
+            'shortest_dist': int(shortest),
+            'pass_path': bool(pass_path),
+            'pass_time': bool(pass_time),
+        })
+
+    stats = {
+        'n_transitions_total': n_transitions_total,
+        'n_pass_path':         n_pass_path,
+        'n_pass_time':         n_pass_time,
+        'n_pass_both':         n_pass_both,
+        'n_samples_total':     int(T),
+        'n_samples_kept':      int(n_samples_kept),
+        'pct_samples_kept':    100.0 * n_samples_kept / max(1, T),
+        'per_transition':      per_transition,
+    }
+    return mask, stats
+
+
+def summarize_transition_filter_loss(
+    mouse_recdays, data_dic,
+    *,
+    max_transition_seconds=60,
+    require_shortest_path=True,
+    bin_size_ms=25,
+    verbose=True,
+):
+    """Diagnostic helper. Walks every (recday, session), computes the
+    transition filter mask, and reports per-recday + pooled statistics.
+
+    Does NOT fit anything — pure preview of "what fraction would we lose".
+
+    Parameters
+    ----------
+    mouse_recdays, data_dic : as in `run_glm_analysis`.
+    max_transition_seconds : float
+        Drop transitions longer than this many seconds.
+    require_shortest_path : bool
+        Drop transitions whose Locs sequence isn't a shortest path between the
+        consecutive reward ports.
+    bin_size_ms : int
+        Raw bin size in ms (LEC + PFC both = 25).
+    verbose : bool
+        Print per-recday and pooled summary.
+
+    Returns
+    -------
+    summary : dict {recday: stats_dict}; also includes '__pooled__' key.
+    """
+    max_dur_bins = int(round(max_transition_seconds * 1000.0 / bin_size_ms))
+    summary = {}
+    pooled = {'n_transitions_total': 0, 'n_pass_path': 0, 'n_pass_time': 0,
+              'n_pass_both': 0, 'n_samples_total': 0, 'n_samples_kept': 0}
+
+    if verbose:
+        print(f"Transition filter preview (max {max_transition_seconds}s, "
+              f"require_shortest_path={require_shortest_path})")
+        print(f"{'recday':30s}  {'sessions':>8s}  {'transitions':>11s}  "
+              f"{'path%':>6s}  {'time%':>6s}  {'both%':>6s}  {'samples%':>8s}")
+        print('-' * 90)
+
+    for mr in mouse_recdays:
+        if mr not in data_dic:
+            continue
+        try:
+            sessions_for_glm, _ = get_sessions_for_glm(data_dic[mr])
+        except Exception:
+            continue
+        rd = {'n_transitions_total': 0, 'n_pass_path': 0, 'n_pass_time': 0,
+              'n_pass_both': 0, 'n_samples_total': 0, 'n_samples_kept': 0,
+              'n_sessions': 0}
+        for sess in sessions_for_glm:
+            sd = data_dic[mr][sess]
+            tt = sd.get('Trial_times')
+            locs = sd.get('Locs_raw')
+            task = sd.get('Task')
+            if tt is None or locs is None or task is None:
+                continue
+            try:
+                _, stats = compute_transition_filter_mask(
+                    np.asarray(tt).astype(int), locs, task,
+                    require_shortest_path=require_shortest_path,
+                    max_duration_bins=max_dur_bins,
+                )
+            except Exception as e:
+                if verbose:
+                    print(f"  {mr} sess {sess}: error ({e})")
+                continue
+            rd['n_sessions'] += 1
+            for k in ('n_transitions_total', 'n_pass_path', 'n_pass_time',
+                      'n_pass_both', 'n_samples_total', 'n_samples_kept'):
+                rd[k] += stats[k]
+
+        if rd['n_transitions_total'] > 0:
+            for k in pooled:
+                pooled[k] += rd[k]
+            summary[mr] = rd
+            if verbose:
+                ntt = rd['n_transitions_total']
+                print(f"  {mr:30s}  {rd['n_sessions']:>8d}  {ntt:>11d}  "
+                      f"{100 * rd['n_pass_path'] / ntt:>5.1f}%  "
+                      f"{100 * rd['n_pass_time'] / ntt:>5.1f}%  "
+                      f"{100 * rd['n_pass_both'] / ntt:>5.1f}%  "
+                      f"{100 * rd['n_samples_kept'] / max(1, rd['n_samples_total']):>7.1f}%")
+
+    summary['__pooled__'] = pooled
+    if verbose and pooled['n_transitions_total'] > 0:
+        ntt = pooled['n_transitions_total']
+        print('-' * 90)
+        print(f"  {'POOLED':30s}  {'':>8s}  {ntt:>11d}  "
+              f"{100 * pooled['n_pass_path'] / ntt:>5.1f}%  "
+              f"{100 * pooled['n_pass_time'] / ntt:>5.1f}%  "
+              f"{100 * pooled['n_pass_both'] / ntt:>5.1f}%  "
+              f"{100 * pooled['n_samples_kept'] / max(1, pooled['n_samples_total']):>7.1f}%")
+    return summary
+
+
+# ============================================================================
 # Session selection and data preparation
 # ============================================================================
 
@@ -128,7 +397,11 @@ def get_sessions_for_glm(recday_data):
     return list(unique_tasks.values()), list(unique_tasks.keys())
 
 
-def prepare_session_data(session_data, gp_n_bins=10):
+def prepare_session_data(session_data, gp_n_bins=10,
+                         task=None,
+                         filter_correct_paths=False,
+                         max_transition_seconds=None,
+                         bin_size_ms=25):
     FR = session_data['Neuron_raw']
     Locs = session_data['Locs_raw']
 
@@ -175,6 +448,36 @@ def prepare_session_data(session_data, gp_n_bins=10):
     with np.errstate(divide='ignore', invalid='ignore'):
         gp_distance_cont = np.where(total_path > 0, dist_from / total_path, np.nan)
 
+    # ---------------------------------------------------------------------
+    # Per-sample transition-filter mask (correct-path + duration-bounded).
+    # Default: all-True (no filter). When either filter is active and Task +
+    # Trial_times are available, build the mask at raw bin rate so it can be
+    # downsampled alongside other arrays.
+    # ---------------------------------------------------------------------
+    valid_transition_mask = np.ones(len(Locs), dtype=bool)
+    filter_stats = None
+    has_trial_times = ('Trial_times' in session_data
+                       and session_data['Trial_times'] is not None)
+    if (filter_correct_paths or max_transition_seconds is not None) \
+            and has_trial_times and task is not None:
+        if max_transition_seconds is None:
+            max_dur_bins = None
+        else:
+            max_dur_bins = int(round(max_transition_seconds * 1000.0 / bin_size_ms))
+        mask, filter_stats = compute_transition_filter_mask(
+            Trial_times_bins, Locs, task,
+            require_shortest_path=filter_correct_paths,
+            max_duration_bins=max_dur_bins,
+        )
+        # mask length == len(Locs); ensure exact alignment
+        if len(mask) == len(valid_transition_mask):
+            valid_transition_mask = mask
+        elif len(mask) < len(valid_transition_mask):
+            valid_transition_mask[:len(mask)] = mask
+            valid_transition_mask[len(mask):] = False
+        else:
+            valid_transition_mask = mask[:len(valid_transition_mask)]
+
     return {
         'FR': FR,
         'Locs': Locs,
@@ -188,6 +491,8 @@ def prepare_session_data(session_data, gp_n_bins=10):
         'time_to_reward': time_to,
         'dist_from_reward': dist_from,
         'dist_to_reward': dist_to,
+        'valid_transition_mask': valid_transition_mask,
+        'transition_filter_stats': filter_stats,
     }
 
 
@@ -490,7 +795,10 @@ def run_glm_analysis(mouse_recdays, data_dic,
                      joint_drop_groups=None,
                      continuous_basis='onehot',
                      gp_n_bins=10,
-                     parameterization='all_bins'):
+                     parameterization='all_bins',
+                     filter_correct_paths=False,
+                     max_transition_seconds=None,
+                     bin_size_ms=25):
     """Fit per-neuron OLS GLM with permutation F-tests.
 
     Parameters
@@ -591,12 +899,39 @@ def run_glm_analysis(mouse_recdays, data_dic,
         first_session = sessions_for_glm[0]
         num_neurons = data_dic[mouse_recday][first_session]['Neuron_raw'].shape[0]
 
+        # Per-recday transition-filter accumulators (raw-rate stats)
+        recday_filter_stats = {'n_transitions_total': 0, 'n_pass_path': 0,
+                                'n_pass_time': 0, 'n_pass_both': 0,
+                                'n_samples_total': 0, 'n_samples_kept': 0}
+        any_filter_active = filter_correct_paths or max_transition_seconds is not None
+
         prepared_sessions = {}
         for session in sessions_for_glm:
-            prep_data = prepare_session_data(data_dic[mouse_recday][session],
-                                             gp_n_bins=gp_n_bins)
+            session_dict = data_dic[mouse_recday][session]
+            prep_data = prepare_session_data(
+                session_dict,
+                gp_n_bins=gp_n_bins,
+                task=session_dict.get('Task') if any_filter_active else None,
+                filter_correct_paths=filter_correct_paths,
+                max_transition_seconds=max_transition_seconds,
+                bin_size_ms=bin_size_ms,
+            )
+            # Accumulate raw-rate filter stats before downsampling
+            if any_filter_active and prep_data.get('transition_filter_stats') is not None:
+                s = prep_data['transition_filter_stats']
+                for k in ('n_transitions_total', 'n_pass_path', 'n_pass_time',
+                          'n_pass_both', 'n_samples_total', 'n_samples_kept'):
+                    recday_filter_stats[k] += s.get(k, 0)
             prep_data = truncate_all_arrays(prep_data)
             prepared_sessions[session] = downsample_session_data(prep_data, downsample_factor)
+
+        if any_filter_active and recday_filter_stats['n_transitions_total'] > 0:
+            ntt = recday_filter_stats['n_transitions_total']
+            print(f"  transition filter: kept {recday_filter_stats['n_pass_both']}/{ntt} "
+                  f"({100 * recday_filter_stats['n_pass_both'] / ntt:.1f}%)  "
+                  f"path:{100 * recday_filter_stats['n_pass_path'] / ntt:.1f}%  "
+                  f"time:{100 * recday_filter_stats['n_pass_time'] / ntt:.1f}%  "
+                  f"samples:{100 * recday_filter_stats['n_samples_kept'] / max(1, recday_filter_stats['n_samples_total']):.1f}%")
 
         # ----------------------------------------------------------------
         # Pool all behavioral data across sessions (valid locations only)
@@ -611,6 +946,19 @@ def run_glm_analysis(mouse_recdays, data_dic,
         for session in sessions_for_glm:
             prep = prepared_sessions[session]
             nf   = prep['Locs'] <= 21
+            # AND with valid-transition mask (default all-True when filter is off).
+            # vtm came through the same truncate/downsample as Locs so lengths
+            # should match; if not, pad with False to be safe.
+            vtm = prep.get('valid_transition_mask')
+            if vtm is not None:
+                if len(vtm) == len(nf):
+                    nf = nf & vtm.astype(bool)
+                elif len(vtm) > len(nf):
+                    nf = nf & vtm[:len(nf)].astype(bool)
+                else:
+                    padded = np.zeros(len(nf), dtype=bool)
+                    padded[:len(vtm)] = vtm.astype(bool)
+                    nf = nf & padded
             all_speed.append(prep['Speed'][nf])
             all_acc.append(prep['Acc'][nf])
             all_tf.append(prep['time_from_reward'][nf])

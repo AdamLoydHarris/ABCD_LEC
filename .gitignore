@@ -3,6 +3,9 @@
 !README.md
 !/code
 !/mFC_data
+.DS_Store
+*.ipynb_checkpoints
+._.DS_Store
 
 # Notebooks with large embedded outputs
 code/LEC_sploratory_analysis_with_glm_and_population.ipynb

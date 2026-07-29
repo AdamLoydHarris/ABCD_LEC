@@ -46,11 +46,13 @@ class RegressionConfig:
         smoothing_sigma=10,
         num_bins_per_state=90,
         bins_per_phase=30,
+        lag_direction='past',
     ):
         self.num_locations = num_locations
         self.num_goal_progress_bins = num_goal_progress_bins
         self.num_task_states = num_task_states
         self.num_lags = num_lags
+        self.lag_direction = lag_direction
         self.alpha = alpha
         self.use_poisson = use_poisson
         self.use_positive_only = use_positive_only
@@ -72,17 +74,41 @@ def get_goal_progress_from_bin(bin_idx, config):
     return np.minimum(phase, config.num_goal_progress_bins - 1)
 
 
-def generate_regressors_from_norm(locs_norm, config, multiple_bumps=True):
+def generate_regressors_from_norm(locs_norm, config, multiple_bumps=True, lag_direction=None):
     """Generate lagged (location × phase × lag) regressors from normalized location data.
 
     Creates "bumps" initiated when the animal visits a particular location/phase,
     then rolls them forward through task space as the trial progresses.
     Returns array of shape (num_trials, 360, num_regressors).
+
+    lag_direction ('past' | 'future', default from config):
+      'past'   – lag-L regressor at bin t marks a (loc, phase) visit L phase-transitions
+                 in the past (retrospective coding).
+      'future' – lag-L regressor at bin t marks a (loc, phase) visit L phase-transitions
+                 in the future (prospective coding). Implemented by time-reversing the
+                 sequence, running the identical bump logic, then reversing the result
+                 back along the bin axis.
     """
+    if lag_direction is None:
+        lag_direction = getattr(config, 'lag_direction', 'past')
+    if lag_direction not in ('past', 'future'):
+        raise ValueError(f"lag_direction must be 'past' or 'future', got {lag_direction!r}")
+
     num_trials, num_bins = locs_norm.shape
     num_locs = config.num_locations
     num_phases = config.num_goal_progress_bins
     num_lags = config.num_lags
+
+    # Phase is a deterministic function of bin position; precompute once so it can be
+    # reversed alongside the locations for the 'future' case.
+    phase_per_bin = get_goal_progress_from_bin(np.arange(num_bins), config)
+
+    if lag_direction == 'future':
+        locs_seq = locs_norm[:, ::-1]
+        phase_seq = phase_per_bin[::-1]
+    else:
+        locs_seq = locs_norm
+        phase_seq = phase_per_bin
 
     regressors = np.zeros((num_trials, num_bins, config.num_regressors))
 
@@ -93,14 +119,14 @@ def generate_regressors_from_norm(locs_norm, config, multiple_bumps=True):
         prev_location = -1
 
         for bin_idx in range(num_bins):
-            loc = locs_norm[trial_idx, bin_idx]
+            loc = locs_seq[trial_idx, bin_idx]
 
             if np.isnan(loc) or loc > num_locs or loc < 1:
                 regressors[trial_idx, bin_idx] = module_anchor_progress.flatten()
                 continue
 
             current_loc = int(loc) - 1
-            current_phase = get_goal_progress_from_bin(bin_idx, config)
+            current_phase = int(phase_seq[bin_idx])
 
             phase_changed = (current_phase != prev_phase)
             location_changed = (current_loc != prev_location and
@@ -137,6 +163,11 @@ def generate_regressors_from_norm(locs_norm, config, multiple_bumps=True):
     regressors_reshaped = regressors.reshape(num_trials, num_bins, num_locs, num_phases, num_lags)
     regressors_reshaped = np.roll(regressors_reshaped, -1, axis=4)
     regressors = regressors_reshaped.reshape(num_trials, num_bins, config.num_regressors)
+
+    if lag_direction == 'future':
+        # Undo the time reversal: bring bins back to real time order. The lag axis
+        # (now indexing phase-transitions into the future) is left untouched.
+        regressors = regressors[:, ::-1, :].copy()
 
     return regressors
 
@@ -1221,7 +1252,9 @@ def plot_example_betas(results, config, neuron_indices=None, num_examples=6, sav
             ax.axhline(loc * config.num_goal_progress_bins - 0.5, color='white',
                        linestyle='-', linewidth=0.5, alpha=0.7)
 
-        ax.set_xlabel('Lag (0=current → 11=oldest)', fontsize=10)
+        lag_extreme = ('furthest ahead' if getattr(config, 'lag_direction', 'past') == 'future'
+                       else 'oldest')
+        ax.set_xlabel(f'Lag (0=current → {config.num_lags - 1}={lag_extreme})', fontsize=10)
         ax.set_ylabel('Anchor', fontsize=10)
         ax.set_title(f'Neuron {neuron_idx}\nr = {neuron_corr:.3f}', fontsize=11)
 
