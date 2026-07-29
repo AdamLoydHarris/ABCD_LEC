@@ -811,6 +811,8 @@ def make_raised_cosine_basis(values, n_basis=10, spacing='linear',
 # + time_from(10) + time_to(10) + dist_from(10) + dist_to(10) = 127 total
 # ============================================================================
 
+_N_TASK_STATES = 4
+
 regressor_groups = {
     'place':                list(range(0,   21)),
     'head_direction':       list(range(21,  57)),
@@ -843,13 +845,18 @@ analysis_regressor_names = [
 # of time-based `goal_progress`: progress through an inter-reward interval
 # measured by integrated path (`dist_from / (dist_from + dist_to)`) rather than
 # elapsed time. Shares `gp_n_bins` with time-GP → automatically column-matched.
-_OPTIONAL_REGRESSORS = ['goal_progress_distance']
+# `task_state` is task identity (A/B/C/D, i.e., leg 0/1/2/3 of the 4-state loop),
+# one-hot encoded to 4 columns. Correlates with place within a task but should
+# decorrelate across tasks (state remaps; see ccgp_state_pairs.py).
+_OPTIONAL_REGRESSORS = ['goal_progress_distance', 'task_state']
 _ALL_REGRESSORS = analysis_regressor_names + _OPTIONAL_REGRESSORS
 
 # Canonical column ordering when a fit includes a mix of default + optional
-# regressors. Distance-GP sits adjacent to time-GP for semantic clarity.
+# regressors. task_state sits right after place (both are "which location/leg"
+# categoricals); distance-GP sits adjacent to time-GP for semantic clarity.
 _CANONICAL_ORDER = [
     'place',
+    'task_state',
     'head_direction',
     'goal_progress',
     'goal_progress_distance',
@@ -867,6 +874,7 @@ _CANONICAL_ORDER = [
 _REGRESSOR_NAME_ALIASES = {
     'time_since_reward':     'time_from_reward',
     'distance_since_reward': 'distance_from_reward',
+    'state':                 'task_state',
 }
 
 
@@ -874,6 +882,7 @@ _REGRESSOR_NAME_ALIASES = {
 # if a key is missing.
 _REGRESSOR_DISPLAY_NAMES = {
     'place':                  'place',
+    'task_state':             'task state (A/B/C/D)',
     'head_direction':         'head direction',
     'goal_progress':          'goal progress',
     'goal_progress_distance': 'goal progress (distance)',
@@ -926,6 +935,7 @@ def _resolve_regressor_groups(regressors_to_include, gp_n_bins=10,
     n_cols_per = {name: len(regressor_groups[name]) for name in analysis_regressor_names}
     n_cols_per['goal_progress'] = gp_n_bins
     n_cols_per['goal_progress_distance'] = gp_n_bins  # shares the gp_n_bins knob
+    n_cols_per['task_state'] = _N_TASK_STATES
     if parameterization == 'reference_coded':
         n_cols_per = {k: v - 1 for k, v in n_cols_per.items()}
     elif parameterization != 'all_bins':
@@ -1114,6 +1124,7 @@ def run_glm_analysis(mouse_recdays, data_dic,
         all_df, all_dt       = [], []
         all_locs, all_hd, all_gp = [], [], []
         all_gpd              = []  # distance-based goal progress (continuous 0–1, NaN where no motion)
+        all_state            = []  # task state (0..3, one per leg)
         session_filters = []  # (session, node_filter) for reconstructing FR
 
         for session in sessions_for_glm:
@@ -1140,6 +1151,7 @@ def run_glm_analysis(mouse_recdays, data_dic,
             all_hd.append(prep['HD'][nf])
             all_gp.append(prep['GP_binned'][nf])
             all_gpd.append(prep['GP_dist_continuous'][nf])
+            all_state.append(prep['State'][nf])
             session_filters.append((session, nf))
 
         speed_all = np.concatenate(all_speed)
@@ -1152,6 +1164,9 @@ def run_glm_analysis(mouse_recdays, data_dic,
         hd_all    = np.concatenate(all_hd)
         gp_all    = np.concatenate(all_gp)
         gpd_all   = np.concatenate(all_gpd)
+        state_all = np.concatenate(all_state).astype(int)
+        assert np.all((state_all >= 0) & (state_all < _N_TASK_STATES)), \
+            f"task state out of range [0, {_N_TASK_STATES}): got {np.unique(state_all)}"
 
         # ----------------------------------------------------------------
         # Decile edges from all available data
@@ -1174,6 +1189,9 @@ def run_glm_analysis(mouse_recdays, data_dic,
         # ----------------------------------------------------------------
         # Place: nodes 1–21 → 21 cols
         place_onehot = (locs_all[:, None] == np.arange(1, 22)).astype(float)
+
+        # Task state (A/B/C/D): states 0–3 → 4 cols
+        state_onehot = (state_all[:, None] == np.arange(_N_TASK_STATES)).astype(float)
 
         # HD: 36 fixed 10° bins → 36 cols
         hd_bin_idx = np.clip(np.floor((hd_all % 360) / 10).astype(int), 0, 35)
@@ -1232,6 +1250,7 @@ def run_glm_analysis(mouse_recdays, data_dic,
 
         onehots = {
             'place':                  place_onehot,
+            'task_state':             state_onehot,
             'head_direction':         HD_onehot,
             'goal_progress':          GP_enc,
             'goal_progress_distance': GPd_enc,
@@ -2085,6 +2104,67 @@ def plot_decile_distributions(mouse_recdays, data_dic,
     plt.show()
 
     return pooled_finite
+
+
+def check_task_state_place_collinearity(mouse_recdays, data_dic,
+                                        downsample_factor=10,
+                                        max_recdays=None):
+    """Check that task_state (A/B/C/D) and place (1-21) decorrelate across tasks.
+
+    Pools task state and place location the same way `run_glm_analysis` does
+    (via `prepare_session_data`, `truncate_all_arrays`, `downsample_session_data`,
+    `get_sessions_for_glm`), then computes the absolute correlation between
+    every task_state one-hot column (4) and every place one-hot column (21).
+
+    Returns the max |correlation| and prints a summary. If decorrelation is good,
+    this should be substantially less than 1.0 (task remaps across the 6 unique
+    tasks/recday pooled in each fit, so state identity is independent of place
+    once you control for task).
+
+    Parameters
+    ----------
+    mouse_recdays, data_dic : as in `run_glm_analysis`.
+    downsample_factor : int
+        Match what you pass to `run_glm_analysis`.
+    max_recdays : int or None
+        Cap on recdays to pool (None = all). Use 3–5 for a quick pass.
+    """
+    recdays_used = mouse_recdays[:max_recdays] if max_recdays else list(mouse_recdays)
+    all_state = []
+    all_locs  = []
+
+    for mr in recdays_used:
+        sessions, _ = get_sessions_for_glm(data_dic[mr])
+        for s in sessions:
+            prep = prepare_session_data(data_dic[mr][s])
+            prep = truncate_all_arrays(prep)
+            prep = downsample_session_data(prep, downsample_factor)
+            nf = prep['Locs'] <= 21
+            all_state.append(prep['State'][nf])
+            all_locs.append(prep['Locs'][nf])
+
+    state_pooled = np.concatenate(all_state).astype(int)
+    locs_pooled  = np.concatenate(all_locs).astype(int)
+
+    # One-hot encode
+    state_onehot = (state_pooled[:, None] == np.arange(_N_TASK_STATES)).astype(float)
+    place_onehot = (locs_pooled[:, None] == np.arange(1, 22)).astype(float)
+
+    # Compute correlations (column-wise between the two matrices)
+    from scipy.stats import pearsonr
+    max_corr = 0.0
+    for i in range(state_onehot.shape[1]):
+        for j in range(place_onehot.shape[1]):
+            r, _ = pearsonr(state_onehot[:, i], place_onehot[:, j])
+            max_corr = max(max_corr, abs(r))
+
+    print(f"Task-state vs place collinearity check (recdays={len(recdays_used)}, "
+          f"downsample={downsample_factor}):")
+    print(f"  Max |correlation| across state×place one-hot columns: {max_corr:.4f}")
+    print(f"  → Decorrelation: {'GOOD' if max_corr < 0.3 else 'MODERATE' if max_corr < 0.5 else 'POOR'}")
+    return max_corr
+
+
 # ============================================================================
 # Save / load + light publication style
 # ============================================================================
