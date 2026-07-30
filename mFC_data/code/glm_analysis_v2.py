@@ -292,6 +292,55 @@ def compute_task_state_arrays(trial_times, num_bins=10):
     return state_array, goal_progress_array, goal_progress_binned, time_from_last_reward, time_to_next_reward
 
 
+def compute_since_A_arrays(trial_times, num_bins=10):
+    """Compute time/progress variables anchored to reward A (state 0) collection.
+
+    Unlike compute_task_state_arrays, which anchors to ANY reward boundary and
+    resets 4× per loop, this anchors to state 0 (A→B leg) start only, testing
+    whole-loop-scale time/progress. Returns time since last A (unbounded, decile-
+    binned), time until next A (unbounded, decile-binned), and loop progress
+    fraction since A (equal-width binned like goal_progress).
+    """
+    max_time = int(np.max(trial_times))
+
+    time_since_A = np.zeros(max_time + 1, dtype=int)
+    time_to_A = np.zeros(max_time + 1, dtype=int)
+    progress_since_A_array = np.zeros(max_time + 1, dtype=float)
+    progress_since_A_binned = np.zeros(max_time + 1, dtype=int)
+
+    # Anchor only to state 0 (A→B leg start = reward A collection).
+    # trial_times[:, 0] contains all A-collection times; sort + deduplicate.
+    A_times = np.sort(trial_times[:, 0].astype(int))
+    A_times = A_times[A_times >= 0]  # Guard against negative timestamps
+
+    if len(A_times) == 0:
+        # No valid A times; return zero-filled arrays.
+        return time_since_A, time_to_A, progress_since_A_binned
+
+    # For each inter-A interval, compute time/progress.
+    for i in range(len(A_times) - 1):
+        start_time = int(A_times[i])
+        end_time = int(A_times[i + 1])
+        if start_time == end_time:
+            continue
+        loop_duration = end_time - start_time
+        time_range = np.arange(start_time, end_time)
+        progress = (time_range - start_time) / loop_duration
+        time_since_A[start_time:end_time] = time_range - start_time
+        time_to_A[start_time:end_time] = end_time - time_range
+        progress_since_A_array[start_time:end_time] = progress
+        progress_since_A_binned[start_time:end_time] = np.floor(progress * num_bins).astype(int)
+
+    # After the last A: time since keeps counting, time_to_A stays 0, progress stays 1.
+    last_A_time = int(A_times[-1])
+    time_since_A[last_A_time:] = np.arange(0, max_time - last_A_time + 1)
+    time_to_A[last_A_time:] = 0
+    progress_since_A_array[last_A_time:] = 1.0
+    progress_since_A_binned[last_A_time:] = num_bins - 1
+
+    return time_since_A, time_to_A, progress_since_A_binned
+
+
 def compute_distance_to_rewards(trial_times, speed_array):
     reward_times = np.unique(np.sort(trial_times.flatten()))
     reward_times = reward_times[reward_times >= 0]
@@ -604,6 +653,9 @@ def prepare_session_data(session_data, gp_n_bins=10,
         State, _, GP_binned, time_from, time_to = compute_task_state_arrays(
             Trial_times_bins, num_bins=gp_n_bins
         )
+        time_since_A, time_to_A, progress_since_A_binned = compute_since_A_arrays(
+            Trial_times_bins, num_bins=gp_n_bins
+        )
         if len(Speed) > 0:
             dist_from, dist_to = compute_distance_to_rewards(Trial_times_bins, Speed)
         else:
@@ -615,6 +667,9 @@ def prepare_session_data(session_data, gp_n_bins=10,
         GP_binned = np.zeros(max_len, dtype=int)
         time_from = np.zeros(max_len)
         time_to = np.zeros(max_len)
+        time_since_A = np.zeros(max_len, dtype=int)
+        time_to_A = np.zeros(max_len, dtype=int)
+        progress_since_A_binned = np.zeros(max_len, dtype=int)
         dist_from = np.zeros(max_len)
         dist_to = np.zeros(max_len)
 
@@ -663,6 +718,9 @@ def prepare_session_data(session_data, gp_n_bins=10,
         'GP_dist_continuous': gp_distance_cont,
         'time_from_reward': time_from,
         'time_to_reward': time_to,
+        'time_since_A': time_since_A,
+        'time_to_A': time_to_A,
+        'progress_since_A_binned': progress_since_A_binned,
         'dist_from_reward': dist_from,
         'dist_to_reward': dist_to,
         'valid_transition_mask': valid_transition_mask,
@@ -739,6 +797,9 @@ _RAISED_COSINE_SPACING = {
     'goal_progress_distance': 'linear',
     'time_from_reward':       'log',
     'time_to_reward':         'log',
+    'time_since_A':           'log',
+    'time_to_A':              'log',
+    'progress_since_A':       'linear',
     'distance_from_reward':   'log',
     'distance_to_reward':     'log',
 }
@@ -848,12 +909,16 @@ analysis_regressor_names = [
 # `task_state` is task identity (A/B/C/D, i.e., leg 0/1/2/3 of the 4-state loop),
 # one-hot encoded to 4 columns. Correlates with place within a task but should
 # decorrelate across tasks (state remaps; see ccgp_state_pairs.py).
-_OPTIONAL_REGRESSORS = ['goal_progress_distance', 'task_state']
+_OPTIONAL_REGRESSORS = [
+    'goal_progress_distance', 'task_state',
+    'time_since_A', 'time_to_A', 'progress_since_A'
+]
 _ALL_REGRESSORS = analysis_regressor_names + _OPTIONAL_REGRESSORS
 
 # Canonical column ordering when a fit includes a mix of default + optional
 # regressors. task_state sits right after place (both are "which location/leg"
-# categoricals); distance-GP sits adjacent to time-GP for semantic clarity.
+# categoricals); distance-GP sits adjacent to time-GP; the A-anchored time/progress
+# sit right after the reward-anchored time regressors.
 _CANONICAL_ORDER = [
     'place',
     'task_state',
@@ -864,6 +929,9 @@ _CANONICAL_ORDER = [
     'acceleration',
     'time_from_reward',
     'time_to_reward',
+    'time_since_A',
+    'time_to_A',
+    'progress_since_A',
     'distance_from_reward',
     'distance_to_reward',
 ]
@@ -890,6 +958,9 @@ _REGRESSOR_DISPLAY_NAMES = {
     'acceleration':           'acceleration',
     'time_from_reward':       'time since reward',
     'time_to_reward':         'time to reward',
+    'time_since_A':           'time since reward A',
+    'time_to_A':              'time to reward A',
+    'progress_since_A':       'loop progress (since A)',
     'distance_from_reward':   'distance since reward',
     'distance_to_reward':     'distance to reward',
 }
@@ -936,6 +1007,9 @@ def _resolve_regressor_groups(regressors_to_include, gp_n_bins=10,
     n_cols_per['goal_progress'] = gp_n_bins
     n_cols_per['goal_progress_distance'] = gp_n_bins  # shares the gp_n_bins knob
     n_cols_per['task_state'] = _N_TASK_STATES
+    n_cols_per['time_since_A'] = 10  # decile-binned
+    n_cols_per['time_to_A'] = 10     # decile-binned
+    n_cols_per['progress_since_A'] = gp_n_bins  # equal-width like goal_progress
     if parameterization == 'reference_coded':
         n_cols_per = {k: v - 1 for k, v in n_cols_per.items()}
     elif parameterization != 'all_bins':
@@ -1121,6 +1195,7 @@ def run_glm_analysis(mouse_recdays, data_dic,
         # ----------------------------------------------------------------
         all_speed, all_acc   = [], []
         all_tf, all_tt       = [], []
+        all_tsa, all_tta, all_pga = [], [], []  # A-anchored time/progress
         all_df, all_dt       = [], []
         all_locs, all_hd, all_gp = [], [], []
         all_gpd              = []  # distance-based goal progress (continuous 0–1, NaN where no motion)
@@ -1145,6 +1220,9 @@ def run_glm_analysis(mouse_recdays, data_dic,
             all_acc.append(prep['Acc'][nf])
             all_tf.append(prep['time_from_reward'][nf])
             all_tt.append(prep['time_to_reward'][nf])
+            all_tsa.append(prep['time_since_A'][nf])
+            all_tta.append(prep['time_to_A'][nf])
+            all_pga.append(prep['progress_since_A_binned'][nf])
             all_df.append(prep['dist_from_reward'][nf])
             all_dt.append(prep['dist_to_reward'][nf])
             all_locs.append(prep['Locs'][nf])
@@ -1158,6 +1236,9 @@ def run_glm_analysis(mouse_recdays, data_dic,
         acc_all   = np.concatenate(all_acc)
         tf_all    = np.concatenate(all_tf)
         tt_all    = np.concatenate(all_tt)
+        tsa_all   = np.concatenate(all_tsa)  # time_since_A
+        tta_all   = np.concatenate(all_tta)  # time_to_A
+        pga_all   = np.concatenate(all_pga)  # progress_since_A_binned
         df_all    = np.concatenate(all_df)
         dt_all    = np.concatenate(all_dt)
         locs_all  = np.concatenate(all_locs).astype(int)
@@ -1175,11 +1256,14 @@ def run_glm_analysis(mouse_recdays, data_dic,
         acc_edges   = compute_decile_edges(acc_all)
         tf_edges    = compute_decile_edges(tf_all)
         tt_edges    = compute_decile_edges(tt_all)
+        tsa_edges   = compute_decile_edges(tsa_all)
+        tta_edges   = compute_decile_edges(tta_all)
         df_edges    = compute_decile_edges(df_all)
         dt_edges    = compute_decile_edges(dt_all)
 
         if any(e is None for e in [speed_edges, acc_edges, tf_edges,
-                                    tt_edges, df_edges, dt_edges]):
+                                    tt_edges, tsa_edges, tta_edges,
+                                    df_edges, dt_edges]):
             print("  Skipping — insufficient data for decile edges")
             continue
 
@@ -1210,11 +1294,15 @@ def run_glm_analysis(mouse_recdays, data_dic,
             )
             GPd_enc = (gpd_binned[:, None] == np.arange(0, gp_n_bins)).astype(float)
             GPd_enc[~gpd_finite] = 0
+            # Progress since A: equal-width like goal_progress (already binned upstream)
+            PGA_enc = (pga_all[:, None] == np.arange(0, gp_n_bins)).astype(float)
             # Continuous vars: decile one-hot bins → 10 cols each
             Sp_enc = apply_onehot(speed_all, speed_edges)
             Ac_enc = apply_onehot(acc_all,   acc_edges)
             TF_enc = apply_onehot(tf_all,    tf_edges)
             TT_enc = apply_onehot(tt_all,    tt_edges)
+            TSA_enc = apply_onehot(tsa_all,  tsa_edges)
+            TTA_enc = apply_onehot(tta_all,  tta_edges)
             DF_enc = apply_onehot(df_all,    df_edges)
             DT_enc = apply_onehot(dt_all,    dt_edges)
         elif continuous_basis == 'raised_cosine':
@@ -1236,10 +1324,17 @@ def run_glm_analysis(mouse_recdays, data_dic,
                 spacing=_RAISED_COSINE_SPACING['goal_progress_distance'],
                 value_range=(0.0, 1.0),
             )
+            # Progress since A: raised-cosine with linear spacing
+            PGA_enc = make_raised_cosine_basis(
+                pga_all.astype(float), n_basis=gp_n_bins,
+                spacing=_RAISED_COSINE_SPACING['progress_since_A']
+            )
             Sp_enc = _rc(speed_all,             'speed')
             Ac_enc = _rc(acc_all,               'acceleration')
             TF_enc = _rc(tf_all,                'time_from_reward')
             TT_enc = _rc(tt_all,                'time_to_reward')
+            TSA_enc = _rc(tsa_all,              'time_since_A')
+            TTA_enc = _rc(tta_all,              'time_to_A')
             DF_enc = _rc(df_all,                'distance_from_reward')
             DT_enc = _rc(dt_all,                'distance_to_reward')
         else:
@@ -1258,6 +1353,9 @@ def run_glm_analysis(mouse_recdays, data_dic,
             'acceleration':           Ac_enc,
             'time_from_reward':       TF_enc,
             'time_to_reward':         TT_enc,
+            'time_since_A':           TSA_enc,
+            'time_to_A':              TTA_enc,
+            'progress_since_A':       PGA_enc,
             'distance_from_reward':   DF_enc,
             'distance_to_reward':     DT_enc,
         }
@@ -1389,6 +1487,7 @@ _ORDERED_REGRESSORS = {
     'goal_progress', 'goal_progress_distance',
     'speed', 'acceleration',
     'time_from_reward', 'time_to_reward',
+    'time_since_A', 'time_to_A', 'progress_since_A',
     'distance_from_reward', 'distance_to_reward',
 }
 
@@ -2424,6 +2523,77 @@ def check_task_state_place_collinearity(mouse_recdays, data_dic,
           f"downsample={downsample_factor}):")
     print(f"  Max |correlation| across state×place one-hot columns: {max_corr:.4f}")
     print(f"  → Decorrelation: {'GOOD' if max_corr < 0.3 else 'MODERATE' if max_corr < 0.5 else 'POOR'}")
+    return max_corr
+
+
+def check_since_A_task_state_collinearity(mouse_recdays, data_dic,
+                                          downsample_factor=10,
+                                          max_recdays=None):
+    """Check collinearity between time_since_A and task_state (A/B/C/D).
+
+    Pools time_since_A and task_state the same way `run_glm_analysis` does
+    (via `prepare_session_data`, `truncate_all_arrays`, `downsample_session_data`,
+    `get_sessions_for_glm`), bins time_since_A into deciles, then computes the
+    absolute correlation between every task_state one-hot column (4) and every
+    time_since_A decile column (10).
+
+    Expected to be SUBSTANTIAL: within a loop, elapsed-time-since-A rises
+    monotonically with state index (0→3), so collinearity is intentional and
+    expected. This diagnostic measures it quantitatively so the CPD can be
+    interpreted in light of the known confound. Unlike task_state-vs-place
+    (which should decorrelate across tasks), this correlation is *not* a design
+    flaw — it's the core assumption that makes time_since_A distinct from
+    task_state within the same time window.
+
+    Returns the max |correlation| and prints a summary.
+
+    Parameters
+    ----------
+    mouse_recdays, data_dic : as in `run_glm_analysis`.
+    downsample_factor : int
+        Match what you pass to `run_glm_analysis`.
+    max_recdays : int or None
+        Cap on recdays to pool (None = all). Use 3–5 for a quick pass.
+    """
+    recdays_used = mouse_recdays[:max_recdays] if max_recdays else list(mouse_recdays)
+    all_state = []
+    all_tsa   = []
+
+    for mr in recdays_used:
+        sessions, _ = get_sessions_for_glm(data_dic[mr])
+        for s in sessions:
+            prep = prepare_session_data(data_dic[mr][s])
+            prep = truncate_all_arrays(prep)
+            prep = downsample_session_data(prep, downsample_factor)
+            nf = prep['Locs'] <= 21
+            all_state.append(prep['State'][nf])
+            all_tsa.append(prep['time_since_A'][nf])
+
+    state_pooled = np.concatenate(all_state).astype(int)
+    tsa_pooled   = np.concatenate(all_tsa).astype(int)
+
+    # One-hot encode task_state
+    state_onehot = (state_pooled[:, None] == np.arange(_N_TASK_STATES)).astype(float)
+
+    # Decile-bin time_since_A
+    tsa_edges = compute_decile_edges(tsa_pooled)
+    if tsa_edges is None:
+        print(f"Time-since-A vs task-state collinearity: insufficient data")
+        return np.nan
+    tsa_onehot = apply_onehot(tsa_pooled, tsa_edges)
+
+    # Compute correlations (column-wise between the two matrices)
+    from scipy.stats import pearsonr
+    max_corr = 0.0
+    for i in range(state_onehot.shape[1]):
+        for j in range(tsa_onehot.shape[1]):
+            r, _ = pearsonr(state_onehot[:, i], tsa_onehot[:, j])
+            max_corr = max(max_corr, abs(r))
+
+    print(f"Time-since-A vs task-state collinearity check (recdays={len(recdays_used)}, "
+          f"downsample={downsample_factor}):")
+    print(f"  Max |correlation| across state×time_since_A columns: {max_corr:.4f}")
+    print(f"  (Expected to be substantial: time-since-A is monotonic with state within a loop)")
     return max_corr
 
 
