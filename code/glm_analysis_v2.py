@@ -37,8 +37,26 @@ import matplotlib.pyplot as plt
 # ============================================================================
 
 def compute_task_state_arrays(trial_times, num_bins=10):
+    """Per-timepoint task state, goal progress, and time-to/from-reward.
+
+    `trial_times` is (n_trials, num_states + 1); `trial_times[r, s]` is the time
+    the animal is AT goal `s` on trial `r`, so **state s is the leg FROM goal s
+    TO goal s+1** and spans `[trial_times[r, s], trial_times[r, s+1])`. The last
+    column repeats the next row's first column (goal A of the following trial),
+    which is why iteration is over (row, column) pairs rather than over the
+    flattened+sorted boundary list.
+
+    NOTE (fixed 2026-07-30): the previous implementation walked
+    `np.sort(trial_times.flatten())` and assigned `state = i % num_states`, but
+    `i` advanced even when the duplicated boundary `trial_times[r, -1] ==
+    trial_times[r+1, 0]` was skipped. That rotated trial r's state labels by
+    +r (mod num_states), mislabeling 72.9% of legs. Indexing by column instead
+    makes the state label correct by construction. The goal-progress and
+    time-to/from-reward outputs are unchanged (they never used `i`).
+    """
     max_time = int(np.max(trial_times))
     num_states = trial_times.shape[1] - 1
+    tt = trial_times.astype(int)
 
     state_array = np.zeros(max_time + 1, dtype=int)
     goal_progress_array = np.zeros(max_time + 1, dtype=float)
@@ -46,23 +64,24 @@ def compute_task_state_arrays(trial_times, num_bins=10):
     time_from_last_reward = np.zeros(max_time + 1, dtype=int)
     time_to_next_reward = np.zeros(max_time + 1, dtype=int)
 
-    trial_times_sorted = np.sort(trial_times.flatten())
+    for r in range(tt.shape[0]):
+        for s in range(num_states):
+            start_time = int(tt[r, s])
+            end_time = int(tt[r, s + 1])
+            if end_time <= start_time:
+                continue
+            state_array[start_time:end_time] = s
+            time_range = np.arange(start_time, end_time)
+            progress = (time_range - start_time) / (end_time - start_time)
+            goal_progress_array[start_time:end_time] = progress
+            goal_progress_binned[start_time:end_time] = np.floor(progress * num_bins).astype(int)
+            time_from_last_reward[start_time:end_time] = time_range - start_time
+            time_to_next_reward[start_time:end_time] = end_time - time_range
 
-    for i in range(len(trial_times_sorted) - 1):
-        start_time = int(trial_times_sorted[i])
-        end_time = int(trial_times_sorted[i + 1])
-        if start_time == end_time:
-            continue
-        state_array[start_time:end_time] = i % num_states
-        time_range = np.arange(start_time, end_time)
-        progress = (time_range - start_time) / (end_time - start_time)
-        goal_progress_array[start_time:end_time] = progress
-        goal_progress_binned[start_time:end_time] = np.floor(progress * num_bins).astype(int)
-        time_from_last_reward[start_time:end_time] = time_range - start_time
-        time_to_next_reward[start_time:end_time] = end_time - time_range
-
-    last_time = int(trial_times_sorted[-1])
-    state_array[last_time:] = (len(trial_times_sorted) - 1) % num_states
+    # After the final boundary (an A collection — the last column is goal A of
+    # the next trial), the animal is on the A→B leg, i.e. state 0.
+    last_time = int(np.max(tt))
+    state_array[last_time:] = 0
     goal_progress_array[last_time:] = 1.0
     goal_progress_binned[last_time:] = num_bins - 1
     time_from_last_reward[last_time:] = np.arange(0, max_time - last_time + 1)
@@ -87,9 +106,15 @@ def compute_since_A_arrays(trial_times, num_bins=10):
     progress_since_A_array = np.zeros(max_time + 1, dtype=float)
     progress_since_A_binned = np.zeros(max_time + 1, dtype=int)
 
-    # Anchor only to state 0 (A→B leg start = reward A collection).
-    # trial_times[:, 0] contains all A-collection times; sort + deduplicate.
-    A_times = np.sort(trial_times[:, 0].astype(int))
+    # Anchor only to reward A. Column 0 is goal A of this trial and the LAST
+    # column is goal A of the next trial (they coincide: trial_times[r, -1] ==
+    # trial_times[r+1, 0]). Taking column 0 alone therefore misses the final A
+    # of the session, which sent the whole last loop into the after-last-A
+    # fallback below (constant time_to_A=0, constant progress=num_bins-1) —
+    # 9.7% of LEC timepoints. Union both columns and deduplicate.
+    A_times = np.unique(
+        np.concatenate([trial_times[:, 0], trial_times[:, -1]]).astype(int)
+    )
     A_times = A_times[A_times >= 0]  # Guard against negative timestamps
 
     if len(A_times) == 0:
@@ -1858,6 +1883,86 @@ def plot_cpd_time_vs_progress(CPD_results, group_by_mouse=True, normalize='none'
     return cpd_gp, cpd_time
 
 
+def plot_cpd_pair(CPD_results, key_x, key_y, group_by_mouse=True,
+                  normalize='none', label_x=None, label_y=None, title=None):
+    """Per-neuron CPD scatter + Δ histogram for ANY two CPD keys.
+
+    Generic sibling of `plot_cpd_time_vs_progress`, which hardcodes
+    goal_progress vs time_any. Use this for regressor pairs that function
+    doesn't know about — e.g. the loop-anchored group against the per-leg one:
+
+        plot_cpd_pair(CPD, 'time_any', 'since_A_any')
+
+    `key_x` / `key_y` are CPD dict keys, so they may be single regressors
+    ('time_since_A') or joint groups declared via `joint_drop_groups`
+    ('since_A_any'). Labels default to `_display(key)`.
+
+    Returns (x, y) arrays of per-neuron values, pooled across recdays.
+    """
+    xs, ys, mouse_tag = [], [], []
+    for mr, neuron_dict in CPD_results.items():
+        mouse = mr.split('_')[0]
+        for cpd in neuron_dict.values():
+            xs.append(_cpd_value(cpd, key_x, normalize))
+            ys.append(_cpd_value(cpd, key_y, normalize))
+            mouse_tag.append(mouse)
+
+    x = np.array(xs, dtype=float)
+    y = np.array(ys, dtype=float)
+    mouse_tag = np.array(mouse_tag)
+    valid = ~np.isnan(x) & ~np.isnan(y)
+    x, y, mouse_tag = x[valid], y[valid], mouse_tag[valid]
+
+    if x.size == 0:
+        print(f"plot_cpd_pair: no neurons with both {key_x!r} and {key_y!r} "
+              f"(present keys need joint_drop_groups / regressors_to_include "
+              f"to include them)")
+        return x, y
+
+    lx = label_x or _display(key_x)
+    ly = label_y or _display(key_y)
+    metric = 'CPD' if normalize == 'none' else 'CPD / R²_full'
+
+    fig, axes = plt.subplots(1, 2, figsize=(11, 5))
+
+    ax = axes[0]
+    mice = sorted(np.unique(mouse_tag).tolist()) if group_by_mouse else [None]
+    cmap = plt.get_cmap('tab10')
+    for i, m in enumerate(mice):
+        mask = (mouse_tag == m) if m is not None else slice(None)
+        ax.scatter(x[mask], y[mask], alpha=0.6, s=20, color=cmap(i % 10), label=m)
+    lim = max(0.001, max(np.nanmax(x), np.nanmax(y)) * 1.05)
+    ax.plot([0, lim], [0, lim], 'k--', linewidth=1)
+    ax.set_xlim(0, lim); ax.set_ylim(0, lim); ax.set_aspect('equal')
+    ax.set_xlabel(f'{metric} {lx}')
+    ax.set_ylabel(f'{metric} {ly}')
+    ax.set_title(f'Per-neuron {metric}')
+    if group_by_mouse:
+        ax.legend(loc='upper right', fontsize=8, title='Mouse')
+
+    ax = axes[1]
+    d = y - x
+    ax.hist(d, bins=40, color='mediumpurple', alpha=0.7, edgecolor='black')
+    ax.axvline(0, color='black', linestyle='--', linewidth=1.5)
+    md = float(np.nanmean(d))
+    ax.axvline(md, color='red', linewidth=2, label=f'Mean Δ = {md:+.4f}')
+    try:
+        from scipy.stats import wilcoxon
+        stat, p = wilcoxon(d)
+        ax.set_title(f'Δ ({ly} − {lx})   Wilcoxon p = {p:.2g}')
+    except Exception:
+        ax.set_title(f'Δ ({ly} − {lx})')
+    ax.set_xlabel(f'{metric}[{ly}] − {metric}[{lx}]')
+    ax.set_ylabel('Number of neurons')
+    ax.legend()
+
+    plt.suptitle(title or f'{metric}: {ly} vs {lx}   (n = {x.size} neurons)',
+                 fontsize=13, fontweight='bold', y=1.02)
+    plt.tight_layout()
+    plt.show()
+    return x, y
+
+
 def plot_cpd_task_state_vs_place(CPD_results, group_by_mouse=True, normalize='none'):
     """Compare per-neuron CPD for task_state vs place.
 
@@ -2358,6 +2463,65 @@ def check_task_state_place_collinearity(mouse_recdays, data_dic,
     print(f"  Max |correlation| across state×place one-hot columns: {max_corr:.4f}")
     print(f"  → Decorrelation: {'GOOD' if max_corr < 0.3 else 'MODERATE' if max_corr < 0.5 else 'POOR'}")
     return max_corr
+
+
+def verify_state_labeling(mouse_recdays, data_dic, max_recdays=None,
+                          verbose=True):
+    """Assert the `State` array matches the `Trial_times` ground truth.
+
+    Ground truth (see `CCGP_STATE_PAIRS.md` §2.1): `Trial_times[r, s]` is the
+    time the animal is AT goal s, so state s occupies
+    `[Trial_times[r, s], Trial_times[r, s+1])`. For every leg this checks that
+    the modal value of `State` over that window equals s.
+
+    This exists because `compute_task_state_arrays` silently mislabeled 72.9%
+    of legs (a per-trial cyclic rotation caused by a running counter that
+    advanced across skipped duplicate boundaries). Nothing downstream noticed:
+    CPD merely fell toward null and the state-vs-place collinearity check read
+    "GOOD" precisely *because* the labels were scrambled. Run this before
+    trusting any `task_state` result.
+
+    Returns (n_correct, n_total). `n_correct == n_total` is the pass condition.
+    """
+    recdays_used = mouse_recdays[:max_recdays] if max_recdays else list(mouse_recdays)
+    n_ok = 0
+    n_tot = 0
+    bad_examples = []
+
+    for mr in recdays_used:
+        for sess in sorted(data_dic[mr].keys()):
+            sd = data_dic[mr][sess]
+            tt_raw = sd.get('Trial_times')
+            if tt_raw is None:
+                continue
+            tt = np.asarray(tt_raw).astype(int)
+            if tt.ndim != 2 or tt.shape[1] < 2:
+                continue
+            num_states = tt.shape[1] - 1
+            state, _, _, _, _ = compute_task_state_arrays(tt)
+            for r in range(tt.shape[0]):
+                for s in range(num_states):
+                    a, b = int(tt[r, s]), int(tt[r, s + 1])
+                    if b <= a or b > len(state):
+                        continue
+                    n_tot += 1
+                    modal = np.bincount(state[a:b], minlength=num_states).argmax()
+                    if modal == s:
+                        n_ok += 1
+                    elif len(bad_examples) < 5:
+                        bad_examples.append((mr, sess, r, s, int(modal)))
+
+    if verbose:
+        pct = 100.0 * n_ok / n_tot if n_tot else float('nan')
+        print(f"State-labeling check (recdays={len(recdays_used)}): "
+              f"{n_ok}/{n_tot} legs correct ({pct:.1f}%)")
+        if n_ok == n_tot:
+            print("  → PASS: State matches Trial_times ground truth")
+        else:
+            print("  → FAIL: task_state results are NOT trustworthy")
+            for mr, sess, r, s, got in bad_examples:
+                print(f"     {mr} sess{sess} trial{r}: true state {s}, got {got}")
+    return n_ok, n_tot
 
 
 def check_since_A_task_state_collinearity(mouse_recdays, data_dic,
