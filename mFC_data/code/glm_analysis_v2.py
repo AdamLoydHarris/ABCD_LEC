@@ -366,6 +366,149 @@ def compute_since_A_arrays(trial_times, num_bins=10):
     return time_since_A, time_to_A, progress_since_A_binned
 
 
+# ---------------------------------------------------------------------------
+# Nose-poke occupancy (reward consumption vs reward timing)
+# ---------------------------------------------------------------------------
+#
+# Poke event tables come from `code/preprocessing/extract_pokes.py`, one per
+# session, columns [entry_bin, exit_bin, port, rewarded, state]. They are
+# already on the same 25 ms grid and first-A_on origin as Neuron_raw and
+# Trial_times, so no conversion is needed here.
+#
+# WHY THIS EXISTS: cells that look time-locked to reward (a peak around 2.5 s)
+# may instead be reward-CONSUMPTION cells firing while the animal is in the
+# port. Median rewarded-poke duration is 2.58 s, so the two hypotheses predict
+# almost the same peri-reward response. Note that a rewarded poke's entry bin
+# IS the reward bin (96.8% identical, 99.99% within one bin) — the state
+# machine advances while the animal is already in the port — so `poke_rewarded`
+# is collinear with the early `time_from_reward` bins BY CONSTRUCTION and its
+# CPD is an arbitrary split of shared variance. The regressor is worth fitting,
+# but the analysis that actually separates the hypotheses is the poke-DURATION
+# split (`run_poke_duration_split`), which exploits the 3.5x spread in
+# consumption-bout length.
+
+_POKE_MAX_DURATION_BINS = 400   # 10 s; longer "pokes" are imputed-exit artifacts
+
+
+def compute_poke_arrays(pokes, n_bins, max_duration_bins=_POKE_MAX_DURATION_BINS):
+    """Per-timepoint in-port indicators, split by whether the poke was rewarded.
+
+    Parameters
+    ----------
+    pokes : (n_pokes, 5) int array or None
+        [entry_bin, exit_bin, port, rewarded, state] from `extract_pokes.py`.
+        `exit_bin` is INCLUSIVE. May be empty — 9 of 191 LEC sessions have no
+        completed trials and ship a legitimate (0, 5) table.
+    n_bins : int
+        Length of the returned arrays. Pass `Neuron_raw.shape[1]`, NOT
+        `len(Locs_raw)`: tracking is not truncated to the neural recording and
+        runs 200-4400 bins longer.
+    max_duration_bins : int
+        Drop pokes longer than this (default 400 = 10 s). 317 pokes dataset-wide
+        exceed it, up to 646 s; they come from dangling entries whose exit was
+        imputed at session end, and would otherwise paint huge blocks of the
+        session as "in port".
+
+    Returns
+    -------
+    poke_rewarded, poke_unrewarded : float 1-D arrays of length `n_bins`
+        1.0 while the animal is inside a port on a rewarded / unrewarded poke.
+        Overlapping or nested pokes (1.3% of same-port intervals) simply OR
+        together. Returned 1-D deliberately — see `attach_pokes` for why a 2-D
+        occupancy matrix must never enter the prepared-session dict.
+    """
+    poke_rewarded = np.zeros(n_bins, dtype=float)
+    poke_unrewarded = np.zeros(n_bins, dtype=float)
+
+    if pokes is None:
+        return poke_rewarded, poke_unrewarded
+    pokes = np.asarray(pokes)
+    if pokes.size == 0:
+        return poke_rewarded, poke_unrewarded
+    if pokes.ndim != 2 or pokes.shape[1] < 4:
+        raise ValueError(f"poke table must be (n_pokes, >=4), got {pokes.shape}")
+
+    entry = pokes[:, 0].astype(int)
+    exit_ = pokes[:, 1].astype(int)
+    rewarded = pokes[:, 3].astype(int)
+
+    # exit_bin is inclusive -> the occupied half-open span is [entry, exit + 1)
+    start = np.clip(entry, 0, n_bins)
+    stop = np.clip(exit_ + 1, 0, n_bins)
+
+    duration = exit_ - entry + 1
+    keep = (stop > start) & (duration <= max_duration_bins)
+
+    for a, b, r in zip(start[keep], stop[keep], rewarded[keep]):
+        if r == 1:
+            poke_rewarded[a:b] = 1.0
+        else:
+            poke_unrewarded[a:b] = 1.0
+
+    # A bin cannot be both; rewarded consumption wins where tables overlap.
+    poke_unrewarded[poke_rewarded > 0] = 0.0
+    return poke_rewarded, poke_unrewarded
+
+
+
+def attach_pokes(data_dic, pokes_dir=None, verbose=True):
+    """Load poke event tables into `data_dic[mouse_recday][session]['Pokes']`.
+
+    Files are `pokes_{mouse}_{d1}_{d2}_{sess}.npy`, so the filename maps
+    directly onto the existing keys: `mouse_recday` == `{mouse}_{d1}_{d2}` and
+    the trailing integer is the session index.
+
+    Stores the RAW (n_pokes, 5) table, not a dense occupancy matrix. This is
+    load-bearing: `truncate_all_arrays` treats every 2-D array as
+    (n_neurons, n_time) and truncates all arrays to the minimum `shape[1]`, so a
+    (n_bins, 9) occupancy matrix — or this (n_pokes, 5) table — placed in the
+    dict returned by `prepare_session_data` would silently truncate FR and every
+    covariate to 9 (or 5) samples. The raw table therefore lives only in the
+    INPUT `data_dic`, which is never truncated; `prepare_session_data` consumes
+    it and returns only 1-D arrays.
+
+    Returns the number of (recday, session) pairs that got a table.
+    """
+    import os
+    import glob as _glob
+
+    if pokes_dir is None:
+        pokes_dir = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            '..', 'data', 'processed_data', 'trialtimes_raw_mingyutest',
+        )
+
+    paths = sorted(_glob.glob(os.path.join(pokes_dir, 'pokes_*.npy')))
+    n_attached = 0
+    n_empty = 0
+    unmatched = []
+
+    for path in paths:
+        stem = os.path.basename(path)[len('pokes_'):-len('.npy')]
+        mouse_recday, _, sess_str = stem.rpartition('_')
+        try:
+            session = int(sess_str)
+        except ValueError:
+            unmatched.append(stem)
+            continue
+        if mouse_recday not in data_dic or session not in data_dic[mouse_recday]:
+            unmatched.append(stem)
+            continue
+        table = np.load(path)
+        data_dic[mouse_recday][session]['Pokes'] = table
+        n_attached += 1
+        n_empty += int(table.size == 0)
+
+    if verbose:
+        n_sessions = sum(len(v) for v in data_dic.values())
+        print(f"attach_pokes: {n_attached}/{len(paths)} poke files attached "
+              f"({n_empty} empty tables) covering {n_attached}/{n_sessions} sessions")
+        if unmatched:
+            print(f"  {len(unmatched)} file(s) had no matching data_dic entry, "
+                  f"e.g. {unmatched[:3]}")
+    return n_attached
+
+
 def compute_distance_to_rewards(trial_times, speed_array):
     reward_times = np.unique(np.sort(trial_times.flatten()))
     reward_times = reward_times[reward_times >= 0]
@@ -698,6 +841,18 @@ def prepare_session_data(session_data, gp_n_bins=10,
         dist_from = np.zeros(max_len)
         dist_to = np.zeros(max_len)
 
+    # Nose-poke occupancy. Optional, exactly like HD_raw above: absent for the
+    # mFC/PFC dataset (no poke tables exist for it), in which case both arrays
+    # are zeros and the regressors contribute nothing. Built at FR.shape[1] --
+    # the neural recording length -- not len(Locs), which runs longer.
+    if 'Pokes' in session_data and session_data['Pokes'] is not None:
+        poke_rewarded, poke_unrewarded = compute_poke_arrays(
+            session_data['Pokes'], n_bins=FR.shape[1]
+        )
+    else:
+        poke_rewarded = np.zeros(FR.shape[1])
+        poke_unrewarded = np.zeros(FR.shape[1])
+
     # Distance-based goal progress: fraction of the inter-reward path travelled.
     # NaN at samples where the animal didn't move at all in the interval
     # (total path = 0); zero-mask them downstream.
@@ -746,6 +901,8 @@ def prepare_session_data(session_data, gp_n_bins=10,
         'time_since_A': time_since_A,
         'time_to_A': time_to_A,
         'progress_since_A_binned': progress_since_A_binned,
+        'poke_rewarded': poke_rewarded,
+        'poke_unrewarded': poke_unrewarded,
         'dist_from_reward': dist_from,
         'dist_to_reward': dist_to,
         'valid_transition_mask': valid_transition_mask,
@@ -936,7 +1093,8 @@ analysis_regressor_names = [
 # decorrelate across tasks (state remaps; see ccgp_state_pairs.py).
 _OPTIONAL_REGRESSORS = [
     'goal_progress_distance', 'task_state',
-    'time_since_A', 'time_to_A', 'progress_since_A'
+    'time_since_A', 'time_to_A', 'progress_since_A',
+    'poke_rewarded', 'poke_unrewarded',
 ]
 _ALL_REGRESSORS = analysis_regressor_names + _OPTIONAL_REGRESSORS
 
@@ -947,6 +1105,8 @@ _ALL_REGRESSORS = analysis_regressor_names + _OPTIONAL_REGRESSORS
 _CANONICAL_ORDER = [
     'place',
     'task_state',
+    'poke_rewarded',
+    'poke_unrewarded',
     'head_direction',
     'goal_progress',
     'goal_progress_distance',
@@ -976,6 +1136,8 @@ _REGRESSOR_NAME_ALIASES = {
 _REGRESSOR_DISPLAY_NAMES = {
     'place':                  'place',
     'task_state':             'task state (A/B/C/D)',
+    'poke_rewarded':          'rewarded poke (in port)',
+    'poke_unrewarded':        'unrewarded poke (in port)',
     'head_direction':         'head direction',
     'goal_progress':          'goal progress',
     'goal_progress_distance': 'goal progress (distance)',
@@ -1035,7 +1197,21 @@ def _resolve_regressor_groups(regressors_to_include, gp_n_bins=10,
     n_cols_per['time_since_A'] = 10  # decile-binned
     n_cols_per['time_to_A'] = 10     # decile-binned
     n_cols_per['progress_since_A'] = gp_n_bins  # equal-width like goal_progress
+    n_cols_per['poke_rewarded'] = 1    # binary indicator
+    n_cols_per['poke_unrewarded'] = 1  # binary indicator
     if parameterization == 'reference_coded':
+        # Reference coding drops one bin per categorical block, which annihilates
+        # a 1-column indicator. Fail loudly rather than emit an empty block whose
+        # CPD would silently be zero.
+        requested = ([_REGRESSOR_NAME_ALIASES.get(r, r) for r in regressors_to_include]
+                     if regressors_to_include is not None else list(analysis_regressor_names))
+        singletons = [r for r in requested if n_cols_per.get(r) == 1]
+        if singletons:
+            raise ValueError(
+                f"parameterization='reference_coded' cannot encode single-column "
+                f"regressors {singletons} (dropping a reference bin leaves 0 "
+                f"columns). Use parameterization='all_bins' for fits including them."
+            )
         n_cols_per = {k: v - 1 for k, v in n_cols_per.items()}
     elif parameterization != 'all_bins':
         raise ValueError(f"parameterization must be 'all_bins' or "
@@ -1081,7 +1257,9 @@ def run_glm_analysis(mouse_recdays, data_dic,
                      parameterization='all_bins',
                      filter_correct_paths=False,
                      max_transition_seconds=None,
-                     bin_size_ms=25):
+                     bin_size_ms=25,
+                     return_scales=False,
+                     scales_only=False):
     """Fit per-neuron OLS GLM with permutation F-tests.
 
     Parameters
@@ -1134,6 +1312,23 @@ def run_glm_analysis(mouse_recdays, data_dic,
         modes — this is intended as an empirical sanity check on the default.
         Pass the SAME value to `compute_tuning_arrays`.
 
+    return_scales : bool, default False
+        Also return `Neuron_scales`. Appended LAST, so the existing 2- and
+        3-tuple returns are unchanged for callers that do not ask for it.
+        Needed by selectivity_geometry.build_alpha_matrix: this GLM fits raw
+        `Neuron_raw` counts, so betas carry each neuron's firing rate. Dividing
+        by the SD makes coefficients unit-free and comparable across neurons —
+        the equivalent of the per-neuron z-scoring Posani et al. (2026) apply
+        before extracting selectivity. Without it, a selectivity-space
+        clustering analysis clusters by firing rate.
+    scales_only : bool, default False
+        Build the design matrix and pooled FR exactly as usual, record the
+        per-neuron SDs, then skip the OLS fit and permutation tests entirely.
+        Use with `return_scales=True` to backfill `neuron_scales` onto an
+        already-cached section in seconds rather than refitting it. Pass the
+        SAME arguments used for the original fit, or the sample set — and hence
+        the SDs — will not match. `GLM_results` etc. come back empty.
+
     Returns
     -------
     GLM_results : dict of {mouse_recday: {neuron_idx: params_array}}
@@ -1142,6 +1337,10 @@ def run_glm_analysis(mouse_recdays, data_dic,
         Per-regressor CPDs plus reserved keys:
           '__r2_full__'  : full-model R² (scalar)
           '__delta_r2__' : {regressor: ΔRSS/TSS} unique R² per regressor
+    Neuron_scales (only if return_scales=True)
+        {mouse_recday: {neuron_idx: {'sd': float, 'mean': float}}} over exactly
+        the samples entering the fit. Units are spikes per bin; multiply by
+        1000/bin_size_ms for Hz.
     """
     local_groups, local_names = _resolve_regressor_groups(
         regressors_to_include, gp_n_bins=gp_n_bins,
@@ -1165,6 +1364,7 @@ def run_glm_analysis(mouse_recdays, data_dic,
     GLM_results = {}
     Permutation_results = {}
     CPD_results = {}
+    Neuron_scales = {}
 
     for mouse_recday in tqdm(mouse_recdays, desc="Processing recording days"):
         print(f"\n{mouse_recday}")
@@ -1172,6 +1372,7 @@ def run_glm_analysis(mouse_recdays, data_dic,
         GLM_results[mouse_recday] = {}
         Permutation_results[mouse_recday] = {}
         CPD_results[mouse_recday] = {}
+        Neuron_scales[mouse_recday] = {}
 
         sessions_for_glm, _ = get_sessions_for_glm(data_dic[mouse_recday])
 
@@ -1221,6 +1422,7 @@ def run_glm_analysis(mouse_recdays, data_dic,
         all_speed, all_acc   = [], []
         all_tf, all_tt       = [], []
         all_tsa, all_tta, all_pga = [], [], []  # A-anchored time/progress
+        all_pkr, all_pku     = [], []  # in-port indicators (rewarded/unrewarded)
         all_df, all_dt       = [], []
         all_locs, all_hd, all_gp = [], [], []
         all_gpd              = []  # distance-based goal progress (continuous 0–1, NaN where no motion)
@@ -1248,6 +1450,8 @@ def run_glm_analysis(mouse_recdays, data_dic,
             all_tsa.append(prep['time_since_A'][nf])
             all_tta.append(prep['time_to_A'][nf])
             all_pga.append(prep['progress_since_A_binned'][nf])
+            all_pkr.append(prep['poke_rewarded'][nf])
+            all_pku.append(prep['poke_unrewarded'][nf])
             all_df.append(prep['dist_from_reward'][nf])
             all_dt.append(prep['dist_to_reward'][nf])
             all_locs.append(prep['Locs'][nf])
@@ -1264,6 +1468,8 @@ def run_glm_analysis(mouse_recdays, data_dic,
         tsa_all   = np.concatenate(all_tsa)  # time_since_A
         tta_all   = np.concatenate(all_tta)  # time_to_A
         pga_all   = np.concatenate(all_pga)  # progress_since_A_binned
+        pkr_all   = np.concatenate(all_pkr)  # poke_rewarded
+        pku_all   = np.concatenate(all_pku)  # poke_unrewarded
         df_all    = np.concatenate(all_df)
         dt_all    = np.concatenate(all_dt)
         locs_all  = np.concatenate(all_locs).astype(int)
@@ -1301,6 +1507,12 @@ def run_glm_analysis(mouse_recdays, data_dic,
 
         # Task state (A/B/C/D): states 0–3 → 4 cols
         state_onehot = (state_all[:, None] == np.arange(_N_TASK_STATES)).astype(float)
+
+        # In-port indicators → 1 col each. Already binary, so they bypass the
+        # continuous_basis branch entirely (no decile edges, no raised cosine),
+        # exactly like place / task_state / HD.
+        PKR_enc = pkr_all.astype(float)[:, None]
+        PKU_enc = pku_all.astype(float)[:, None]
 
         # HD: 36 fixed 10° bins → 36 cols
         hd_bin_idx = np.clip(np.floor((hd_all % 360) / 10).astype(int), 0, 35)
@@ -1371,6 +1583,8 @@ def run_glm_analysis(mouse_recdays, data_dic,
         onehots = {
             'place':                  place_onehot,
             'task_state':             state_onehot,
+            'poke_rewarded':          PKR_enc,
+            'poke_unrewarded':        PKU_enc,
             'head_direction':         HD_onehot,
             'goal_progress':          GP_enc,
             'goal_progress_distance': GPd_enc,
@@ -1403,6 +1617,20 @@ def run_glm_analysis(mouse_recdays, data_dic,
         FR_all = np.concatenate(
             [prepared_sessions[s]['FR'][:, nf] for s, nf in session_filters], axis=1
         )  # [n_neurons × T_total]
+
+        if scales_only:
+            # Everything that decides WHICH samples enter the fit has already
+            # run (session dedup, node filter, transition mask, downsample, and
+            # the degenerate-design skip above), so the SDs recorded here are
+            # exactly those of the fitted samples. Skipping straight past the
+            # lstsq + permutation loop is what makes it cheap to backfill
+            # `neuron_scales` onto sections that are already cached, instead of
+            # paying for a full refit to recover one number per neuron.
+            sd_all, mean_all = FR_all.std(axis=1), FR_all.mean(axis=1)
+            for neuron in range(num_neurons):
+                Neuron_scales[mouse_recday][neuron] = {
+                    'sd': float(sd_all[neuron]), 'mean': float(mean_all[neuron])}
+            continue
 
         # ----------------------------------------------------------------
         # Precompute reduced design matrices once (shared across neurons)
@@ -1487,6 +1715,15 @@ def run_glm_analysis(mouse_recdays, data_dic,
 
                 GLM_results[mouse_recday][neuron]         = params
                 Permutation_results[mouse_recday][neuron] = (F_real, F_perm)
+                # SD of this neuron over exactly the samples that were fitted
+                # (same session dedup, node filter, transition filter and
+                # downsample). Recomputing it outside this loop is the easiest
+                # way to introduce a silent mismatch, which is why it is
+                # recorded here, keyed identically to GLM_results.
+                Neuron_scales[mouse_recday][neuron] = {
+                    'sd': float(np.sqrt(tss / T)) if T > 0 else np.nan,
+                    'mean': float(frs.mean()),
+                }
                 if compute_cpd:
                     # Reserved (__-prefixed) keys carry model-fit context alongside
                     # the per-regressor CPDs. Consumers iterating regressor names
@@ -1498,9 +1735,12 @@ def run_glm_analysis(mouse_recdays, data_dic,
             except Exception:
                 continue
 
+    out = [GLM_results, Permutation_results]
     if compute_cpd:
-        return GLM_results, Permutation_results, CPD_results
-    return GLM_results, Permutation_results
+        out.append(CPD_results)
+    if return_scales:
+        out.append(Neuron_scales)
+    return tuple(out)
 
 
 # ============================================================================
@@ -2761,6 +3001,575 @@ def check_since_A_task_state_collinearity(mouse_recdays, data_dic,
     return max_corr
 
 
+
+# ============================================================================
+# Poke-duration dissociation: time cell vs consumption cell
+# ============================================================================
+#
+# The GLM cannot settle this (see check_poke_reward_collinearity). This can.
+#
+# A rewarded poke starts at the reward and ends when the animal withdraws, and
+# withdrawal time varies 3.5x across pokes (p10 1.10 s, median 2.58 s, p90
+# 3.83 s). That spread is the only thing in the data that separates the two
+# hypotheses:
+#
+#   TIME cell        peak at a FIXED latency after reward, whatever the animal
+#                    does -> peak latency is flat across duration terciles
+#                    (slope 0), and survives on pokes already terminated.
+#   CONSUMPTION cell activity tracks time IN PORT and stops at withdrawal
+#                    -> peak latency grows with poke duration (slope ~1) and
+#                    collapses on short pokes.
+#
+# Peak latency is read from a smoothed trial-averaged PSTH, and terciles are
+# count-matched by subsampling to the smallest tercile so a tercile difference
+# cannot be a power difference (the convention used by
+# time_vs_progress_dissociation.plot_peak_latency_vs_duration).
+
+
+def _pool_poke_covariates(mouse_recdays, data_dic, downsample_factor=10,
+                          max_recdays=None):
+    """Pool the arrays the poke diagnostics need, exactly as run_glm_analysis does."""
+    recdays_used = mouse_recdays[:max_recdays] if max_recdays else list(mouse_recdays)
+    keys = ['poke_rewarded', 'poke_unrewarded', 'time_from_reward', 'Locs']
+    pooled = {k: [] for k in keys}
+    for mr in recdays_used:
+        sessions, _ = get_sessions_for_glm(data_dic[mr])
+        for s in sessions:
+            prep = prepare_session_data(data_dic[mr][s])
+            prep = truncate_all_arrays(prep)
+            prep = downsample_session_data(prep, downsample_factor)
+            nf = prep['Locs'] <= 21
+            for k in keys:
+                pooled[k].append(prep[k][nf])
+    return {k: np.concatenate(v) for k, v in pooled.items()}, len(recdays_used)
+
+
+def check_poke_reward_collinearity(mouse_recdays, data_dic, downsample_factor=10,
+                                   max_recdays=None):
+    """Quantify how far `poke_rewarded` duplicates `time_from_reward`.
+
+    THE critical diagnostic for this analysis. A rewarded poke's entry bin IS the
+    reward bin (96.8% identical across the LEC dataset), so the in-port indicator
+    necessarily overlaps the early time-since-reward bins. This does not make the
+    regressor useless — it makes its CPD an arbitrary split of shared variance,
+    which is the same in-sample failure documented in
+    TIME_VS_PROGRESS_DISSOCIATION.md §2. Read the number, then let
+    `run_poke_duration_split` do the actual adjudication.
+
+    Prints, per time_from_reward decile, the fraction of its samples that fall
+    inside a rewarded poke. A decile at ~1.0 is fully inside the consumption
+    window and its beta cannot be attributed to timing rather than consumption.
+
+    Returns (max_abs_corr, occupancy_per_decile).
+    """
+    from scipy.stats import pearsonr
+
+    pooled, n_rec = _pool_poke_covariates(mouse_recdays, data_dic,
+                                          downsample_factor, max_recdays)
+    pkr, tf = pooled['poke_rewarded'], pooled['time_from_reward']
+
+    edges = compute_decile_edges(tf)
+    if edges is None:
+        print("check_poke_reward_collinearity: insufficient data")
+        return np.nan, np.array([])
+    TF = apply_onehot(tf, edges)
+
+    corrs = np.array([abs(pearsonr(pkr, TF[:, j])[0]) for j in range(TF.shape[1])])
+    occ = np.array([pkr[TF[:, j] > 0].mean() if np.any(TF[:, j] > 0) else np.nan
+                    for j in range(TF.shape[1])])
+
+    print(f"Rewarded-poke vs time-from-reward collinearity "
+          f"(recdays={n_rec}, downsample={downsample_factor}):")
+    print(f"  overall in-port fraction: rewarded={pkr.mean():.3f} "
+          f"unrewarded={pooled['poke_unrewarded'].mean():.3f}")
+    print(f"  max |r| against any time_from_reward decile: {corrs.max():.4f} "
+          f"(decile {int(corrs.argmax())})")
+    print("  decile | median t (bins) | frac inside a rewarded poke | |r|")
+    for j in range(TF.shape[1]):
+        sel = TF[:, j] > 0
+        med = np.median(tf[sel]) if np.any(sel) else np.nan
+        bar = '#' * int(round(20 * (occ[j] if np.isfinite(occ[j]) else 0)))
+        print(f"    {j:>4d} | {med:>15.0f} | {occ[j]:>10.3f} {bar:<20s} | {corrs[j]:.3f}")
+    print("  → deciles near 1.0 are fully inside the consumption window; their")
+    print("    time-coding beta is NOT separable from consumption in-sample.")
+    return float(corrs.max()), occ
+
+
+def check_poke_place_collinearity(mouse_recdays, data_dic, downsample_factor=10,
+                                  max_recdays=None):
+    """Poke indicators vs the 21 place one-hots.
+
+    A poke at port p implies Locs == p (ports are nodes 1–9; 10–21 are corridors),
+    so poke is nested inside place. The animal is at a tower ~88% of the time,
+    so the variance that separates them is the at-tower-but-not-poking residual —
+    which this reports directly.
+
+    Returns (max_abs_corr_rewarded, max_abs_corr_unrewarded).
+    """
+    from scipy.stats import pearsonr
+
+    pooled, n_rec = _pool_poke_covariates(mouse_recdays, data_dic,
+                                          downsample_factor, max_recdays)
+    pkr, pku, locs = pooled['poke_rewarded'], pooled['poke_unrewarded'], pooled['Locs'].astype(int)
+    place = (locs[:, None] == np.arange(1, 22)).astype(float)
+
+    mr_ = max(abs(pearsonr(pkr, place[:, j])[0]) for j in range(21))
+    mu_ = max(abs(pearsonr(pku, place[:, j])[0]) for j in range(21))
+
+    at_tower = locs <= 9
+    poking = (pkr > 0) | (pku > 0)
+    print(f"Poke vs place collinearity (recdays={n_rec}, downsample={downsample_factor}):")
+    print(f"  time at tower nodes (1–9): {at_tower.mean():.3f}")
+    print(f"  of tower time, fraction poking: {poking[at_tower].mean():.3f} "
+          f"→ at-tower-not-poking residual = {1 - poking[at_tower].mean():.3f}")
+    print(f"  max |r| vs any place column: rewarded={mr_:.4f} unrewarded={mu_:.4f}")
+    print(f"  poke samples landing off a tower node: "
+          f"rewarded={np.mean(locs[pkr > 0] > 9):.4f} "
+          f"unrewarded={np.mean(locs[pku > 0] > 9):.4f}")
+    print("  → Expect ~0 for rewarded and a few % for unrewarded. Measured "
+          "per-bout\n    agreement is 0.985 (rewarded) vs 0.679 (unrewarded): the brief "
+          "~175 ms\n    unrewarded pokes happen while the tracked centroid is still moving, "
+          "so\n    the tracker bins them to an adjacent edge. This is NOT a clock offset —"
+          "\n    Trial_times → Task[state] matches Locs at 0.998 with a best lag of 0.")
+    return float(mr_), float(mu_)
+
+
+# ============================================================================
+# Poke-duration dissociation: time cell vs consumption cell
+# ============================================================================
+#
+# The GLM cannot settle this (see check_poke_reward_collinearity). This can.
+#
+# A rewarded poke starts at the reward and ends when the animal withdraws, and
+# withdrawal time varies 3.5x across pokes (p10 1.10 s, median 2.58 s, p90
+# 3.83 s). That spread is the only thing in the data that separates the two
+# hypotheses:
+#
+#   TIME cell        peak at a FIXED latency after reward, whatever the animal
+#                    does -> peak latency is flat across duration terciles
+#                    (slope 0), and survives on pokes already terminated.
+#   CONSUMPTION cell activity tracks time IN PORT and stops at withdrawal
+#                    -> peak latency grows with poke duration (slope ~1) and
+#                    collapses on short pokes.
+#
+# Peak latency is read from a smoothed trial-averaged PSTH, and terciles are
+# count-matched by subsampling to the smallest tercile so a tercile difference
+# cannot be a power difference (the convention used by
+# time_vs_progress_dissociation.plot_peak_latency_vs_duration).
+
+
+def build_poke_psth(mouse_recdays, data_dic, window_bins=(-20, 240),
+                    max_recdays=None, bin_size_ms=25,
+                    max_duration_bins=_POKE_MAX_DURATION_BINS):
+    """Peri-reward spike matrices for every rewarded poke, per recday.
+
+    Uses RAW 25 ms bins (no downsampling) — the whole analysis is about
+    within-bout timing, so the decimation used for the GLM would throw away
+    exactly the resolution that matters.
+
+    Returns {mouse_recday: dict(psth=(n_pokes, n_neurons, n_lags) float32,
+                                duration=(n_pokes,) int, lags=(n_lags,) int)}
+    where lag 0 is the reward bin (== the poke entry bin).
+    """
+    recdays_used = mouse_recdays[:max_recdays] if max_recdays else list(mouse_recdays)
+    lo, hi = window_bins
+    lags = np.arange(lo, hi)
+    out = {}
+
+    for mr in tqdm(recdays_used, desc='poke PSTH'):
+        sessions, _ = get_sessions_for_glm(data_dic[mr])
+        chunks, durs = [], []
+        for s in sessions:
+            sd = data_dic[mr][s]
+            pokes = sd.get('Pokes')
+            if pokes is None:
+                continue
+            pokes = np.asarray(pokes)
+            if pokes.size == 0:
+                continue
+            FR = sd['Neuron_raw']
+            n_bins = FR.shape[1]
+            rew = pokes[pokes[:, 3] == 1]
+            dur = rew[:, 1] - rew[:, 0] + 1
+            rew = rew[(dur > 0) & (dur <= max_duration_bins)]
+            dur = dur[(dur > 0) & (dur <= max_duration_bins)]
+            for (entry, _exit, _p, _r, _st), d in zip(rew, dur):
+                a, b = int(entry) + lo, int(entry) + hi
+                if a < 0 or b > n_bins:
+                    continue          # keep only fully-covered windows
+                chunks.append(FR[:, a:b].astype(np.float32))
+                durs.append(int(d))
+        if chunks:
+            out[mr] = {'psth': np.stack(chunks), 'duration': np.asarray(durs),
+                       'lags': lags, 'bin_size_ms': bin_size_ms}
+    return out
+
+
+def _smooth(x, sigma_bins):
+    return gaussian_filter1d(x, sigma=sigma_bins, axis=-1, mode='nearest')
+
+
+def run_poke_duration_split(psth_dic, n_terciles=3, smooth_sigma_bins=6,
+                            min_pokes_per_tercile=8, seed=0,
+                            peak_search_from_bin=2, min_modulation_z=3.0):
+    """Per-neuron response OFFSET latency within each poke-duration tercile.
+
+    Terciles are count-matched (subsampled to the smallest) so a tercile
+    difference cannot be a power difference. The headline statistic is the OLS
+    slope of **offset latency** on tercile median duration, both in seconds:
+
+        slope ~ 0  -> fixed-latency TIME cell
+        slope ~ 1  -> withdrawal-locked CONSUMPTION cell
+
+    OFFSET, not peak, is the primary statistic. The synthetic control caught
+    this: a consumption cell is a BOXCAR over the bout, and a plateau has no
+    well-defined argmax — the planted consumption cell returned peak slope
+    +0.20 (arbitrary, peak at 0.93 s) while the planted withdrawal BUMP
+    returned +0.96. Offset latency (last crossing of half-max above baseline)
+    is well defined for a plateau and a bump alike, so it scores both at ~1 and
+    the fixed-latency time cell at ~0. `peak_slope` is still reported, as
+    secondary colour only.
+
+    Neurons whose peri-reward modulation does not reach `min_modulation_z`
+    baseline SDs are DROPPED rather than assigned a slope: an unmodulated cell
+    has no offset to measure, and the planted noise cell otherwise returns a
+    confident-looking -0.77. (Same lesson as the `r2_floor` gate in
+    time_vs_progress_dissociation.py.)
+
+    Returns a list of per-neuron dicts.
+    """
+    rng = np.random.default_rng(seed)
+    rows = []
+
+    for mr, d in psth_dic.items():
+        psth, dur, lags = d['psth'], d['duration'], d['lags']
+        dt = d['bin_size_ms'] / 1000.0
+        if len(dur) < n_terciles * min_pokes_per_tercile:
+            continue
+        edges = np.quantile(dur, np.linspace(0, 1, n_terciles + 1))
+        groups = []
+        for k in range(n_terciles):
+            lo_, hi_ = edges[k], edges[k + 1]
+            sel = np.where((dur >= lo_) & (dur <= hi_))[0] if k == n_terciles - 1 \
+                else np.where((dur >= lo_) & (dur < hi_))[0]
+            groups.append(sel)
+        if min(len(gp) for gp in groups) < min_pokes_per_tercile:
+            continue
+        nmin = min(len(gp) for gp in groups)
+        groups = [rng.choice(gp, nmin, replace=False) for gp in groups]
+
+        n_neurons = psth.shape[1]
+        means = np.stack([_smooth(psth[gp].mean(0), smooth_sigma_bins) for gp in groups])
+        tercile_dur = np.array([np.median(dur[gp]) for gp in groups]) * dt
+
+        pre = lags < 0
+        post = lags >= peak_search_from_bin
+        lags_post_s = lags[post] * dt
+
+        for n in range(n_neurons):
+            curves = means[:, n, :]
+            if not np.all(np.isfinite(curves)):
+                continue
+            base = curves[:, pre].mean(axis=1, keepdims=True) if pre.any() else 0.0
+            noise = curves[:, pre].std() if pre.any() else 0.0
+            bs = curves - base
+            post_bs = bs[:, post]
+            amp = post_bs.max(axis=1)
+            if noise <= 0 or amp.min() <= min_modulation_z * noise:
+                continue                       # unmodulated: no offset to measure
+
+            offsets, peaks = [], []
+            for k in range(n_terciles):
+                c = post_bs[k]
+                i_pk = int(np.argmax(c))
+                peaks.append(lags_post_s[i_pk])
+                half = 0.5 * c[i_pk]
+                above = np.where(c[i_pk:] >= half)[0]
+                offsets.append(lags_post_s[i_pk + above[-1]] if above.size
+                               else lags_post_s[i_pk])
+            offsets = np.asarray(offsets)
+            peaks = np.asarray(peaks)
+
+            rows.append({
+                'mouse_recday': mr, 'mouse': str(mr).split('_')[0], 'neuron': n,
+                'slope': float(np.polyfit(tercile_dur, offsets, 1)[0]),
+                'peak_slope': float(np.polyfit(tercile_dur, peaks, 1)[0]),
+                'offsets_s': offsets, 'peaks_s': peaks,
+                'tercile_durations_s': tercile_dur,
+                'offset_mean_s': float(offsets.mean()),
+                'peak_mean_s': float(peaks.mean()),
+                'modulation_z': float(amp.min() / noise),
+                'n_pokes_per_tercile': int(nmin),
+                'mean_rate': float(psth[:, n, :].mean()),
+            })
+    return rows
+
+
+def poke_short_bout_contrast(psth_dic, short_max_s=2.0, probe_window_s=(2.0, 3.0),
+                             baseline_window_s=(-0.5, 0.0), smooth_sigma_bins=6,
+                             min_pokes=8):
+    """The sharpest single contrast: on pokes the animal has ALREADY left, is
+    there still a response in the probe window?
+
+    Restricts to rewarded pokes shorter than `short_max_s`, so by 2–3 s the
+    animal is out of the port. A time cell keeps its peak there; a consumption
+    cell cannot. Returns per-neuron dicts with the baseline-subtracted probe
+    response on short vs long pokes.
+    """
+    rows = []
+    for mr, d in psth_dic.items():
+        psth, dur, lags = d['psth'], d['duration'], d['lags']
+        dt = d['bin_size_ms'] / 1000.0
+        dur_s = dur * dt
+        short = np.where(dur_s <= short_max_s)[0]
+        long_ = np.where(dur_s > short_max_s)[0]
+        if len(short) < min_pokes or len(long_) < min_pokes:
+            continue
+        t = lags * dt
+        probe = (t >= probe_window_s[0]) & (t < probe_window_s[1])
+        base = (t >= baseline_window_s[0]) & (t < baseline_window_s[1])
+        if not probe.any() or not base.any():
+            continue
+        ms = _smooth(psth[short].mean(0), smooth_sigma_bins)
+        ml = _smooth(psth[long_].mean(0), smooth_sigma_bins)
+        for n in range(psth.shape[1]):
+            rows.append({
+                'mouse_recday': mr, 'mouse': str(mr).split('_')[0], 'neuron': n,
+                'probe_short': float(ms[n, probe].mean() - ms[n, base].mean()),
+                'probe_long': float(ml[n, probe].mean() - ml[n, base].mean()),
+                'n_short': int(len(short)), 'n_long': int(len(long_)),
+            })
+    return rows
+
+
+def plot_poke_duration_split(psth_dic, split_rows, neuron_key=None,
+                             smooth_sigma_bins=6, seed=0):
+    """Population figure for the duration split.
+
+    Panel 1: offset-slope histogram with the two hypothesis landmarks
+             (0 = fixed-latency time cell, 1 = withdrawal-locked consumption).
+    Panel 2: per-tercile response OFFSET vs tercile duration, mean +/- SEM,
+             against the slope-0 and slope-1 reference lines.
+    Panel 3: example neuron's three count-matched PSTHs (highest |slope| by
+             default), with each tercile's median withdrawal time marked.
+    """
+    if not split_rows:
+        print("plot_poke_duration_split: no neurons passed the tercile criteria")
+        return None
+    slopes = np.array([r['slope'] for r in split_rows])
+    peaks = np.stack([r['offsets_s'] for r in split_rows])
+    durs = np.stack([r['tercile_durations_s'] for r in split_rows])
+
+    fig, axes = plt.subplots(1, 3, figsize=(16, 4.6))
+
+    ax = axes[0]
+    ax.hist(slopes, bins=40, color='steelblue', alpha=0.8, edgecolor='black')
+    ax.axvline(0, color='k', ls='--', lw=1.5, label='0 = time cell')
+    ax.axvline(1, color='crimson', ls='--', lw=1.5, label='1 = consumption')
+    ax.axvline(np.median(slopes), color='orange', lw=2,
+               label=f'median {np.median(slopes):+.2f}')
+    ax.set_xlabel('d(response offset) / d(poke duration)')
+    ax.set_ylabel('neurons')
+    ax.set_title(f'Offset-latency slope (n={len(slopes)} modulated cells)')
+    ax.legend(fontsize=7)
+
+    ax = axes[1]
+    md, mp = durs.mean(0), peaks.mean(0)
+    sp = peaks.std(0) / max(1, np.sqrt(len(peaks)))
+    ax.errorbar(md, mp, yerr=sp, fmt='o-', color='steelblue', capsize=4,
+                label='observed')
+    ax.plot(md, [mp[0]] * len(md), 'k--', lw=1, label='time cell (flat)')
+    ax.plot(md, md, ls='--', color='crimson', lw=1, label='consumption (offset=exit)')
+    ax.set_xlabel('poke duration (s, tercile median)')
+    ax.set_ylabel('response offset (s)')
+    ax.set_title('Response offset vs poke duration')
+    ax.legend(fontsize=7)
+
+    ax = axes[2]
+    if neuron_key is None:
+        best = int(np.argmax(np.abs(slopes)))
+        neuron_key = (split_rows[best]['mouse_recday'], split_rows[best]['neuron'])
+    else:
+        best = next((i for i, r in enumerate(split_rows)
+                     if (r['mouse_recday'], r['neuron']) == tuple(neuron_key)), None)
+        if best is None:
+            raise KeyError(f"{neuron_key} is not in split_rows")
+    mr, n = neuron_key
+    d = psth_dic[mr]
+    psth, dur, lags = d['psth'], d['duration'], d['lags']
+    dt = d['bin_size_ms'] / 1000.0
+    edges = np.quantile(dur, np.linspace(0, 1, 4))
+    rng = np.random.default_rng(seed)
+    groups = []
+    for k in range(3):
+        sel = np.where((dur >= edges[k]) & (dur <= edges[k + 1]))[0] if k == 2 \
+            else np.where((dur >= edges[k]) & (dur < edges[k + 1]))[0]
+        groups.append(sel)
+    nmin = min(len(gp) for gp in groups)
+    cmap = plt.get_cmap('viridis')
+    for k, gp in enumerate(groups):
+        gp = rng.choice(gp, nmin, replace=False)
+        curve = _smooth(psth[gp][:, n, :].mean(0), smooth_sigma_bins) / dt
+        col = cmap(k / 2)
+        med_exit = np.median(dur[gp]) * dt
+        ax.plot(lags * dt, curve, color=col, lw=1.6,
+                label=f'{np.median(dur[gp]) * dt:.1f} s bouts')
+        ax.axvline(med_exit, color=col, ls=':', lw=1.2)
+    ax.axvline(0, color='k', lw=1)
+    ax.set_xlabel('time from reward (s)')
+    ax.set_ylabel('firing rate (spk/s)')
+    ax.set_title(f'{mr} n{n}  offset-slope={slopes[best]:+.2f}\n'
+                 f'(dotted = median withdrawal)')
+    ax.legend(fontsize=7)
+
+    plt.suptitle('Poke-duration dissociation: fixed-latency timing vs consumption',
+                 fontsize=13, fontweight='bold', y=1.03)
+    plt.tight_layout()
+    plt.show()
+    return fig
+
+
+# ----------------------------------------------------------------------------
+# Synthetic positive control (MANDATORY gate)
+# ----------------------------------------------------------------------------
+
+_SYNTH_POKE_CELLS = ['consumption', 'time', 'withdrawal', 'noise']
+
+
+# ----------------------------------------------------------------------------
+# Synthetic positive control (MANDATORY gate)
+# ----------------------------------------------------------------------------
+
+_SYNTH_POKE_CELLS = ['consumption', 'time', 'withdrawal', 'noise']
+
+
+def make_synthetic_poke_data(data_dic, mouse_recdays, peak_s=2.5, width_s=0.4,
+                             rate_hi=0.6, rate_lo=0.02, seed=0):
+    """Plant four cells with known ground truth into REAL covariate structure.
+
+    Returns a shallow copy of `data_dic` whose `Neuron_raw` is replaced by four
+    synthetic neurons per session, driven by that session's real poke table and
+    real Trial_times:
+
+      0 consumption : fires while inside a rewarded poke, stops at withdrawal
+      1 time        : Gaussian bump at `peak_s` after reward, whatever the animal does
+      2 withdrawal  : Gaussian bump locked to poke EXIT
+      3 noise       : constant rate
+
+    THE GATE: `run_poke_duration_split` must return slope ~1 for the consumption
+    cell and slope ~0 for the time cell, and the GLM must send CPD to
+    `poke_rewarded` vs `time_from_reward` accordingly. Because a rewarded poke's
+    onset IS the reward onset, there is no other way to know the pipeline can
+    tell these two hypotheses apart — the real data cannot reveal it. See
+    `SYNTHETIC_CONTROLS` practice notes in CCGP_STATE_PAIRS.md §7.
+    """
+    rng = np.random.default_rng(seed)
+    bin_s = 0.025
+    peak_b = peak_s / bin_s
+    width_b = width_s / bin_s
+    synth = {}
+
+    for mr in mouse_recdays:
+        if mr not in data_dic:
+            continue
+        synth[mr] = {}
+        for s, sd in data_dic[mr].items():
+            sd = dict(sd)
+            FR = sd['Neuron_raw']
+            n_bins = FR.shape[1]
+            pokes = sd.get('Pokes')
+            tt = sd.get('Trial_times')
+
+            pk_r, _pk_u = compute_poke_arrays(pokes, n_bins)
+
+            # time-cell drive: bump at peak_s after EVERY reward boundary
+            time_drive = np.zeros(n_bins)
+            wd_drive = np.zeros(n_bins)
+            if tt is not None and np.asarray(tt).size:
+                for t0 in np.unique(np.asarray(tt).astype(int).ravel()):
+                    c = int(t0 + peak_b)
+                    a, b = max(0, c - int(4 * width_b)), min(n_bins, c + int(4 * width_b))
+                    if b > a:
+                        time_drive[a:b] += np.exp(
+                            -0.5 * ((np.arange(a, b) - c) / width_b) ** 2)
+            if pokes is not None and np.asarray(pokes).size:
+                p = np.asarray(pokes)
+                for entry, exit_, _pt, r, _st in p[p[:, 3] == 1]:
+                    if exit_ - entry + 1 > _POKE_MAX_DURATION_BINS:
+                        continue
+                    c = int(exit_)
+                    a, b = max(0, c - int(4 * width_b)), min(n_bins, c + int(4 * width_b))
+                    if b > a:
+                        wd_drive[a:b] += np.exp(
+                            -0.5 * ((np.arange(a, b) - c) / width_b) ** 2)
+
+            drives = np.stack([
+                pk_r,
+                np.clip(time_drive, 0, 1),
+                np.clip(wd_drive, 0, 1),
+                np.zeros(n_bins),
+            ])
+            lam = rate_lo + (rate_hi - rate_lo) * drives
+            sd['Neuron_raw'] = rng.poisson(lam).astype(float)
+            sd['num_neurons'] = len(_SYNTH_POKE_CELLS)
+            synth[mr][s] = sd
+    return synth
+
+
+def run_synthetic_poke_controls(data_dic, mouse_recdays, max_recdays=3, **kw):
+    """Run the synthetic cells through the REAL duration-split pipeline.
+
+    Prints the recovered slope per planted cell type and returns
+    {cell_type: median_slope}. Gate: consumption > 0.5, time < 0.35, and
+    consumption must exceed time.
+    """
+    mrs = list(mouse_recdays)[:max_recdays]
+    synth = make_synthetic_poke_data(data_dic, mrs, **kw)
+    psth = build_poke_psth(mrs, synth)
+    rows = run_poke_duration_split(psth)
+
+    out = {}
+    print("Synthetic poke controls — recovered OFFSET-latency slope")
+    print("  (expected: consumption ~1, time ~0, withdrawal ~1, noise DROPPED)")
+    for i, name in enumerate(_SYNTH_POKE_CELLS):
+        sl = np.array([r['slope'] for r in rows if r['neuron'] == i])
+        pk = np.array([r['peak_slope'] for r in rows if r['neuron'] == i])
+        off = np.array([r['offset_mean_s'] for r in rows if r['neuron'] == i])
+        out[name] = float(np.median(sl)) if sl.size else np.nan
+        if sl.size:
+            print(f"    {name:12s} offset-slope={out[name]:+.3f}  "
+                  f"peak-slope={np.median(pk):+.3f}  "
+                  f"mean offset={off.mean():.2f} s  (n={sl.size} recdays)")
+        else:
+            print(f"    {name:12s} dropped by the modulation gate "
+                  f"(correct for 'noise')")
+
+    ok = (out.get('consumption', np.nan) > 0.5
+          and out.get('time', np.nan) < 0.35
+          and out.get('consumption', -9) > out.get('time', 9)
+          and np.isnan(out.get('noise', np.nan)))
+    print(f"  → GATE {'PASS' if ok else 'FAIL'}: the split "
+          f"{'separates' if ok else 'does NOT separate'} consumption from timing"
+          f"{'' if np.isnan(out.get('noise', np.nan)) else '; NOISE CELL NOT DROPPED'}")
+    return out, ok
+
+
+# ============================================================================
+# Save / load + light publication style
+# ============================================================================
+#
+# Lightweight section-level wrappers for caching fits and exporting figures.
+# Convention: every artifact lives under
+#     {save_dir}/{section_name}__{key}.pkl    (result dicts)
+#     {save_dir}/{section_name}__{name}.pdf   (figures)
+# Persistent dir, section-prefixed filenames; re-running a fit overwrites the
+# pickle, and `run_or_load_glm` short-circuits the fit when all expected
+# pickles already exist.
+#
+# Figure styling follows the .claude/skills/gridmaze-plotter SKILL: Arial 8pt,
+# top/right spines hidden, Type-42 fonts for editable PDFs. Colors of the
+# existing plotting functions are left alone (per user pick).
+
 # ============================================================================
 # Save / load + light publication style
 # ============================================================================
@@ -2842,7 +3651,7 @@ def _artifact_path(save_dir, section_name, key, ext):
 # Result keys that `save_section` / `load_glm_results` understand for fitted
 # artifacts. Extra entries in `results` are saved verbatim under their key.
 _GLM_RESULT_KEYS = ('glm_results', 'permutation_results', 'cpd_results',
-                    'tuned_dict', 'mouse_tuning_concat')
+                    'neuron_scales', 'tuned_dict', 'mouse_tuning_concat')
 
 
 def save_section(section_name, save_dir, *, results=None,
@@ -2926,10 +3735,14 @@ def run_or_load_glm(mouse_recdays, data_dic, save_dir, section_name,
     """
     import os
     compute_cpd = bool(kwargs.get('compute_cpd', False))
+    return_scales = bool(kwargs.get('return_scales', False))
 
+    # Order must mirror run_glm_analysis's return tuple exactly.
     needed = ['glm_results', 'permutation_results']
     if compute_cpd:
         needed.append('cpd_results')
+    if return_scales:
+        needed.append('neuron_scales')
 
     paths = {k: _artifact_path(save_dir, section_name, k, 'pkl') for k in needed}
 
