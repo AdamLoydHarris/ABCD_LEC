@@ -96,6 +96,24 @@ def run(args, data_dic=None, sleep_loader=None, region="LEC"):
         if rd not in data_dic:
             print(f"{rd}: not in data_dic, skipping", flush=True)
             continue
+        if args.recday_average:
+            r = ph.analyse_recday_taskphase_ring(data_dic[rd], cfg)
+            if r is None:
+                print(f"{rd}: no usable sessions for recday-average", flush=True)
+                continue
+            r["mouse_recday"], r["region"] = rd, region
+            g = r["geometry"]
+            flag = "  <-- RING?" if (g["top_over_diameter"] > 0.5
+                                     and r["coverage"] > 0.5) else ""
+            print(f"  [{rd}] n={r['n_neurons']} sessions={r['n_sessions']} "
+                  f"pooled_trials={r['n_trials_total']} | "
+                  f"top/diam={g['top_over_diameter']:.2f} coverage={r['coverage']:.3f} "
+                  f"align={r['alignment']:.3f} CV={r.get('cv_alignment', np.nan):.3f}{flag}",
+                  flush=True)
+            _save(r, out_dir, f"{rd}__ringavg")
+            n_done += 1
+            continue
+
         sessions, _ = glm.get_sessions_for_glm(data_dic[rd])
         rings = {}
         for sess in sessions:
@@ -169,6 +187,9 @@ def parse_args(argv=None):
                    help="also run the (invalid, reference-only) shift null")
     p.add_argument("--project", action="store_true",
                    help="also decode instantaneous wake (+ sleep) with the ring")
+    p.add_argument("--recday-average", dest="recday_average", action="store_true",
+                   help="one cross-session pooled ring per recday (session-weighted, "
+                        "A-anchored) instead of per-session rings")
     return p.parse_args(argv)
 
 

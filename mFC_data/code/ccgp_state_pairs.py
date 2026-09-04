@@ -172,14 +172,26 @@ def _norm_to_samples(norm, config):
     return X, np.asarray(y), np.asarray(tid)
 
 
-def build_task_state_matrices(data_dic, mouse_recday, config):
+def build_task_state_matrices(data_dic, mouse_recday, config, neuron_subset=None):
     """Per unique task: one z-scored population vector per (trial, state).
 
-    Returns list of dicts {session, task (4,), X (n_trials*4, n_neurons), y_state, trial_id},
-    all sharing the same neuron columns. Empty list if the recday is unusable.
+    Returns list of dicts {session, task (4,), X (n_trials*4, n_neurons), y_state, trial_id,
+    neuron_idx}, all sharing the same neuron columns. Empty list if the recday is unusable.
 
     Deduplication to one session per unique task is mandatory (sessions [0,3] and [4,7] repeat the
     same task) — a "held-out" task would otherwise be present in training.
+
+    Parameters
+    ----------
+    neuron_subset : array-like of int, optional
+        Rows of `Neuron_raw` to keep, applied BEFORE the zero-variance filter. This is how a
+        per-region or count-matched decoder is built. Note that the neuron index is
+        depth-ordered (corr of row index with y_um = +0.976 to +0.988), so `arange(n)` is a
+        superficial-biased subset and any count-matching subsample must be RANDOM.
+
+    `neuron_idx` is the join key. The function drops neurons with no variance in any task, so
+    the surviving columns are not `neuron_subset` and are not `arange(n)`; without this,
+    per-region columns cannot be checked against `unit_regions`, whose join is positional.
     """
     recday_data = data_dic.get(mouse_recday)
     if not recday_data:
@@ -212,6 +224,12 @@ def build_task_state_matrices(data_dic, mouse_recday, config):
         if norm.shape[2] != config.num_bins_per_state * config.num_task_states:
             continue
 
+        if neuron_subset is not None:
+            sub = np.asarray(neuron_subset, dtype=int)
+            if sub.size == 0 or sub.max(initial=-1) >= norm.shape[0]:
+                continue
+            norm = norm[sub]
+
         X, y, tid = _norm_to_samples(norm, config)
         tasks.append({'session': sess, 'task': task.astype(int), 'X': X, 'y_state': y, 'trial_id': tid})
 
@@ -230,7 +248,13 @@ def build_task_state_matrices(data_dic, mouse_recday, config):
     if keep.sum() < config.min_neurons:
         return []
 
+    # Neuron_raw rows of the surviving columns, in column order — the positional join key.
+    base = (np.arange(tasks[0]['X'].shape[1]) if neuron_subset is None
+            else np.asarray(neuron_subset, dtype=int))
+    surviving = base[keep]
+
     for t in tasks:
+        t['neuron_idx'] = surviving
         Xk = t['X'][:, keep]
         if config.zscore == 'per_task':
             # Label-free (per-neuron mean/std over this task's samples), so not leakage. This is

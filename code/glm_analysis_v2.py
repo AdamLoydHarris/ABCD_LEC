@@ -25,11 +25,28 @@ Sibling of glm_analysis.py. Differences:
 Original glm_analysis.py is unchanged.
 """
 
+import time
+
 import numpy as np
 from scipy.ndimage import gaussian_filter1d
 from tqdm import tqdm
 from collections import defaultdict
 import matplotlib.pyplot as plt
+
+
+def _glm_cv():
+    """Import `glm_cv` from this file's directory.
+
+    Imported lazily and by path, like `_recday_registry`, so the mFC copy of this module --
+    which sits beside no `glm_cv.py` -- degrades at the call site instead of failing at
+    import time.
+    """
+    import os, sys
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import glm_cv
+    return glm_cv
 
 
 # ============================================================================
@@ -227,6 +244,67 @@ def compute_poke_arrays(pokes, n_bins, max_duration_bins=_POKE_MAX_DURATION_BINS
     # A bin cannot be both; rewarded consumption wins where tables overlap.
     poke_unrewarded[poke_rewarded > 0] = 0.0
     return poke_rewarded, poke_unrewarded
+
+
+def load_data_dic(path=None, *, validate=True, apply_exclusions=True, verbose=True):
+    """Load a `data_dic` pickle, drop known-bad recdays, and check the pairing.
+
+    Use this instead of a bare `pickle.load`. The two validators it runs are the only
+    checks that can catch a recday whose neural data came from a different recording day
+    than its behaviour: the neural data is binned onto the behavioural timeline, so every
+    shape and length check passes regardless. See `recday_registry` and
+    `docs/BUG_ly05_recday_mismatch.md`.
+
+    Parameters
+    ----------
+    path : str, optional
+        Defaults to `../data/processed_data/data_dic_lec.pkl` relative to this file.
+    validate : bool, default True
+        Raise if any recday's `Neuron_raw` row count disagrees with the QC unit count of
+        the sorted block it is named after, or if any session's `Task` disagrees with its
+        own day's pyControl `active_poke`.
+    apply_exclusions : bool, default True
+        Drop `recday_registry.EXCLUDE_RECDAYS`, with the reason printed.
+    """
+    import os
+
+    if path is None:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            '..', 'data', 'processed_data', 'data_dic_lec.pkl')
+    data_dic = _load_pickle(path)
+    if verbose:
+        print(f"load_data_dic: {len(data_dic)} recdays from {os.path.basename(path)}")
+
+    registry = _recday_registry()
+    if registry is None:
+        if verbose:
+            print("  recday_registry unavailable — exclusions and guards SKIPPED")
+        return data_dic
+
+    if apply_exclusions:
+        data_dic = registry.apply_exclusions(data_dic, verbose=verbose)
+    if validate:
+        registry.validate_data_dic(data_dic, strict=True, verbose=verbose)
+        registry.validate_tasks_against_pycontrol(data_dic, strict=True, verbose=verbose)
+    return data_dic
+
+
+def _recday_registry():
+    """Import `recday_registry` from this file's directory, or None if unavailable.
+
+    Imported lazily and by path so the PFC copy of this module, which sits beside no
+    ephys tree, degrades to a no-op instead of failing at import time.
+    """
+    import os, sys
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    try:
+        import recday_registry
+        return recday_registry
+    except Exception as exc:                      # noqa: BLE001 - advisory path
+        print(f"_recday_registry: not available ({exc})")
+        return None
 
 
 def attach_pokes(data_dic, pokes_dir=None, verbose=True):
@@ -613,6 +691,40 @@ def get_sessions_for_glm(recday_data):
     return list(unique_tasks.values()), list(unique_tasks.keys())
 
 
+#: Column of a (T, 2) `HD_raw` to use as head direction. Column 0 is `back2mid_deg`
+#: (head_back -> head_mid), the body/head axis; column 1 is `earL2earR_deg`, which is the
+#: same heading rotated ~90 deg. See `sleap_preprocess_lEC.ipynb`.
+_HD_COLUMN = 0
+
+
+def _extract_head_direction(hd_raw, n_expected):
+    """Return a 1-D head-direction vector of length `n_expected` from `HD_raw`.
+
+    `HD_raw` is stored as (T, 2) = [back2mid_deg, earL2earR_deg] -- two angles about 90 deg
+    apart. This used to be `HD_raw.flatten()`, which INTERLEAVES the two columns into a
+    2T-length vector; `truncate_all_arrays` then cut every array to the shortest (T), so
+    the GLM received `HD[:T]` = `back2mid[:T/2]` interleaved with `earL2earR[:T/2]`. That
+    is half the session, mixed with a 90-deg-rotated copy of itself, and misaligned with
+    every other regressor from the second sample on. Every HD result fitted before this fix
+    is noise (see docs/ANATOMY_SPLIT_PLAN.md section 6).
+
+    Verified before the fix (code/w0_gates.py, gate 2, 187 sessions): the signed circular
+    difference `earL2earR - back2mid` has median |diff| 84.8 deg and sits within 25 deg of
+    +/-90 for 98.3% of samples, so the columns are what the preprocessing docstring says.
+    """
+    hd = np.asarray(hd_raw, dtype=float)
+    if hd.ndim == 2:
+        if hd.shape[1] == 0:
+            return np.full(n_expected, np.nan)
+        col = _HD_COLUMN if hd.shape[1] > _HD_COLUMN else 0
+        hd = hd[:, col]
+    else:
+        hd = hd.ravel()
+    if len(hd) < n_expected:
+        hd = np.concatenate([hd, np.full(n_expected - len(hd), np.nan)])
+    return hd[:n_expected]
+
+
 def prepare_session_data(session_data, gp_n_bins=10,
                          task=None,
                          filter_correct_paths=False,
@@ -633,7 +745,7 @@ def prepare_session_data(session_data, gp_n_bins=10,
         Acc = np.zeros(len(Locs))
 
     if 'HD_raw' in session_data and session_data['HD_raw'] is not None:
-        HD = session_data['HD_raw'].flatten()
+        HD = _extract_head_direction(session_data['HD_raw'], len(Locs))
     else:
         HD = np.full(len(Locs), np.nan)
 
@@ -750,16 +862,127 @@ def truncate_all_arrays(data_dict):
     return truncated
 
 
-def downsample_session_data(data_dict, factor):
-    """Downsample all arrays by taking every `factor`th sample along the time axis."""
+#: How each `prepare_session_data` field is aggregated by `downsample_mode='bin'`.
+#: Anything not listed falls back to the block's middle sample.
+_DOWNSAMPLE_AGG = {
+    'FR':                      'sum',      # spike counts -- the whole point
+    'Locs':                    'mode',     # node id 1..21 (>21 = edge); a mean is meaningless
+    'HD':                      'circmean',
+    'Speed':                   'mean',
+    'Acc':                     'mean',
+    'State':                   'mode',     # 0..3 categorical
+    'GP_binned':               'mode',     # ordinal bin index, used as a one-hot index
+    'GP_dist_continuous':      'nanmean',
+    'time_from_reward':        'mean',     # decile-binned downstream, so a mean is fine
+    'time_to_reward':          'mean',
+    'time_since_A':            'mean',
+    'time_to_A':               'mean',
+    'progress_since_A_binned': 'mode',
+    'poke_rewarded':           'max',      # "in port at any point in the window"
+    'poke_unrewarded':         'max',
+    'valid_transition_mask':   'majority',  # most of the window must be valid, not all of it
+}
+
+
+def _aggregate_blocks(arr, factor, how):
+    """Reduce consecutive blocks of `factor` samples along the time axis."""
+    a = np.asarray(arr)
+    twodim = a.ndim == 2
+    T = a.shape[1] if twodim else len(a)
+    n_blocks = T // factor
+    if n_blocks == 0:
+        return a[:, :0] if twodim else a[:0]
+    a = a[:, :n_blocks * factor] if twodim else a[:n_blocks * factor]
+    b = (a.reshape(a.shape[0], n_blocks, factor) if twodim
+         else a.reshape(n_blocks, factor))
+    ax = 2 if twodim else 1
+
+    if how == 'sum':
+        return b.sum(axis=ax)
+    if how == 'mean':
+        return b.astype(float).mean(axis=ax)
+    if how == 'nanmean':
+        with np.errstate(invalid='ignore'):
+            return np.nanmean(b.astype(float), axis=ax)
+    if how == 'max':
+        return b.max(axis=ax)
+    if how == 'all':
+        return b.all(axis=ax)
+    if how == 'majority':
+        # A window whose covariates are AVERAGED over it is usable when most of it is
+        # valid. Requiring every raw bin ('all') compounds brutally with an upstream
+        # sample filter: at factor 10 it needs 10 consecutive valid bins, at factor 20
+        # it needs 20, so a filter keeping ~10% of samples loses a further ~40% here.
+        return b.mean(axis=ax) >= 0.5
+    if how == 'circmean':
+        z = np.exp(1j * np.deg2rad(b.astype(float)))
+        with np.errstate(invalid='ignore'):
+            m = np.nanmean(z, axis=ax)
+        return np.rad2deg(np.angle(m)) % 360
+    if how == 'mode':
+        # Most-occupied value in the window. Non-finite entries are ignored unless the
+        # whole block is non-finite, which is propagated as NaN so the downstream
+        # `Locs <= 21` / finite filters still exclude it.
+        bf = b.astype(float)
+        out = np.full(bf.shape[:ax], np.nan)
+        flat = bf.reshape(-1, factor)
+        res = np.full(flat.shape[0], np.nan)
+        for i in range(flat.shape[0]):
+            v = flat[i][np.isfinite(flat[i])]
+            if v.size:
+                vals, cnt = np.unique(v, return_counts=True)
+                res[i] = vals[np.argmax(cnt)]
+        return res.reshape(out.shape)
+    raise ValueError(f'unknown aggregation {how!r}')
+
+
+def downsample_session_data(data_dict, factor, mode='stride'):
+    """Downsample all arrays along the time axis.
+
+    Parameters
+    ----------
+    mode : {'stride', 'bin'}, default 'stride'
+        ``'stride'`` keeps every `factor`th sample -- the original behaviour, kept as the
+        default so cached fits stay reproducible. It does NOT widen the bins: each retained
+        sample is still one 25 ms bin, so with `factor=10` the GLM sees ~10% of the session's
+        spikes and every other spike is discarded. `Neuron_raw` is integer counts (89% zeros,
+        mean 0.131/bin), so a retained sample carries ~0.13 spikes.
+
+        ``'bin'`` aggregates each block of `factor` samples instead: spike counts are SUMMED,
+        continuous behaviour averaged, categorical behaviour taken as the block mode, head
+        direction circular-averaged (see `_DOWNSAMPLE_AGG`). This yields the same number of
+        samples, spaced identically -- so autocorrelation between samples is unchanged -- but
+        each carries ~10x the spikes, for roughly sqrt(10) ~ 3x the SNR per observation at no
+        cost. Under 'stride' the in-sample R^2 of these fits is ~0.011 against a p/T chance
+        floor of ~0.004, i.e. only ~2.6x chance, which is the regime this is meant to improve.
+    """
     if factor <= 1:
         return data_dict
+    if mode not in ('stride', 'bin'):
+        raise ValueError(f"mode must be 'stride' or 'bin', got {mode!r}")
     result = {}
     for key, arr in data_dict.items():
-        if isinstance(arr, np.ndarray):
+        if not isinstance(arr, np.ndarray):
+            result[key] = arr
+            continue
+        if mode == 'stride':
             result[key] = arr[:, ::factor] if arr.ndim == 2 else arr[::factor]
         else:
-            result[key] = arr
+            how = _DOWNSAMPLE_AGG.get(key)
+            if how is None:
+                # Unknown field: take the block's middle sample rather than guess.
+                off = factor // 2
+                result[key] = (arr[:, off::factor] if arr.ndim == 2 else arr[off::factor])
+            else:
+                result[key] = _aggregate_blocks(arr, factor, how)
+    # Blocks must line up across fields: trim any middle-sample field that came out longer.
+    lengths = [a.shape[1] if a.ndim == 2 else len(a)
+               for a in result.values() if isinstance(a, np.ndarray)]
+    if lengths:
+        n = min(lengths)
+        for k, a in result.items():
+            if isinstance(a, np.ndarray):
+                result[k] = a[:, :n] if a.ndim == 2 else a[:n]
     return result
 
 
@@ -767,15 +990,35 @@ def downsample_session_data(data_dict, factor):
 # One-hot encoding helpers
 # ============================================================================
 
-def compute_decile_edges(values, n_bins=10, outlier_pct=1):
-    """Compute bin edges from training data, excluding outliers."""
+def compute_decile_edges(values, n_bins=10, outlier_pct=1, scheme='decile'):
+    """Compute bin edges from training data, excluding outliers.
+
+    `scheme='decile'` places edges at quantiles, so every bin holds ~the same number of
+    samples; `scheme='uniform'` places them at equal width across the trimmed range.
+
+    Which to use is not cosmetic. The live GLM bins speed/acceleration/time_*/distance_* by
+    QUANTILE while goal_progress, goal_progress_distance and progress_since_A are equal-width
+    (they are already fractions on [0,1]) and head_direction is 36 fixed 10-degree bins -- so
+    the design mixes two placement schemes and gives them different effective flexibility.
+    Measured with train-only edges (`glm_cv_cpd`, binned data): all-quantile r2_cv +0.0546 vs
+    all-uniform +0.0486, so quantile genuinely fits the skewed reward-relative variables
+    better. But the shared variance moves: `goal_progress` CPD is -0.0003 under quantile and
+    +0.0009 under uniform, because uniform binning handicaps its competitors rather than
+    improving goal_progress itself. Report the scheme with any result that depends on it.
+    """
     values = np.asarray(values).flatten()
     values = values[np.isfinite(values)]
     if len(values) < n_bins * 2:
         return None
     lo, hi = np.percentile(values, [outlier_pct, 100 - outlier_pct])
     clipped = values[(values >= lo) & (values <= hi)]
-    edges = np.percentile(clipped, np.linspace(0, 100, n_bins + 1))
+    if scheme == 'uniform':
+        edges = np.linspace(clipped.min(), clipped.max(), n_bins + 1)
+    elif scheme == 'decile':
+        edges = np.percentile(clipped, np.linspace(0, 100, n_bins + 1))
+    else:
+        raise ValueError(f"scheme must be 'decile' or 'uniform', got {scheme!r}")
+    edges = np.asarray(edges, dtype=float)
     edges[0], edges[-1] = -np.inf, np.inf
     return edges
 
@@ -1033,19 +1276,20 @@ def _resolve_regressor_groups(regressors_to_include, gp_n_bins=10,
     n_cols_per['poke_rewarded'] = 1    # binary indicator
     n_cols_per['poke_unrewarded'] = 1  # binary indicator
     if parameterization == 'reference_coded':
-        # Reference coding drops one bin per categorical block, which annihilates
-        # a 1-column indicator. Fail loudly rather than emit an empty block whose
-        # CPD would silently be zero.
-        requested = ([_REGRESSOR_NAME_ALIASES.get(r, r) for r in regressors_to_include]
-                     if regressors_to_include is not None else list(analysis_regressor_names))
-        singletons = [r for r in requested if n_cols_per.get(r) == 1]
-        if singletons:
-            raise ValueError(
-                f"parameterization='reference_coded' cannot encode single-column "
-                f"regressors {singletons} (dropping a reference bin leaves 0 "
-                f"columns). Use parameterization='all_bins' for fits including them."
-            )
-        n_cols_per = {k: v - 1 for k, v in n_cols_per.items()}
+        # MIXED reference coding: drop a reference bin from every MULTI-column block, and
+        # pass SINGLE-column indicators (the pokes) through untouched.
+        #
+        # The rank deficiency in 'all_bins' comes from multi-column one-hot blocks, each of
+        # which sums to 1 per row, so k blocks contain k copies of the all-ones vector and
+        # give k-1 dependencies. A binary poke indicator is 0 most of the time, does NOT sum
+        # to 1, and so neither causes the deficiency nor needs a reference bin -- it simply
+        # cannot have one taken (dropping its only column leaves nothing).
+        #
+        # This previously raised, forcing any poke-containing fit onto 'all_bins' and making
+        # "the full regressor set" and "interpretable betas" look mutually exclusive. They
+        # are not. Verified on a design of this shape: all_bins + pokes = 97 cols / rank 89
+        # / deficiency 8; mixed reference coding = 89 cols / rank 89 / deficiency 0.
+        n_cols_per = {k: (v - 1 if v > 1 else v) for k, v in n_cols_per.items()}
     elif parameterization != 'all_bins':
         raise ValueError(f"parameterization must be 'all_bins' or "
                          f"'reference_coded', got {parameterization!r}")
@@ -1091,15 +1335,57 @@ def run_glm_analysis(mouse_recdays, data_dic,
                      filter_correct_paths=False,
                      max_transition_seconds=None,
                      bin_size_ms=25,
+                     downsample_mode='stride',
+                     continuous_binning='decile',
+                     min_samples_per_param=10.0,
                      return_scales=False,
-                     scales_only=False):
+                     scales_only=False,
+                     cross_validate=False,
+                     cv_n_perm=0,
+                     cv_poisson=False,
+                     cv_poisson_neurons=None,
+                     cv_center_within_sessions=False,
+                     cv_zscore_within_sessions=False,
+                     cv_within_session_folds=False,
+                     cv_nulls=('freedman_lane',),
+                     cv_only=False):
     """Fit per-neuron OLS GLM with permutation F-tests.
 
     Parameters
     ----------
     mouse_recdays, data_dic : see module docstring.
+    cross_validate : bool, default False
+        Additionally compute leave-one-session-out CPD and R^2 via `glm_cv.cv_scores`,
+        returned as an extra `CV_results` element. Sessions are the fold unit because they
+        are different tasks, so LOSO tests across-task generalisation. The in-sample
+        quantities are still computed and returned unchanged, so the two are directly
+        comparable on the same fit -- which is also what makes an old cache checkable
+        against a new one. See `glm_cv` for why the in-sample CPD needed this.
+    cv_n_perm : int, default 0
+        Permutations for the cross-validated null (shifted WITHIN session). 0 skips it: a
+        held-out CPD carries no in-sample optimism, so the null calibrates against
+        autocorrelation rather than removing overfitting. Costs roughly `cv_n_perm/10` times
+        the CV fit time.
+    cv_poisson : bool, default False
+        Also fit a leave-one-session-out Poisson GLM (deviance-based CPD) as a robustness
+        check on the link function. Orders of magnitude slower than the linear path -- it
+        cannot share a pseudo-inverse across neurons -- so pair it with
+        `cv_poisson_neurons`.
+    cv_poisson_neurons : array-like of int, optional
+        Neuron subset for the Poisson CV, since fitting all of them is usually too slow.
     num_permutations : int, default 100
         Number of circular firing-rate shifts in the permutation null.
+    continuous_binning : {'decile', 'uniform'}, default 'decile'
+        Bin placement for speed / acceleration / time_* / distance_*. 'decile' is quantile
+        placement (the historical behaviour); 'uniform' is equal width. goal_progress,
+        goal_progress_distance and progress_since_A are equal-width regardless (they are
+        already fractions on [0,1]) and head_direction is always 36 fixed 10-degree bins, so
+        'uniform' is what makes the whole design one scheme. See `compute_decile_edges`.
+    downsample_mode : {'stride', 'bin'}, default 'stride'
+        How `downsample_factor` is applied. 'stride' keeps every Nth 25 ms bin and DISCARDS
+        the rest (original behaviour, ~10% of spikes reach the GLM at factor=10); 'bin' sums
+        spike counts over each block and aggregates behaviour appropriately, keeping every
+        spike at the same sample count and spacing. See `downsample_session_data`.
     downsample_factor : int, default 10
     regressors_to_include : list of str or None
         Subset of `analysis_regressor_names` to include in the design matrix.
@@ -1198,6 +1484,7 @@ def run_glm_analysis(mouse_recdays, data_dic,
     Permutation_results = {}
     CPD_results = {}
     Neuron_scales = {}
+    CV_results = {}
 
     for mouse_recday in tqdm(mouse_recdays, desc="Processing recording days"):
         print(f"\n{mouse_recday}")
@@ -1240,7 +1527,8 @@ def run_glm_analysis(mouse_recdays, data_dic,
                           'n_pass_both', 'n_samples_total', 'n_samples_kept'):
                     recday_filter_stats[k] += s.get(k, 0)
             prep_data = truncate_all_arrays(prep_data)
-            prepared_sessions[session] = downsample_session_data(prep_data, downsample_factor)
+            prepared_sessions[session] = downsample_session_data(
+                prep_data, downsample_factor, mode=downsample_mode)
 
         if any_filter_active and recday_filter_stats['n_transitions_total'] > 0:
             ntt = recday_filter_stats['n_transitions_total']
@@ -1319,14 +1607,14 @@ def run_glm_analysis(mouse_recdays, data_dic,
         # ----------------------------------------------------------------
         # Decile edges from all available data
         # ----------------------------------------------------------------
-        speed_edges = compute_decile_edges(speed_all)
-        acc_edges   = compute_decile_edges(acc_all)
-        tf_edges    = compute_decile_edges(tf_all)
-        tt_edges    = compute_decile_edges(tt_all)
-        tsa_edges   = compute_decile_edges(tsa_all)
-        tta_edges   = compute_decile_edges(tta_all)
-        df_edges    = compute_decile_edges(df_all)
-        dt_edges    = compute_decile_edges(dt_all)
+        speed_edges = compute_decile_edges(speed_all, scheme=continuous_binning)
+        acc_edges   = compute_decile_edges(acc_all, scheme=continuous_binning)
+        tf_edges    = compute_decile_edges(tf_all, scheme=continuous_binning)
+        tt_edges    = compute_decile_edges(tt_all, scheme=continuous_binning)
+        tsa_edges   = compute_decile_edges(tsa_all, scheme=continuous_binning)
+        tta_edges   = compute_decile_edges(tta_all, scheme=continuous_binning)
+        df_edges    = compute_decile_edges(df_all, scheme=continuous_binning)
+        dt_edges    = compute_decile_edges(dt_all, scheme=continuous_binning)
 
         if any(e is None for e in [speed_edges, acc_edges, tf_edges,
                                     tt_edges, tsa_edges, tta_edges,
@@ -1435,13 +1723,38 @@ def run_glm_analysis(mouse_recdays, data_dic,
             'distance_to_reward':     DT_enc,
         }
         if parameterization == 'reference_coded':
-            # Drop the first column of each block (the reference bin) and
-            # prepend a single intercept column.
-            blocks = [onehots[name][:, 1:] for name in local_names]
+            # Mixed reference coding: drop the reference bin from MULTI-column blocks only,
+            # leave single-column indicators (pokes) intact, prepend one intercept. See
+            # `_resolve_regressor_groups` for why the pokes neither need nor can take a
+            # reference bin. The index map there must agree with this exactly.
+            blocks = [onehots[name][:, 1:] if onehots[name].shape[1] > 1 else onehots[name]
+                      for name in local_names]
             X = np.column_stack([np.ones((blocks[0].shape[0], 1))] + blocks)
         else:
             X = np.column_stack([onehots[name] for name in local_names])
         X = np.nan_to_num(X)
+
+        # Zero-variance guard. A constant column carries no information and costs exactly one
+        # rank, so it turns a full-rank design deficient and makes its own CPD identically 0.
+        # This is not hypothetical: `poke_unrewarded` is all-zero for any recday whose poke
+        # tables were never attached (`attach_pokes`), and `poke_rewarded` would be too --
+        # which is precisely how a "16-regressor" fit silently became a 13-regressor one with
+        # two dead columns. Report rather than drop, so the caller sees the cause.
+        _const = np.flatnonzero(X.std(axis=0) == 0)
+        if len(_const):
+            _owner = {}
+            for _n in local_names:
+                for _i in local_groups[_n]:
+                    _owner[_i] = _n
+            _by_reg = {}
+            for _i in _const:
+                _by_reg.setdefault(_owner.get(int(_i), 'intercept'), 0)
+                _by_reg[_owner.get(int(_i), 'intercept')] += 1
+            _by_reg.pop('intercept', None)
+            if _by_reg:
+                print(f"  WARNING: {len(_const)} zero-variance column(s) in the design "
+                      f"{_by_reg} — their CPD will be exactly 0 and the design loses that "
+                      f"much rank. For pokes this means `attach_pokes` was not called.")
         print(f"  Design matrix: {X.shape[0]} rows × {X.shape[1]} cols "
               f"(regressors: {local_names}, parameterization={parameterization})")
 
@@ -1449,10 +1762,81 @@ def run_glm_analysis(mouse_recdays, data_dic,
             print(f"  Skipping — degenerate design matrix (shape {X.shape})")
             continue
 
+        # Samples-per-parameter floor. `X.shape[0] < X.shape[1]` above only catches a design
+        # that cannot be fitted AT ALL; it says nothing about one that fits and generalises
+        # terribly. A production run with `filter_correct_paths=True` produced 376-3471 rows
+        # against 123-160 columns and held-out R2 of -0.09 to -2.13 -- every job "succeeded".
+        # Cross-validation makes it worse than the raw ratio suggests, because each training
+        # fold sees only (n_folds-1)/n_folds of the rows.
+        _spp = X.shape[0] / max(X.shape[1], 1)
+        if _spp < min_samples_per_param:
+            print(f"  Skipping — {X.shape[0]} rows for {X.shape[1]} columns "
+                  f"({_spp:.1f} samples/parameter, floor {min_samples_per_param}). "
+                  f"Check the transition filters: this is what an over-aggressive "
+                  f"`filter_correct_paths` or `max_transition_seconds` looks like.")
+            continue
+        if _spp < 3 * min_samples_per_param:
+            print(f"  WARNING: only {_spp:.1f} samples/parameter "
+                  f"({X.shape[0]} rows, {X.shape[1]} cols) — fits will be unstable.")
+
         # Concatenate FR across sessions matching the same node filter
         FR_all = np.concatenate(
             [prepared_sessions[s]['FR'][:, nf] for s, nf in session_filters], axis=1
         )  # [n_neurons × T_total]
+
+        # ----------------------------------------------------------------
+        # Rank report + leave-one-session-out cross-validation
+        # ----------------------------------------------------------------
+        # The in-sample path below computes RSS, R2, CPD and the nested F on the same
+        # samples it fits. That is fine for the permutation SIGNIFICANCE call (the null
+        # goes through identical machinery, so the optimism cancels) but not for CPD
+        # magnitudes, and the circular-shift null is permissive for slowly-varying
+        # regressors -- 80% of LEC units come back "place-tuned", a range of only
+        # 70-86% across brain regions, which is too saturated to compare regions with.
+        # `cross_validate=True` adds a held-out version alongside, so the two are
+        # directly comparable on the same fit.
+        _rank = _glm_cv().check_rank(X, name=f'  {mouse_recday} design')
+        print(f"  Design rank: {_rank['rank']}/{_rank['n_cols']}"
+              + ('' if _rank['full_rank'] else
+                 f" (deficient by {_rank['deficiency']}; RSS/R2/CPD valid, "
+                 f"betas are min-norm)"))
+
+        if cross_validate:
+            cvmod = _glm_cv()
+            sess_ids = cvmod.session_ids_from_filters(session_filters)
+            n_sess = len(np.unique(sess_ids))
+            if n_sess < 2:
+                print(f"  CV skipped — only {n_sess} session(s)")
+            else:
+                t_cv = time.time()
+                _fold_ids = (cvmod.within_session_folds(sess_ids)
+                             if cv_within_session_folds else None)
+                cv_out = cvmod.cv_scores(
+                    X, FR_all, sess_ids, local_groups,
+                    n_perm=cv_n_perm, joint_specs=joint_specs,
+                    center_within_sessions=cv_center_within_sessions,
+                    zscore_within_sessions=cv_zscore_within_sessions,
+                    fold_ids=_fold_ids, nulls=cv_nulls,
+                )
+                if cv_poisson:
+                    cv_out['poisson'] = cvmod.cv_scores_poisson(
+                        X, FR_all, sess_ids, local_groups,
+                        joint_specs=joint_specs, neuron_subset=cv_poisson_neurons,
+                    )
+                cv_out['elapsed_s'] = time.time() - t_cv
+                cv_out['rank'] = _rank
+                CV_results[mouse_recday] = cv_out
+                print(f"  CV: {n_sess} folds, {len(local_groups)} groups, "
+                      f"{cv_n_perm} perms — {cv_out['elapsed_s']:.1f}s"
+                      f"  median r2_cv={np.nanmedian(cv_out['r2_cv']):.4f}")
+
+        if cv_only:
+            # Skip the in-sample per-neuron loop entirely. That loop re-decomposes the same
+            # X inside `lstsq` for every neuron and every reduced model and costs ~680 s per
+            # recday, against ~0 s for the CV path (which shares one pseudo-inverse per
+            # fold/model). Same precedent as `scales_only`: everything that decides WHICH
+            # samples enter the fit has already run.
+            continue
 
         if scales_only:
             # Everything that decides WHICH samples enter the fit has already
@@ -1484,6 +1868,24 @@ def run_glm_analysis(mouse_recdays, data_dic,
             X_reduced_joint[group_name] = np.delete(X, joint_indices, axis=1)
             joint_n_dropped[group_name] = len(joint_indices)
 
+        # ----------------------------------------------------------------
+        # Pseudo-inverses, computed ONCE per (recday, model) and reused for every neuron
+        # and every permutation.
+        #
+        # The loop below used to call `np.linalg.lstsq` per neuron per model per
+        # real/permuted pair -- with 16 regressors + 3 joint groups that is ~40 SVDs of the
+        # SAME matrix per neuron, and the decomposition, not the solve, is the cost. One
+        # LEC recday took ~1 h. `pinv` is the same minimum-norm solution `lstsq(rcond=None)`
+        # returns, so results are unchanged; every fit becomes a matmul.
+        #
+        # Memory: each P is (n_cols, T) float64 -- ~38 MB at 160x30000, so ~800 MB across
+        # ~20 models. That is why they are freed at the end of the recday.
+        # ----------------------------------------------------------------
+        _pinv = lambda A: np.linalg.pinv(A, rcond=1e-10)
+        P_full = _pinv(X)
+        P_reduced = {k: _pinv(v) for k, v in X_reduced_dict.items()}
+        P_joint = {k: _pinv(v) for k, v in X_reduced_joint.items()}
+
         T, n_params = X.shape
         df_resid = T - n_params
         shifts = np.random.randint(0, T, size=num_permutations)
@@ -1495,7 +1897,7 @@ def run_glm_analysis(mouse_recdays, data_dic,
             frs = FR_all[neuron]
             try:
                 # --- Full model ---
-                params, _, _, _ = np.linalg.lstsq(X, frs, rcond=None)
+                params = P_full @ frs
                 resid_full      = frs - X @ params
                 rss_full        = resid_full @ resid_full
 
@@ -1505,7 +1907,7 @@ def run_glm_analysis(mouse_recdays, data_dic,
 
                 # --- Permuted full models (all at once) ---
                 perm_frs        = np.stack([np.roll(frs, s) for s in shifts]).T  # [T × n_perms]
-                beta_perms      = np.linalg.lstsq(X, perm_frs, rcond=None)[0]    # [n_params × n_perms]
+                beta_perms      = P_full @ perm_frs                              # [n_params × n_perms]
                 resid_full_p    = perm_frs - X @ beta_perms                       # [T × n_perms]
                 rss_full_p      = np.einsum('ij,ij->j', resid_full_p, resid_full_p)  # [n_perms]
 
@@ -1518,7 +1920,7 @@ def run_glm_analysis(mouse_recdays, data_dic,
                     df_num = len(local_groups[reg_name])
 
                     # Real reduced model
-                    params_r, _, _, _ = np.linalg.lstsq(X_r, frs, rcond=None)
+                    params_r = P_reduced[reg_name] @ frs
                     resid_r   = frs - X_r @ params_r
                     rss_r     = resid_r @ resid_r
                     F_real[reg_name] = ((rss_r - rss_full) / df_num) / (rss_full / df_resid)
@@ -1527,7 +1929,7 @@ def run_glm_analysis(mouse_recdays, data_dic,
                         delta_r2_real[reg_name] = ((rss_r - rss_full) / tss) if tss > 0 else 0.0
 
                     # Permuted reduced models (vectorised)
-                    beta_perms_r = np.linalg.lstsq(X_r, perm_frs, rcond=None)[0]  # [n_r × n_perms]
+                    beta_perms_r = P_reduced[reg_name] @ perm_frs                 # [n_r × n_perms]
                     resid_r_p    = perm_frs - X_r @ beta_perms_r                   # [T × n_perms]
                     rss_r_p      = np.einsum('ij,ij->j', resid_r_p, resid_r_p)    # [n_perms]
                     F_perm[reg_name] = ((rss_r_p - rss_full_p) / df_num) / (rss_full_p / df_resid)
@@ -1536,7 +1938,7 @@ def run_glm_analysis(mouse_recdays, data_dic,
                 for group_name, X_rj in X_reduced_joint.items():
                     df_num_j = joint_n_dropped[group_name]
 
-                    params_rj, _, _, _ = np.linalg.lstsq(X_rj, frs, rcond=None)
+                    params_rj = P_joint[group_name] @ frs
                     resid_rj  = frs - X_rj @ params_rj
                     rss_rj    = resid_rj @ resid_rj
                     F_real[group_name] = ((rss_rj - rss_full) / df_num_j) / (rss_full / df_resid)
@@ -1544,7 +1946,7 @@ def run_glm_analysis(mouse_recdays, data_dic,
                         CPD_real[group_name] = ((rss_rj - rss_full) / rss_rj) if rss_rj > 0 else 0.0
                         delta_r2_real[group_name] = ((rss_rj - rss_full) / tss) if tss > 0 else 0.0
 
-                    beta_perms_rj = np.linalg.lstsq(X_rj, perm_frs, rcond=None)[0]
+                    beta_perms_rj = P_joint[group_name] @ perm_frs
                     resid_rj_p    = perm_frs - X_rj @ beta_perms_rj
                     rss_rj_p      = np.einsum('ij,ij->j', resid_rj_p, resid_rj_p)
                     F_perm[group_name] = ((rss_rj_p - rss_full_p) / df_num_j) / (rss_full_p / df_resid)
@@ -1571,11 +1973,15 @@ def run_glm_analysis(mouse_recdays, data_dic,
             except Exception:
                 continue
 
+        del P_full, P_reduced, P_joint
+
     out = [GLM_results, Permutation_results]
     if compute_cpd:
         out.append(CPD_results)
     if return_scales:
         out.append(Neuron_scales)
+    if cross_validate:
+        out.append(CV_results)
     return tuple(out)
 
 
@@ -3437,9 +3843,15 @@ def _artifact_path(save_dir, section_name, key, ext):
 
 # ----- section-level save -----------------------------------------------
 
+# Matches a mouse_recday key like 'ah08_20250613_20250615'. Used to tell a cached
+# artifact that can be filtered by recday from one that pools across them.
+_RECDAY_RE = __import__('re').compile(r'^[a-z]{2}\d{2}_\d{8}_\d{8}$')
+
+
 # Result keys that `save_section` / `load_glm_results` understand for fitted
 # artifacts. Extra entries in `results` are saved verbatim under their key.
 _GLM_RESULT_KEYS = ('glm_results', 'permutation_results', 'cpd_results',
+                    'cv_results',
                     'neuron_scales', 'tuned_dict', 'mouse_tuning_concat')
 
 
@@ -3525,6 +3937,7 @@ def run_or_load_glm(mouse_recdays, data_dic, save_dir, section_name,
     import os
     compute_cpd = bool(kwargs.get('compute_cpd', False))
     return_scales = bool(kwargs.get('return_scales', False))
+    cross_validate = bool(kwargs.get('cross_validate', False))
 
     # Order must mirror run_glm_analysis's return tuple exactly.
     needed = ['glm_results', 'permutation_results']
@@ -3532,12 +3945,24 @@ def run_or_load_glm(mouse_recdays, data_dic, save_dir, section_name,
         needed.append('cpd_results')
     if return_scales:
         needed.append('neuron_scales')
+    if cross_validate:
+        needed.append('cv_results')
 
     paths = {k: _artifact_path(save_dir, section_name, k, 'pkl') for k in needed}
 
     if not force_refit and all(os.path.exists(p) for p in paths.values()):
         print(f'run_or_load_glm({section_name!r}): loading cached results from {save_dir}')
-        loaded = tuple(_load_pickle(paths[k]) for k in needed)
+        stale = _stale_or_excluded(section_name)
+        loaded = tuple(_drop_excluded_recdays(_load_pickle(paths[k]), stale)
+                       for k in needed)
+        missing = [r for r in mouse_recdays
+                   if r in stale or r not in loaded[0]] if isinstance(loaded[0], dict) else []
+        if missing:
+            # The cache predates the current data for these recdays. Say so loudly: a
+            # silent gap between the recdays asked for and the recdays returned is how a
+            # stale fit gets into a figure.
+            print(f'  WARNING: cache has no usable fit for {len(missing)} requested '
+                  f'recday(s): {missing}. Re-run with force_refit=True to include them.')
         return loaded
 
     print(f'run_or_load_glm({section_name!r}): no cache (or force_refit) — fitting')
@@ -3553,14 +3978,72 @@ def run_or_load_glm(mouse_recdays, data_dic, save_dir, section_name,
 
 # ----- manual loader ----------------------------------------------------
 
-def load_glm_results(save_dir, section_name):
+def _stale_or_excluded(section_name=None):
+    """Recdays that must not come back out of a cached fit.
+
+    `section_name` scopes the STALE list: a section produced by the W1 production refit
+    postdates the data fix, so its recdays are good and must not be dropped. Without this
+    the check matches on recday name alone and silently removes a freshly refitted recday
+    from the new results -- which it did, costing `ly05_20250618_20250619` from a 25-recday
+    fit. `EXCLUDE_RECDAYS` is unconditional and always applies.
+
+    The union of two different problems: `EXCLUDE_RECDAYS` (the data itself is bad) and
+    `STALE_CACHE_RECDAYS` (the data has been fixed, but these pickles were fitted before
+    the fix). Both make a cached result wrong; only the first makes the recday unusable.
+    """
+    registry = _recday_registry()
+    if registry is None:
+        return set()
+    excluded = set(registry.EXCLUDE_RECDAYS)
+    # STALE entries flag PRE-REFIT pickles. A section stamped with the production
+    # configuration postdates the data fix, so its recdays are good.
+    if not (hasattr(registry, 'is_post_refit_section')
+            and registry.is_post_refit_section(section_name)):
+        excluded |= set(registry.STALE_CACHE_RECDAYS)
+    return excluded
+
+
+def _is_recday_keyed(obj):
+    """True if `obj` is a dict keyed by mouse_recday, i.e. filterable by recday."""
+    return isinstance(obj, dict) and any(
+        _RECDAY_RE.match(str(k)) for k in obj)
+
+
+def _drop_excluded_recdays(obj, excluded, verbose=True):
+    """Strip `excluded` recday keys from a cached per-recday result dict.
+
+    GLM artifacts are keyed `{mouse_recday: {session: ...}}`, so a recday found to be
+    corrupt can be taken out of every aggregate figure by filtering at load time — no
+    refit needed for the other recdays. Anything not shaped that way is returned as-is;
+    `load_glm_results` warns separately about those, because an artifact that pools
+    neurons across recdays (`*__mouse_tuning_concat`, keyed by MOUSE) still contains the
+    excluded recday's neurons and cannot be repaired by filtering.
+    """
+    if not isinstance(obj, dict) or not excluded:
+        return obj
+    hits = [k for k in obj if str(k) in excluded]
+    if not hits:
+        return obj
+    if verbose:
+        print(f"  dropping {len(hits)} recday(s) from cached results as excluded "
+              f"or stale: {[str(k) for k in hits]}")
+    return {k: v for k, v in obj.items() if str(k) not in excluded}
+
+
+def load_glm_results(save_dir, section_name, *, apply_exclusions=True, verbose=True):
     """Return whichever section pickles exist as a dict.
 
     Looks for the canonical `_GLM_RESULT_KEYS` plus any other `*.pkl` files
     whose name starts with `{section_name}__`. Returns
     `{key: unpickled_object}`; missing keys are simply omitted.
+
+    Excluded recdays (`recday_registry.EXCLUDE_RECDAYS`) are filtered out of every
+    per-recday dict, so cached fits made before a recday was found to be corrupt still
+    give correct aggregates. Pass `apply_exclusions=False` to see the raw cache.
     """
     import os, glob
+
+    excluded = _stale_or_excluded(section_name) if apply_exclusions else set()
 
     out = {}
     prefix = f'{section_name}__'
@@ -3569,14 +4052,25 @@ def load_glm_results(save_dir, section_name):
     for k in _GLM_RESULT_KEYS:
         p = _artifact_path(save_dir, section_name, k, 'pkl')
         if os.path.exists(p):
-            out[k] = _load_pickle(p)
+            out[k] = _drop_excluded_recdays(_load_pickle(p), excluded, verbose)
 
     # plus any other section pickles
     for p in sorted(glob.glob(os.path.join(save_dir, f'{prefix}*.pkl'))):
         key = os.path.basename(p)[len(prefix):-len('.pkl')]
         if key in out:
             continue
-        out[key] = _load_pickle(p)
+        out[key] = _drop_excluded_recdays(_load_pickle(p), excluded, verbose)
+
+    if excluded:
+        # Artifacts that pool neurons across recdays (mouse-keyed tuning concatenations,
+        # geometry tables) still contain the excluded recday's neurons. Filtering cannot
+        # reach them, so say which ones need regenerating rather than returning them
+        # silently.
+        unfilterable = [k for k, v in out.items() if not _is_recday_keyed(v)]
+        if unfilterable:
+            print(f'  WARNING: {len(unfilterable)} artifact(s) are not recday-keyed and '
+                  f'may still pool excluded/stale recdays: {unfilterable}. '
+                  f'Regenerate them from the filtered per-recday results.')
 
     if not out:
         print(f'load_glm_results({section_name!r}): no pickles found in {save_dir}')

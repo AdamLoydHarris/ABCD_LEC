@@ -1135,6 +1135,140 @@ def analyse_taskphase_ring(session_data, config, run_null=False, n_shuffles=None
     return res
 
 
+def build_recday_taskphase_matrix(recday_dict, config, sessions=None):
+    """Pool a recday's task-phase tuning across ALL its sessions.
+
+    Each session of a recday is a DIFFERENT reward configuration, but the same
+    neurons (by row) are tracked throughout. Averaging each neuron's 360-bin
+    task-phase response across sessions therefore cancels place/session-specific
+    tuning and keeps only what is consistent in abstract A->B->C->D phase — the
+    representation an abstract task ring would live in.
+
+    Session-weighted (per the design decision): each session's trial-mean is
+    computed first, then those per-session means are averaged, so every reward
+    config contributes equally regardless of its trial count. A-anchored: bin 0
+    is 'just after reward A' in every session, so the raw phase bins align.
+
+    Returns
+    -------
+    dict or None: 'M' (n_neurons, n_bins) session-averaged tuning,
+        'session_means' (list of per-session (n_neurons, n_bins)),
+        'sessions', 'n_sessions', 'n_trials_total', 'n_neurons'.
+    """
+    keys = list(recday_dict.keys()) if sessions is None else sessions
+    means, used, n_trials = [], [], 0
+    n_neurons = None
+    for s in keys:
+        sd = recday_dict.get(s, {})
+        nn = sd.get("Neurons_norm")
+        if nn is None:
+            continue
+        nn = np.asarray(nn, dtype=float)
+        if nn.ndim != 3 or nn.shape[1] < 1:
+            continue
+        if n_neurons is None:
+            n_neurons = nn.shape[0]
+        elif nn.shape[0] != n_neurons:      # neuron sets must match to pool
+            continue
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            means.append(np.nanmean(nn, axis=1))   # (n_neurons, n_bins)
+        used.append(s)
+        n_trials += nn.shape[1]
+    if len(means) < 1 or n_neurons is None or n_neurons < config.min_neurons:
+        return None
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        M = np.nanmean(np.stack(means, axis=0), axis=0)   # session-weighted mean
+    return dict(M=M, session_means=means, sessions=used, n_sessions=len(used),
+                n_trials_total=int(n_trials), n_neurons=int(n_neurons))
+
+
+def fold_to_goalprogress(M, n_states=4):
+    """Average the `n_states` legs of a (n_neurons, n_states*per) task-phase matrix
+    into a single (n_neurons, per) GOAL-PROGRESS matrix (period-folded).
+
+    The task cycles A->B->C->D and goal progress (0->1 within each leg) repeats
+    every leg, so folding the 4 legs onto each other isolates the within-leg
+    (goal-progress / distance-to-reward) code and doubles its SNR.
+    """
+    M = np.asarray(M, dtype=float)
+    per = M.shape[1] // n_states
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        return np.nanmean(np.stack([M[:, i * per:(i + 1) * per]
+                                    for i in range(n_states)], axis=0), axis=0)
+
+
+def leg_similarity(M, n_states=4):
+    """Mean pairwise correlation between the `n_states` legs' flattened tuning.
+
+    Diagnostic for period-N (goal-progress) vs full-task-phase (identity) coding:
+    ~1  => the legs are identical  => goal-progress / period-N dominated, A/B/C/D
+           IDENTITY nearly absent (the trajectory 'repeats every per bins');
+    ~0 / negative => tuning is unique per task-phase bin (identity / abstract ring).
+    Calibrated on synthetics (controls_placecells): speed 1.00, place*speed 0.94,
+    session-inconsistent place 0.27, abstract-360 ring -0.33; real LEC ~0.99.
+    """
+    M = np.asarray(M, dtype=float)
+    per = M.shape[1] // n_states
+    legs = [M[:, i * per:(i + 1) * per].ravel() for i in range(n_states)]
+    cc = [np.corrcoef(legs[i], legs[j])[0, 1]
+          for i in range(n_states) for j in range(i + 1, n_states)]
+    return float(np.nanmean(cc)) if cc else np.nan
+
+
+def analyse_recday_taskphase_ring(recday_dict, config, sessions=None):
+    """Recday-averaged (cross-session) task-phase ring test.
+
+    The best-powered / most-abstract version of `analyse_taskphase_ring`: one
+    pooled (n_neurons, 360) matrix per recday. Judge on `top_over_diameter`
+    (~0.87 ideal circle, ~0 degenerate) together with coverage + alignment;
+    split-half CV is across SESSIONS (odd/even), meaningful only if coverage>0.
+    """
+    pooled = build_recday_taskphase_matrix(recday_dict, config, sessions)
+    if pooled is None:
+        return None
+    X, model = _cloud_from_mean(pooled["M"], config)
+    st = _ring_stats(X, config)
+    res = dict(state="ringavg", n_neurons=pooled["n_neurons"],
+               n_sessions=pooled["n_sessions"],
+               n_trials_total=pooled["n_trials_total"],
+               n_bins=int(pooled["M"].shape[1]), config=config.to_dict(),
+               top=st["top"], gap_ratio=st["gap_ratio"], coverage=st["coverage"],
+               alignment=st["alignment"], theta=st["theta"],
+               dgms=st["dgms"], summary=st["summary"],
+               geometry=_ring_geometry(X, st["top"]), _X=X, _model=model)
+
+    # goal-progress (period-fold) view: is the code organised by within-leg
+    # progress (repeats every 90 bins) rather than A/B/C/D identity?
+    M = pooled["M"]
+    res["leg_similarity"] = leg_similarity(M, config.n_states)
+    M90 = fold_to_goalprogress(M, config.n_states)
+    X90, _ = _cloud_from_mean(M90, config)
+    st90 = _ring_stats(X90, config)
+    res["fold"] = dict(top_over_diameter=_ring_geometry(X90, st90["top"])["top_over_diameter"],
+                       coverage=st90["coverage"], top=st90["top"],
+                       gap_ratio=st90["gap_ratio"], n_bins=int(M90.shape[1]))
+    res["_X90"] = X90
+
+    # split-half CV across sessions (odd vs even), each half session-averaged
+    sm = pooled["session_means"]
+    if len(sm) >= 2:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            Ma = np.nanmean(np.stack(sm[0::2], axis=0), axis=0)
+            Mb = np.nanmean(np.stack(sm[1::2], axis=0), axis=0)
+        Xa, _ = _cloud_from_mean(Ma, config)
+        Xb, _ = _cloud_from_mean(Mb, config)
+        ta = circular_coordinates(Xa, config)["theta"]
+        tb = circular_coordinates(Xb, config)["theta"]
+        res["cv_alignment"] = circular_alignment(ta, tb)
+        res["cv_coverage"] = (float(1 - abs(np.mean(np.exp(1j * ta)))),
+                              float(1 - abs(np.mean(np.exp(1j * tb)))))
+    return res
+
+
 def project_onto_taskphase_ring(neuron_raw, ring_model, ring_X, ring_theta,
                                 config, speed=None):
     """Decode the ring's circular coordinate for instantaneous activity.
@@ -1501,6 +1635,219 @@ def plot_taskphase_ring(res, ax=None, dims=(0, 1), show_states=True):
                  f"top/diam={g.get('top_over_diameter', np.nan):.2f} "
                  f"coverage={res.get('coverage', np.nan):.3f}  "
                  f"[ring 0.83 | noise 0.08]", fontsize=7)
+    return ax
+
+
+def _ringavg_h1_dgm(res, which="full"):
+    """H1 diagram for a ring / ringavg result. 'full' = stored 360-bin diagram;
+    'fold' = recomputed from the stored folded goal-progress cloud `_X90`."""
+    if which == "fold":
+        X90 = res.get("_X90")
+        if X90 is None:
+            raise ValueError("result lacks _X90 — re-run the recday-average sweep")
+        cfg = _ring_cfg(PHConfig(**res.get("config", {})))
+        ph = compute_persistence(X90, cfg, landmark_idx=np.arange(X90.shape[0]),
+                                 do_cocycles=False)
+        return ph["dgms"][cfg.coeff_fields[0]][1]
+    return res["dgms"][1]                       # stored full-360 H1
+
+
+def plot_h1_barcode(res=None, which="full", ax=None, max_bars=30, ref=False,
+                    dgm=None, label=None):
+    """H1 barcode (longest bar on top) for a ring/ringavg result.
+
+    which : 'full' (360-bin task phase) or 'fold' (folded goal-progress cloud).
+    dgm   : pass a diagram directly (overrides res/which) — used for the reference.
+    ref   : draw green (the synthetic true-ring reference panel).
+    Same style as `plot_barcode`; the top/2nd ratio is in the title — a genuine
+    ring shows ONE long bar (ratio >> 1), no ring shows many similar bars.
+    """
+    import matplotlib.pyplot as plt
+    if ax is None:
+        _, ax = plt.subplots(figsize=(3, 2.2))
+    if dgm is None:
+        dgm = _ringavg_h1_dgm(res, which)
+    if label is None:
+        label = (res or {}).get("mouse_recday", "")
+    if dgm is None or len(dgm) == 0:
+        ax.set_title(f"{label}\nH1: no bars", fontsize=6); ax.set_yticks([]); return ax
+    life = dgm[:, 1] - dgm[:, 0]
+    order = np.argsort(life)[::-1][:max_bars]
+    srt = np.sort(life)[::-1]
+    ratio = srt[0] / srt[1] if len(srt) > 1 and srt[1] > 0 else np.inf
+    colour = "seagreen" if ref else _DIM_COLORS[1]
+    for i, k in enumerate(order):
+        ax.plot([dgm[k, 0], dgm[k, 1]], [i, i], lw=1.4, color=colour)
+    ax.set_yticks([]); ax.invert_yaxis()
+    ax.set_title(f"{label}\nratio {ratio:.1f}", fontsize=6)
+    return ax
+
+
+def _clean_ring_h1(n_pts=90, seed=0):
+    """H1 diagram of a clean noisy circle — the 'what a ring looks like' reference."""
+    rng = np.random.default_rng(seed)
+    ang = np.sort(rng.uniform(0, 2 * np.pi, n_pts))
+    X = np.zeros((n_pts, 6)); X[:, 0] = np.cos(ang); X[:, 1] = np.sin(ang)
+    X += rng.normal(0, 0.05, X.shape)
+    cfg = _ring_cfg(PHConfig(coeff_fields=(2,), n_pca=6))
+    ph = compute_persistence(X, cfg, landmark_idx=np.arange(n_pts), do_cocycles=False)
+    return ph["dgms"][cfg.coeff_fields[0]][1]
+
+
+def plot_ringavg_barcode_grid(results, which="fold", ncols=6, max_bars=30):
+    """Small-multiples grid of H1 barcodes, one per recday-averaged result.
+
+    Sorted by folded top/diam (most ring-like first). The first panel is a clean
+    true-ring reference (one long dominant bar) for scale — real recdays should
+    instead show many similar-length bars.
+    """
+    import matplotlib.pyplot as plt
+    rings = [r for r in results.values() if r.get("state") == "ringavg"]
+    rings.sort(key=lambda r: -r.get("fold", {}).get("top_over_diameter", 0))
+    ref_dgm = _clean_ring_h1(90 if which == "fold" else 360)
+
+    n = len(rings) + 1
+    nrows = int(np.ceil(n / ncols))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(2.1 * ncols, 1.8 * nrows),
+                             squeeze=False)
+    axes = axes.ravel()
+    plot_h1_barcode(ax=axes[0], dgm=ref_dgm, ref=True, max_bars=max_bars,
+                    label="TRUE ring (ref)")
+    for ax, r in zip(axes[1:], rings):
+        plot_h1_barcode(r, which=which, ax=ax, max_bars=max_bars)
+    for ax in axes[n:]:
+        ax.axis("off")
+    lbl = "goal-progress (folded)" if which == "fold" else "task phase (360)"
+    fig.suptitle(f"Recday-averaged H1 barcodes — {lbl}  "
+                 f"(true ring = one long bar; real = many similar bars)", fontsize=9)
+    fig.tight_layout()
+    return fig
+
+
+def _clean_ring_cloud(n_pts=360, seed=0):
+    """A clean noisy circle in 2-D — the 'what a loop looks like' reference."""
+    rng = np.random.default_rng(seed)
+    ang = np.sort(rng.uniform(0, 2 * np.pi, n_pts))
+    X = np.zeros((n_pts, 2))
+    X[:, 0], X[:, 1] = np.cos(ang), np.sin(ang)
+    return X + rng.normal(0, 0.03, X.shape)
+
+
+def _loop_panel(ax, X, label, td, show_states=False):
+    """One PC1-PC2 loop panel (colour = bin index) for the loop grid."""
+    ax.plot(np.r_[X[:, 0], X[0, 0]], np.r_[X[:, 1], X[0, 1]], "-",
+            color="0.8", lw=0.5, zorder=1)
+    ax.scatter(X[:, 0], X[:, 1], c=np.arange(X.shape[0]), cmap="hsv", s=5, zorder=2)
+    if show_states and X.shape[0] >= 4:
+        per = X.shape[0] // 4
+        for k, lab in enumerate("ABCD"):
+            c = X[k * per:(k + 1) * per, :2].mean(0)
+            ax.scatter(*c, s=45, c="k", zorder=3)
+            ax.annotate(lab, c, color="w", ha="center", va="center",
+                        fontsize=5, fontweight="bold", zorder=4)
+    ax.set_aspect("equal", "datalim"); ax.set_xticks([]); ax.set_yticks([])
+    ax.set_title(f"{label}\ntop/diam={td:.2f}", fontsize=6)
+
+
+def plot_ringavg_loop_grid(results, which="fold", ncols=6):
+    """Small-multiples grid of PCA loops, one per recday-averaged ring — the loop
+    counterpart of `plot_ringavg_barcode_grid` (same layout / sort / reference).
+
+    which='full' = 360-bin task-phase loop (with A/B/C/D centroids);
+    'fold' = folded 90-bin goal-progress loop. Colour = bin index (hsv). Sorted by
+    folded top/diam; first panel is a clean true-ring reference for scale.
+    """
+    import matplotlib.pyplot as plt
+    rings = [r for r in results.values() if r.get("state") == "ringavg"]
+    rings.sort(key=lambda r: -r.get("fold", {}).get("top_over_diameter", 0))
+
+    ref_X = _clean_ring_cloud(90 if which == "fold" else 360)
+    rcfg = _ring_cfg(PHConfig(coeff_fields=(2,), n_pca=6))
+    rph = compute_persistence(ref_X, rcfg, landmark_idx=np.arange(len(ref_X)),
+                              do_cocycles=False)
+    ref_td = _ring_geometry(ref_X, rph["summary"][rcfg.coeff_fields[0]][1]["top"])["top_over_diameter"]
+
+    n = len(rings) + 1
+    nrows = int(np.ceil(n / ncols))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(2.1 * ncols, 2.0 * nrows),
+                             squeeze=False)
+    axes = axes.ravel()
+    _loop_panel(axes[0], ref_X, "TRUE ring (ref)", ref_td)
+    key = "geometry" if which == "full" else "fold"
+    for ax, r in zip(axes[1:], rings):
+        X = r["_X"] if which == "full" else r["_X90"]
+        _loop_panel(ax, X, r.get("mouse_recday", ""), r[key]["top_over_diameter"],
+                    show_states=(which == "full"))
+    for ax in axes[n:]:
+        ax.axis("off")
+    lbl = "goal-progress (folded 90)" if which == "fold" else "task phase (360)"
+    fig.suptitle(f"Recday-averaged PCA loops — {lbl}  "
+                 f"(colour = bin index; true ring = clean circle)", fontsize=9)
+    fig.tight_layout()
+    return fig
+
+
+def plot_goalprogress(res, axes=None):
+    """3-panel view of a recday-averaged result's goal-progress structure.
+
+    Left  : full trajectory coloured by TASK PHASE (0..n_bins) — A/B/C/D identity.
+    Middle: full trajectory coloured by GOAL PROGRESS (period n_bins/n_states) —
+            if the legs overlap into one clean gradient, the code 'repeats every
+            per bins' (goal-progress dominated).
+    Right : the folded goal-progress cloud (a genuine ring closes; the real data
+            is an open horseshoe ARC). Title reports folded top/diam + leg_similarity.
+    Requires '_X' and '_X90' (produced by analyse_recday_taskphase_ring).
+    """
+    import matplotlib.pyplot as plt
+    X, X90 = res.get("_X"), res.get("_X90")
+    if X is None or X90 is None:
+        raise ValueError("result lacks _X/_X90 — re-run the recday-average sweep")
+    if axes is None:
+        _, axes = plt.subplots(1, 3, figsize=(13, 4.2))
+    nb, per = X.shape[0], X90.shape[0]
+    gp = np.tile(np.arange(per), nb // per)
+    axes[0].scatter(X[:, 0], X[:, 1], c=np.arange(nb), cmap="hsv", s=12)
+    axes[0].set_title(f"colour = task phase (0..{nb})", fontsize=8)
+    axes[1].scatter(X[:, 0], X[:, 1], c=gp, cmap="hsv", s=12)
+    axes[1].set_title(f"colour = goal progress (period {per})", fontsize=8)
+    axes[2].plot(np.r_[X90[:, 0], X90[0, 0]], np.r_[X90[:, 1], X90[0, 1]],
+                 "-", color="0.7", lw=0.8)
+    axes[2].scatter(X90[:, 0], X90[:, 1], c=np.arange(per), cmap="hsv", s=18)
+    f = res.get("fold", {})
+    axes[2].set_title(f"folded to goal progress\ntop/diam={f.get('top_over_diameter', np.nan):.2f} "
+                      f"legSim={res.get('leg_similarity', np.nan):.2f}  [ring 0.83]", fontsize=8)
+    for a in axes:
+        a.set_xlabel("PC1"); a.set_ylabel("PC2"); a.set_aspect("equal", "datalim")
+    axes[0].figure.suptitle(f"{res.get('mouse_recday','')} — goal-progress structure", fontsize=9)
+    return axes[0].figure
+
+
+def plot_ring_3d(res, color_by="goalprogress", which="full", ax=None,
+                 elev=22, azim=-60, s=14):
+    """3-D (PC1-2-3) scatter of a ring/ringavg cloud, coloured by task phase or
+    goal progress. `which='full'` uses `_X` (360 pts); 'fold' uses `_X90` (90).
+    Static (renders under nbconvert); for live rotation use `%matplotlib widget`.
+    """
+    import matplotlib.pyplot as plt
+    X = res.get("_X" if which == "full" else "_X90")
+    if X is None or X.shape[1] < 3:
+        raise ValueError("result lacks a 3-D cloud (_X/_X90 with >=3 PCs)")
+    n = X.shape[0]
+    if color_by == "goalprogress" and which == "full":
+        per = res.get("_X90").shape[0] if res.get("_X90") is not None else n // 4
+        c = np.tile(np.arange(per), n // per)
+    else:
+        c = np.arange(n)
+    if ax is None:
+        ax = plt.figure(figsize=(4.2, 4)).add_subplot(projection="3d")
+    ax.scatter(X[:, 0], X[:, 1], X[:, 2], c=c, cmap="hsv", s=s, depthshade=False)
+    ax.set_xlabel("PC1"); ax.set_ylabel("PC2"); ax.set_zlabel("PC3")
+    ax.view_init(elev=elev, azim=azim)
+    g = res.get("geometry", {}); f = res.get("fold", {})
+    ax.set_title(f"{res.get('mouse_recday','')} ({which}, {color_by})\n"
+                 f"top/diam={g.get('top_over_diameter', np.nan):.2f} "
+                 f"fold={f.get('top_over_diameter', np.nan):.2f} "
+                 f"legSim={res.get('leg_similarity', np.nan):.2f}", fontsize=7)
     return ax
 
 

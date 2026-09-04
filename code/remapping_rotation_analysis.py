@@ -34,6 +34,23 @@ import warnings
 warnings.filterwarnings('ignore')
 
 
+def _anatomy_split():
+    """Import `anatomy_split` from this file's directory, or None if it isn't there.
+
+    Imported lazily and by path: the PFC copy of this module sits in `mFC_data/code/`, which
+    has no `anatomy_split.py` (anatomy is an LEC-only concern), so a top-level import would
+    break that copy at import time. Only the batched all-tasks pairwise helper needs it.
+    """
+    import os, sys
+    here = os.path.dirname(os.path.abspath(__file__))
+    if not os.path.exists(os.path.join(here, 'anatomy_split.py')):
+        return None
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import anatomy_split
+    return anatomy_split
+
+
 # ============================================================================
 # Config
 # ============================================================================
@@ -251,6 +268,41 @@ def pairwise_tuning_angles_ref(tuning_ref, included_idx, step):
     return mat
 
 
+def pairwise_tuning_angles(tuning, included_idx, method='xcorr'):
+    """Batched all-pairs tuning angles within ONE task -> (n_inc, n_inc) signed degrees.
+
+    The fast replacement for `pairwise_tuning_angles_ref`, delegating to the single tested
+    implementation in `anatomy_split.pairwise_angles` (FFT, whole matrix at once). The
+    Python shift loop above will not finish for the all-tasks version: ~80 included neurons
+    x 6 tasks is ~3.4M pair-correlations per recday, about 7 h over the cohort against ~2.5 s
+    batched.
+
+    Sign convention differs from `pairwise_tuning_angles_ref`, which returns the rotation
+    aligning neuron b onto a in [0, 360); this returns the rotation taking a onto b in
+    (-180, 180]. Every existing consumer takes `1 - cos(angle)`, which is even and 360-
+    periodic, so the two are interchangeable there -- but do not mix them where the sign is
+    read directly.
+    """
+    asplit = _anatomy_split()
+    if asplit is None:
+        raise ImportError(
+            "pairwise_tuning_angles needs anatomy_split.py, which lives beside the LEC copy "
+            "of this module only. Use pairwise_tuning_angles_ref for the reference task.")
+    return asplit.pairwise_angles(np.asarray(tuning)[np.asarray(included_idx)], method=method)
+
+
+def pairwise_tuning_angles_all_tasks(tunings, sessions, included_idx, method='xcorr'):
+    """`{session: (n_inc, n_inc)}` -- the within-task pair angle in EVERY task.
+
+    This is what the direct (reference-free) coherence metric needs: a pair is coherent if
+    its within-task angle is preserved across tasks. `_relative_pairs` derives the same
+    quantity from each neuron's rotation vs one reference task, which is algebraically equal
+    where every phase is well defined but lets one bad reference corrupt every pair at once.
+    """
+    return {s: pairwise_tuning_angles(tunings[s], included_idx, method=method)
+            for s in sessions}
+
+
 # ============================================================================
 # Per-recday analysis
 # ============================================================================
@@ -313,10 +365,20 @@ def analyse_recday(data_dic, mouse_recday, valid_sessions, config, verbose=False
     # --- remapping: single-neuron rotations vs ref ---
     angles_vs_ref = rotations_vs_reference(tunings, included, ref, others, step_s)  # (n_inc, n_others)
 
+    # `included`, `pair_idx` and `valid_neur_idx` are the JOIN KEYS. Without them nothing
+    # downstream can reach the per-unit region labels: `included_idx[k]` is the row of
+    # `Neuron_raw` (and so of `unit_regions[recday]`) that row k of `single_neuron_angles`
+    # describes, and `pair_idx[p]` is the pair of included-positions that row p of
+    # `relative_pairs` describes. The join is positional throughout -- see anatomy_split.
+    pair_idx = np.column_stack(np.triu_indices(len(included), k=1))   # (n_pairs, 2)
     out = {
         'mouse_recday': mouse_recday,
         'used_sessions': used,
+        'reference_session': ref,
+        'comparison_sessions': list(others),
         'n_included': len(included),
+        'included_idx': np.asarray(included),           # (n_inc,) rows into Neuron_raw
+        'pair_idx': pair_idx,                           # (n_pairs, 2) into included_idx
         'single_neuron_angles': angles_vs_ref,          # (n_inc, n_comparisons)
     }
 
@@ -368,6 +430,9 @@ def analyse_recday(data_dic, mouse_recday, valid_sessions, config, verbose=False
             out['silhouette_real'] = sil_real
             out['silhouette_null_mean'] = np.nanmean(sil_null)
             out['cluster_labels'] = labels
+            # `cluster_labels` is indexed by the NaN-free subset, not by `included` -- so the
+            # join key for it is these rows of Neuron_raw, not `included_idx`.
+            out['valid_neur_idx'] = included[valid_neur]
             out['cluster_ref_tunings'] = tunings[ref][included[valid_neur]]  # (n_valid, 360) for Fig 3e
 
     # --- X vs X' control: ref task vs a repeated identical-task session ---
@@ -385,6 +450,7 @@ def analyse_recday(data_dic, mouse_recday, valid_sessions, config, verbose=False
     if rep is not None:
         angles_X = rotations_vs_reference(tunings, included, ref, [rep], step_s)  # (n_inc, 1)
         out['single_neuron_angles_X'] = angles_X
+        out['repeat_session'] = rep
         if len(included) >= config.min_neurons:
             out['relative_pairs_X'] = _relative_pairs(angles_X)  # (n_pairs, 1)
     if verbose:

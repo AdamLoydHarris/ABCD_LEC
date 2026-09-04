@@ -89,6 +89,7 @@ NEUTRAL   = '#2C2C2A'   # Caviar
 
 def build_design_tables(mouse_recdays, data_dic, *,
                         downsample_factor=10,
+                        downsample_mode='stride',
                         filter_correct_paths=False,
                         max_transition_seconds=60,
                         bin_size_ms=25,
@@ -98,6 +99,9 @@ def build_design_tables(mouse_recdays, data_dic, *,
 
     Mirrors the pooling logic in `glm_analysis_v2.run_glm_analysis`: per session,
     `prepare_session_data` -> `truncate_all_arrays` -> `downsample_session_data`,
+    with `downsample_mode` passed straight through ('stride' keeps every Nth 25 ms bin and
+    discards the rest; 'bin' sums spike counts over each block -- see
+    `glm_analysis_v2.downsample_session_data`),
     keep nodes (Locs <= 21) intersected with the transition-filter mask, then
     concatenate across sessions. Adds a per-sample `interval_id` (which inter-
     reward leg the sample belongs to) for interval-level CV / bootstrap splits.
@@ -146,7 +150,8 @@ def build_design_tables(mouse_recdays, data_dic, *,
                 bin_size_ms=bin_size_ms,
             )
             prep = truncate_all_arrays(prep)
-            prep = downsample_session_data(prep, downsample_factor)
+            prep = downsample_session_data(prep, downsample_factor,
+                                           mode=downsample_mode)
 
             tf = np.asarray(prep['time_from_reward'], float)
             tt = np.asarray(prep['time_to_reward'], float)
