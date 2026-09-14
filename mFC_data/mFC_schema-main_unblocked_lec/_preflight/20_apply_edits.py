@@ -398,18 +398,10 @@ VARIANTS = {
     ),
 }
 
-# prospective (added 2026-09-14): the deposited cell 15 builds RETROSPECTIVE lags only --
-# the "activity bump" seeded at a (location, phase) visit is rolled to lag k after k later
-# phase transitions, so lag k at bin t marks a visit k transitions in the PAST. The
-# prospective mirror is the same bump model run on the time-reversed session and
-# un-reversed afterwards (identical to `elasticnet_regression_v5.generate_regressors_raw
-# (lag_direction='future')`): lag k at bin t then marks a visit k transitions in the
-# FUTURE. Only the bump-model inputs (nodes / phases / states) and its output flip;
-# `Location_raw_eq` and `Neuron_raw_eq` are saved un-reversed because they are aligned to
-# neural time. Every read/write is namespaced through the notebook's own `addition` /
-# `addition2` suffix slot (`'_prospective'` where the deposit uses `''` / `'_beyond'`), so
-# the retrospective outputs are untouched and `96_extract_figure5_stats.py` picks the new
-# files up via its `addition2` argument. Cell 15 is NOT skipped: it builds the regressors.
+# prospective (2026-09-14): cell 15 builds retrospective lags only. Run the same bump model on
+# the time-reversed session and un-reverse its output (= v5 generate_regressors_raw 'future').
+# Neuron/Location arrays stay in neural time. Outputs take the '_prospective' suffix via the
+# notebook's own addition/addition2 slot; 96_extract_figure5_stats.py reads them by that suffix.
 VARIANTS['prospective'] = dict(
     src='Figure5_Regression.ipynb',
     dst='Figure5_Regression_prospective.ipynb',

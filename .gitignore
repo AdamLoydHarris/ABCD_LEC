@@ -5,9 +5,12 @@
 !/mFC_data
 !/docs
 !/sbatch_files
+!/.claude
+.claude/settings.local.json
 .DS_Store
 *.ipynb_checkpoints
 ._.DS_Store
+._*
 
 # Byte-code (116 .pyc files were tracked until 2026-09-14)
 __pycache__/

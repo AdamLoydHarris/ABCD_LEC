@@ -182,3 +182,9 @@ recdays 15–16. The cross-dataset comparison
 
 1,252 units, ~6 folds each. ElasticNet **2.5 h per direction** at `n_jobs=6` on a loaded box
 (20 min when idle); Poisson ≈ 7× that.
+
+## 2026-09-14 — L1 / elastic-net Poisson (glum) sweep, PFC past
+
+Specs 14–17 of `code/slurm_v5/run_queue_v5.py` (lasso α = 0.01 / 0.003 / 0.001, elastic net 0.5 @
+0.003; jobs 3595313–3595316) write `mFC_data/data/figures/alpha<a>_poisson_{l1,en0.5}_v5_past_*`.
+Method, conventions and controls 16–18: see the LEC write-up, section "2026-09-14".

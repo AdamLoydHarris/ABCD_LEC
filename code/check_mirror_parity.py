@@ -42,6 +42,8 @@ BYTE_PAIRS = [
     # own tree's copy, so a drift here makes LEC and PFC numbers non-comparable silently.
     ('code/elasticnet_regression_v5.py', 'mFC_data/code/elasticnet_regression_v5.py'),
     ('code/elasticnet_v5_synthetics.py', 'mFC_data/code/elasticnet_v5_synthetics.py'),
+    ('code/lda_reward_goalprogress.py', 'mFC_data/code/lda_reward_goalprogress.py'),
+    ('code/run_lda_reward_progress.py', 'mFC_data/code/run_lda_reward_progress.py'),
 ]
 
 DEF_PAIRS = [

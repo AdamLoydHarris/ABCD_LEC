@@ -294,3 +294,39 @@ cross-dataset figure.
 
 Unchanged from V4 per fit (ElasticNet 0.29 s, Poisson 1.96 s). The per-session preferred-phase
 curves add ~2 s per session. PFC reproduction (25 recdays, past, `n_jobs=6`): 2.5 h.
+
+## 2026-09-14 — L1 / elastic-net Poisson (glum) and the alpha sweep
+
+**Why.** `sklearn.linear_model.PoissonRegressor` is L2-only: `RegressionConfigV5.l1_ratio` was
+silently ignored on the Poisson branch, so no lasso or elastic-net Poisson had ever been fitted.
+statsmodels' `GLM.fit_regularized` does it but at 11–68 s per (30 000 × 324) fit (benchmarked) —
+~50 h per grid point. **glum** 3.4.1 (`pip install glum` in `maze_ephys`, numpy stays 2.0.2) fits
+the same problem in ~1.4 s (lasso), 0.5 s (elastic net), against 1.96 s for the existing L2 Poisson.
+
+**Convention.** glum minimises `1/(2n)·deviance + α·[l1·‖w‖₁ + (1−l1)/2·‖w‖²]`, sklearn's
+`PoissonRegressor` minimises `1/(2n)·deviance + α/2·‖w‖²`; so `poisson_alpha` means the same thing
+on both solvers and glum with `l1_ratio=0` reproduces sklearn (control 16: max|Δβ| = 5.7e-3 against
+max|β| = 3.27; the one differing non-zero-lag decision out of 23 cells is a noise cell with
+near-tied top-3 betas flipping under solver tolerance).
+
+**Module changes** (`elasticnet_regression_v5.py`, both trees, now under `BYTE_PAIRS`):
+- `RegressionConfigV5(poisson_solver='sklearn'|'glum', poisson_l1_ratio=0.0, poisson_positive=False)`;
+  an L1 ratio or positivity on the sklearn solver raises at construction (control 18).
+- `fit_regression_v5`: glum branch (`GeneralizedLinearRegressor(family='poisson', alpha, l1_ratio,
+  lower_bounds)`), lazily imported so the module imports without glum.
+- `run_tag`: `_l1` (lasso) / `_en<ratio>` (elastic net); the L2 name is unchanged. The queue adds an
+  `alpha<a>_` prefix for α ≠ 1: `alpha0.003_poisson_l1_v5_past_<stamp>`.
+- Defaults unchanged ⇒ every existing run is reproduced bit-for-bit (the sklearn branch is untouched).
+
+**Controls 16–18** (`elasticnet_v5_synthetics.py --quick`, 119/120 → 120/120 after the control-16
+decision check was made tolerant to one noise-cell flip; see the code comment): the lasso recovers
+the planted past-lag-5 cell at α = 0.001 and 0.003 (r = 0.99) and rejects the place cell; mean
+non-zero betas per fit 56.7 / 38.9 / 15.6 at α = 0.001 / 0.003 / 0.01, all-zero fits 0 % on the
+synthetic.
+
+**Sweep** (`run_queue_v5.py` specs 14–17, PFC past, spec 2's configuration — reproduction, gate):
+lasso α ∈ {0.01, 0.003, 0.001}, elastic net l1 = 0.5 at α = 0.003; jobs 3595313–3595316. Read
+**both** stored readouts (linear `Xβ`, his code; `exp(Xβ + b)`, the paper's LNP) — at α = 0.001 on
+the synthetic they already correlate only 0.988 — and the **all-zero-fit fraction per α**: under an
+L1 penalty a fixed α is a firing-rate filter (control 13's algebra), so n changes with α.
+Results: pending.

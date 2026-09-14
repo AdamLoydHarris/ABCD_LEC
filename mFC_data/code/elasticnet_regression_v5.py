@@ -345,10 +345,8 @@ class RegressionConfigV5:
                              'Note use_poisson defaults to True: pass use_poisson=False for an '
                              'ElasticNet run.')
         self.y_scaling = y_scaling
-        # sklearn's PoissonRegressor is L2-only and silently ignores `l1_ratio`; a lasso or
-        # elastic-net Poisson needs glum (irls-cd), whose objective uses the same convention
-        # (1/(2n) deviance + alpha * [l1 ||w||_1 + (1 - l1)/2 ||w||^2]) so `poisson_alpha`
-        # means the same thing on both solvers and glum with l1_ratio=0 reproduces sklearn.
+        # sklearn PoissonRegressor is L2-only. glum uses the same objective scaling, so
+        # poisson_alpha means the same on both and glum(l1_ratio=0) == sklearn (control 16).
         if poisson_solver not in ('sklearn', 'glum'):
             raise ValueError(f"poisson_solver must be 'sklearn' or 'glum', got {poisson_solver!r}")
         if not 0.0 <= float(poisson_l1_ratio) <= 1.0:
@@ -729,9 +727,7 @@ def fit_regression_v5(X, y, config, return_intercept=False):
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
         if config.use_poisson and getattr(config, 'poisson_solver', 'sklearn') == 'glum':
-            # Lazy import: glum is only needed for the L1 / elastic-net Poisson branch, and
-            # the module must keep importing (and the sklearn branch keep running) without it.
-            from glum import GeneralizedLinearRegressor
+            from glum import GeneralizedLinearRegressor   # lazy: optional dependency
             model = GeneralizedLinearRegressor(
                 family='poisson', alpha=config.poisson_alpha,
                 l1_ratio=config.poisson_l1_ratio, max_iter=config.max_iter,
@@ -1698,8 +1694,7 @@ def run_tag(config):
     reproduction in a folder listing.
     """
     tag = '_zscore' if getattr(config, 'y_scaling', 'none') != 'none' else ''
-    # Poisson penalty mixing (2026-09-14): `_l1` for the lasso, `_en<ratio>` for an elastic
-    # net, nothing for the L2 reference so existing directory names are unchanged.
+    # '_l1' lasso, '_en<ratio>' elastic net, nothing for L2 (existing names unchanged)
     l1 = float(getattr(config, 'poisson_l1_ratio', 0.0)) if getattr(config, 'use_poisson', False) else 0.0
     if l1 >= 1.0:
         tag += '_l1'

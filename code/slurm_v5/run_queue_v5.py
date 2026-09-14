@@ -66,9 +66,7 @@ def run(v5, data_dic, mouse_recdays, data_root, kind, direction, min_trials, pre
     if y_scaling != 'none':
         kind = f'{kind}_zscore'
     if use_poisson and poisson_alpha != 1.0:
-        # sweep points carry their alpha in the directory name; the alpha=1 reference keeps
-        # the unchanged name. The penalty mixing (`_l1` / `_en<ratio>`) comes from run_tag.
-        prefix = f'alpha{poisson_alpha:g}_{prefix}'
+        prefix = f'alpha{poisson_alpha:g}_{prefix}'   # alpha=1 keeps the unchanged name
     vsd = dedup(data_dic, mouse_recdays, min_trials, v5)
     stamp = time.strftime('%Y%m%d_%H%M%S')
     # `mFC_data/data` was briefly read-only on 2026-09-07 (chmod -R by something outside this
@@ -126,12 +124,8 @@ def pfc_jobs():
     if ONLY is None or '7' in ONLY:
         run(v5, dd, mrs, data_root, 'reproduction', 'future', 1, 'test', '', False, False,
             y_scaling='zscore_recday')
-    # 14-17 (2026-09-14): regularisation sweep for the Poisson anchoring regression -- PFC
-    # past, reproduction config + gate, i.e. spec 2 with a different penalty. sklearn's
-    # PoissonRegressor is L2-only, so these run on glum (`pip install glum` in maze_ephys):
-    # the lasso at three alphas and one elastic net; spec 2 (alpha=1, L2) is the reference
-    # arm. Directory names: `alpha0.003_poisson_l1_v5_past_<stamp>` etc. Explicit-only: a
-    # bare `run_queue_v5.py <n_jobs>` (ONLY=None) does NOT run the sweep.
+    # 14-17: spec 2 with a glum lasso / elastic-net penalty (spec 2 is the L2 reference).
+    # Explicit-only: ONLY=None does not run the sweep.
     for spec, (alpha, l1) in POISSON_SWEEP.items():
         if ONLY is not None and spec in ONLY:
             run(v5, dd, mrs, data_root, 'reproduction', 'past', 1, 'test', '', True, True,

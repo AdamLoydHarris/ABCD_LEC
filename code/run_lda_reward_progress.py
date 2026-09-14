@@ -1,27 +1,14 @@
-"""Run the reward x goal-progress LDA (lda_reward_goalprogress.py) for one dataset on the
-cluster and pickle everything the notebooks' summary cells need.
+"""Reward x goal-progress LDA (lda_reward_goalprogress.py) for one dataset, run under sbatch.
 
     python run_lda_reward_progress.py --dataset lec|pfc [--min-trials 10] [--n-shuffles 1000]
                                       [--recdays rd1,rd2] [--out PATH]
 
-Why a script: the analysis lived only in `LEC_lda_analyses.ipynb` / `PFC_lda_analyses.ipynb`
-cell 30, where the 1000-shuffle null per recday x 2 targets made it long enough to be
-interrupted (LEC, 3/25 recdays) and to crash on the last PFC recday (1 PC, fixed 2026-09-14
-in the module). Neither region ever had a complete run. Running it here, under sbatch, keeps
-it out of the 64 GB interactive cgroup and leaves a joinable pickle rather than 59 MB of
-embedded notebook outputs. The notebooks load the pickle (`RUN_MODE = 'load'`).
+Replaces cell 30 of {LEC,PFC}_lda_analyses.ipynb, which never completed on either dataset
+(1000-shuffle null per recday). Same file in code/ and mFC_data/code/. LEC reads
+data_dic_lec.pkl; PFC builds the same shape with build_data_dic_from_pfc(compute_norm=True).
 
-Identical file in `code/` and `mFC_data/code/` (repo convention: duplication, not import);
-`--dataset` picks the loader. LEC reads `data/processed_data/data_dic_lec.pkl` (the current
-pickle, which carries `Neurons_norm`; the notebook used the Feb-2026 `data_dic_for_yaren.pkl`),
-PFC builds the same shape with `glm_analysis_v2.build_data_dic_from_pfc(compute_norm=True)`.
-
-Output pickle:
-    {'dataset', 'min_trials', 'n_shuffles', 'recdays', 'valid_sessions_dic',
-     'results_by_recday': {recday: run_reward_progress_lda_analysis(...) dict},
-     'decoding_results':  {recday: {'progress'|'reward': {'real_acc','null_accs','p_value'}}},
-     'skipped': {recday: reason}, 'elapsed_s'}
-plus `<out>.csv` with one row per recday (n_neurons, n_pcs, n_lds, accuracies, p-values).
+Output: a pickle {'dataset', 'min_trials', 'n_shuffles', 'recdays', 'valid_sessions_dic',
+'results_by_recday', 'decoding_results', 'skipped', 'elapsed_s'} plus a per-recday CSV.
 """
 from __future__ import annotations
 

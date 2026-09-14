@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(timeout 115 python -u -c ' *)",
+      "Bash(timeout 300 python -u -c ' *)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('code/ccgp_state_pairs.py'\\).read\\(\\)\\); print\\('parses OK'\\)\")",
+      "Bash(grep -n \"AD, BC\\\\|AD/BC\\\\|{A, D}\\\\|state D\\\\|D.*ENDS\\\\|ends at reward\\\\|tone-immune\\\\|AB, AC, BD, CD\\\\|AB/AC/BD/CD\\\\|both A and D\\\\|contaminates\" code/CCGP_STATE_PAIRS.md)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('ccgp_state_pairs.py'\\).read\\(\\)\\); print\\('parses OK'\\)\")",
+      "Bash(timeout 250 python -u -c ' *)",
+      "Bash(pkill -f \"run_windows.py.*PFC\")",
+      "Bash(timeout 3000 python -u /tmp/claude-801151371/-ceph-behrens-adam-harris-Taskspace-abstraction-lEC/3d2c13fc-472e-40b1-83c1-3ed26bf1de84/scratchpad/run_windows.py \"$\\(pwd\\)/mFC_data/code\" PFC \"$\\(pwd\\)/data/figures/ccgp_state_pairs\")",
+      "Bash(ps -eo pid,etimes,cmd)",
+      "Bash(grep -qE \"recdays$\" /tmp/claude-801151371/-ceph-behrens-adam-harris-Taskspace-abstraction-lEC/3d2c13fc-472e-40b1-83c1-3ed26bf1de84/scratchpad/pfc_win.log)",
+      "Bash(sed -n '/=== PFC window sweep/,$p' /tmp/claude-801151371/-ceph-behrens-adam-harris-Taskspace-abstraction-lEC/3d2c13fc-472e-40b1-83c1-3ed26bf1de84/scratchpad/pfc_win.log)",
+      "Bash(timeout 120 python -u -c ' *)",
+      "Bash(timeout 90 python -c ' *)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(cd mFC_data/code *)",
+      "Read(//ceph/behrens/adam_harris/data/**)",
+      "Bash(python -c ' *)"
+    ]
+  }
+}

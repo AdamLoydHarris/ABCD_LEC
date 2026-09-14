@@ -567,9 +567,7 @@ def run_reward_progress_lda_analysis(data_dic, mouse_recday, valid_sessions,
     # PCA
     X_pca, pca, _ = apply_pca_trialbins(X, variance_thresh)
 
-    # A 2-D LDA (LD1 = reward number, LD2 = goal progress) needs at least two PCs. One PFC
-    # recday (me10_20122021_21122021, a single usable neuron) reaches here with 1/1 PCs and
-    # used to crash in plot_reward_progress_ld_scatter (2026-09-14).
+    # a 2-D LDA needs two PCs; me10_20122021_21122021 (PFC) has one and used to crash here
     if X_pca.shape[1] < 2:
         print(f"  SKIP {mouse_recday}: only {X_pca.shape[1]} PC(s) -- too few for a 2-D LDA.")
         return None
@@ -917,3 +915,117 @@ def plot_aggregate_confusion_matrix(results_by_recday, decode_target='progress')
         title=f'Aggregate confusion matrix — {decode_target} decoding\n'
               f'(n={n_recdays} recdays)'
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cross-dataset summary from the pickles written by run_lda_reward_progress.py.
+_REPO = '/ceph/behrens/adam_harris/Taskspace_abstraction_lEC'
+REWARD_PROGRESS_PICKLES = {
+    'lec': f'{_REPO}/data/glm_outputs/LEC_lda/reward_progress.pkl',
+    'pfc': f'{_REPO}/mFC_data/glm_outputs/PFC_lda/reward_progress.pkl',
+}
+DATASET_COLOURS = {'lec': '#BE3455', 'pfc': '#0F4C81'}   # GridMaze Viva Magenta / Classic Blue
+NULL_COLOUR, INK = '#B4B2A9', '#2C2C2A'                  # GridMaze Stone / Caviar
+
+
+def load_reward_progress_results(dataset, path=None):
+    """The pickle written by run_lda_reward_progress.py for 'lec' or 'pfc'."""
+    import os
+    import pickle
+    path = path or REWARD_PROGRESS_PICKLES[dataset]
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f'{path} not found -- run: sbatch sbatch_files/lda_reward_progress.sbatch {dataset}')
+    with open(path, 'rb') as f:
+        return pickle.load(f)
+
+
+def reward_progress_table(payload):
+    """One row per recday: n, accuracies, null mean/sd, p-values, chance levels."""
+    import pandas as pd
+    rows = []
+    for rd, dec in payload['decoding_results'].items():
+        res = payload['results_by_recday'][rd]
+        row = dict(dataset=payload['dataset'], recday=rd, mouse=rd.split('_')[0],
+                   n_neurons=res['X'].shape[1], n_pcs=res['X_pca'].shape[1],
+                   n_lds=res['X_rp_ld'].shape[1], n_sessions=len(res['filtered_sessions']))
+        for target in ('progress', 'reward'):
+            d = dec[target]
+            null = np.asarray(d['null_accs'], dtype=float)
+            row[f'{target}_acc'] = d['real_acc']
+            row[f'{target}_null_mean'] = float(null.mean()) if len(null) else np.nan
+            row[f'{target}_null_sd'] = float(null.std()) if len(null) else np.nan
+            row[f'{target}_p'] = d['p_value']
+        row['progress_chance'] = 1.0 / len(PROGRESS_BINS)
+        row['reward_chance'] = 1.0 / len(np.unique(res['y_reward']))
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def plot_lec_vs_pfc_decoding(paths=None, out_path=None, alpha=0.05, seed=0):
+    """LOGO-CV balanced accuracy for goal-progress and reward-number decoding, LEC against PFC.
+
+    Small points = recdays (jittered); open markers = per-mouse means; grey band = shuffle null
+    (mean of the per-recday null means +/- 2 x mean null sd); dashed = chance. The text above
+    each column is the number of recdays significant at `alpha`. A dataset whose pickle is
+    missing is skipped with a note. Returns (fig, table).
+    """
+    import matplotlib as mpl
+    from matplotlib.patches import Rectangle
+    import pandas as pd
+
+    tables = []
+    for ds in ('lec', 'pfc'):
+        try:
+            tables.append(reward_progress_table(
+                load_reward_progress_results(ds, (paths or {}).get(ds))))
+        except FileNotFoundError as exc:
+            print(f'  skipping {ds}: {exc}')
+    if not tables:
+        raise FileNotFoundError('no reward_progress.pkl found for either dataset')
+    df = pd.concat(tables, ignore_index=True)
+    datasets = [d for d in ('lec', 'pfc') if d in set(df['dataset'])]
+
+    try:
+        from glm_analysis_v2 import apply_gridmaze_style
+        apply_gridmaze_style()
+    except Exception:
+        pass
+
+    rng = np.random.default_rng(seed)
+    fig, axes = plt.subplots(1, 2, figsize=(5.0, 2.3))
+    titles = {'progress': f'goal progress ({len(PROGRESS_BINS)} classes)',
+              'reward': 'reward number (time in session)'}
+    for ax, target in zip(axes, ('progress', 'reward')):
+        for i, ds in enumerate(datasets):
+            sub = df[df['dataset'] == ds]
+            nm = sub[f'{target}_null_mean'].mean()
+            nsd = sub[f'{target}_null_sd'].mean()
+            ax.add_patch(Rectangle((i - 0.32, nm - 2 * nsd), 0.64, 4 * nsd,
+                                   color=NULL_COLOUR, alpha=0.6, lw=0, zorder=1))
+            jit = rng.uniform(-0.18, 0.18, len(sub))
+            ax.scatter(i + jit, sub[f'{target}_acc'], s=8, color=DATASET_COLOURS[ds],
+                       alpha=0.65, lw=0, zorder=2)
+            mm = sub.groupby('mouse')[f'{target}_acc'].mean()
+            xs = i + np.linspace(-0.12, 0.12, len(mm)) if len(mm) > 1 else np.array([i])
+            ax.scatter(xs, mm.values, s=24, facecolor='white', edgecolor=DATASET_COLOURS[ds],
+                       lw=1.0, zorder=3)
+            n_sig = int((sub[f'{target}_p'] < alpha).sum())
+            ax.text(i, 1.02, f'{n_sig}/{len(sub)} p<{alpha:g}', ha='center', va='bottom',
+                    fontsize=7, color=DATASET_COLOURS[ds], transform=ax.get_xaxis_transform())
+        ax.axhline(df[f'{target}_chance'].mean(), ls='--', lw=0.8, color=INK, zorder=0)
+        ax.set_xticks(range(len(datasets)))
+        ax.set_xticklabels([d.upper() for d in datasets])
+        ax.set_xlim(-0.6, len(datasets) - 0.4)
+        ax.set_ylim(0, 1.0 if target == 'progress' else max(0.2, df[f'{target}_acc'].max() * 1.15))
+        ax.set_title(titles[target], pad=10)
+        ax.spines[['top', 'right']].set_visible(False)
+    axes[0].set_ylabel('LOGO-CV balanced accuracy')
+    fig.tight_layout()
+    if out_path:
+        import os
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        with mpl.rc_context({'savefig.bbox': None, 'savefig.pad_inches': 0.0,
+                             'pdf.fonttype': 42, 'ps.fonttype': 42}):
+            fig.savefig(out_path, bbox_inches=None)
+    return fig, df

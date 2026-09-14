@@ -209,4 +209,22 @@ the GLM's gp-vs-tfr split does not abolish it — so this is a strong descriptio
 **New guard:** `code/check_mirror_parity.py` runs at the top of both `submit_glm_*.sh` and refuses to
 submit when `code/` and `mFC_data/code/` have drifted (this has cost two 25-job runs).
 
-**Nothing is committed.** All work is uncommitted in the working tree.
+**Committed 2026-09-14** as checkpoint `46c93db` (285 files: GLM V3, V5, El-Gaby tooling, W5, LDA
+runner; `.pyc` untracked, outputs and the El-Gaby run trees ignored).
+
+**2026-09-14, launched (results land overnight):**
+- El-Gaby's own `Figure5_Regression` with **prospective** lags, both regions -- a declared VARIANT
+  (`20_apply_edits.py --variant prospective`: cell 15's bump model on the time-reversed session,
+  `_prospective` suffix on every file). His retrospective regressors equal V5 `past` to
+  `max|diff| = 0` on all 6 sessions of ah08_20250613 (sign-check harness); the prospective arrays are
+  checked against V5 `future` as soon as cell 15 writes them. Jobs 3594655 (LEC), 3594658 (PFC).
+- V5 spec 13 (LEC Poisson future, repro config + gate; the last empty cell of the 2x2x2), job 3594633.
+- **L1 / elastic-net Poisson** via glum (`poisson_solver='glum'`, `poisson_l1_ratio`,
+  `poisson_positive` in `RegressionConfigV5`; sklearn's `PoissonRegressor` is L2-only). Controls
+  16-18 added (glum `l1_ratio=0` == sklearn to 0.2 % of max|beta|; lasso recovers the planted cell
+  and is monotone in alpha; guards). Sweep specs 14-17 (PFC past, spec 2's config: lasso alpha
+  0.01 / 0.003 / 0.001, elastic net 0.5 @ 0.003), jobs 3595313-3595316. Under an L1 penalty a
+  fixed alpha is a firing-rate filter -- read the all-zero-fit fraction per alpha before the counts.
+- Reward x goal-progress LDA on both datasets through `run_lda_reward_progress.py` (jobs 3594885
+  PFC, 3594886 LEC); pickles at `{data,mFC_data}/glm_outputs/{LEC,PFC}_lda/reward_progress.pkl`.
+  The module now skips 1-PC recdays instead of crashing.
