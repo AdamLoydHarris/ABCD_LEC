@@ -242,3 +242,9 @@ runner; `.pyc` untracked, outputs and the El-Gaby run trees ignored).
   LD2 = progress" picture survives cross-validation in LEC (14/22, 12/22 recdays) but not in
   PFC (2/24, 5/24). LEC recdays have ~2x PFC's neurons and PCs; no regional claim without a
   count-matched control.
+  **Matched control (15 PCs into every LDA) and behavioural covariate, same evening:** the
+  full-space readouts hold (LEC seconds r 0.52 vs PFC 0.23, trial MAE 2.45 vs 2.72; progress
+  0.58 vs 0.65), the axis-level LD1 = time / LD2 = progress picture collapses in LEC (14 -> 7 and
+  12 -> 5 recdays) and was absent in PFC, and trial number maps onto seconds identically in the
+  two datasets (r 0.98 both; CV 0.40 vs 0.38; drift -4 s/trial both; LEC trials ~15 % longer).
+  Remaining confound: neuron count (90 vs 50) -- a subsampled-LEC run is the next control.

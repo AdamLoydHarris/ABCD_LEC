@@ -102,3 +102,69 @@ Reading:
   a 5-vs-7-mouse comparison.
 
 Legacy two-decoder numbers for the same days are in the "Superseded" paragraph above.
+
+## Behavioural covariate — does trial number map onto seconds the same way in both datasets?
+
+The trial-index MAE and the seconds r are only comparable across regions if the mapping from
+trial number to elapsed time is the same. `time_behaviour_table` measures it per session from
+the samples' `t_sec` (trial start = the trial's state-0 / early sample). 2026-09-14, first 10
+trials, LEC 110 sessions / PFC 135:
+
+| per session, mean (median) | LEC | PFC |
+|---|---|---|
+| Pearson r(t_sec, trial index) | 0.982 (0.987) | 0.983 (0.990) |
+| sessions with r < 0.95 | 3.6 % | 5.2 % |
+| 10-trial span (s) | 635 (598) | 553 (478) |
+| trial duration, mean (s) | 65 (61) | 57 (49) |
+| trial duration CV within session | 0.40 (0.37) | 0.38 (0.30) |
+| duration drift (s per trial) | -4.0 (-3.2) | -4.3 (-3.0) |
+| last / first trial duration | 0.72 (0.58) | 0.71 (0.63) |
+
+Linearity, variability and drift are the same in the two datasets; only the absolute pace
+differs (LEC trials ~15 % longer). So the trial-index and seconds targets are equally good
+proxies for each other in both regions, and the seconds MAE should be read as a fraction of the
+span (`sec_mae_frac` in the table): LEC 0.24 vs PFC 0.27 at the 75 % PCA rule. Per-mouse trial
+duration ranges 45-83 s in both datasets with no region-level separation.
+
+## Dimensionality-matched control — 2026-09-14, `--n-pcs 15`
+
+The 75 % rule puts ~29 PCs into the LEC LDA and ~16 into the PFC one, and within each dataset
+the time scores track the PC count (Spearman with seconds r: LEC +0.65, PFC +0.59; with trial
+MAE: -0.76, -0.58; LEC LD1-vs-seconds alignment: +0.79). In the overlapping 12-20-PC band
+(3 LEC, 6 PFC recdays) the LEC time advantage disappears (seconds r 0.33 vs 0.36, trial MAE
+2.72 vs 2.66) while the PFC progress advantage stays (0.53 vs 0.66). Re-run with
+`run_reward_progress_lda_analysis(..., n_pcs=15)` = `pca.transform(X)[:, :15]` on every recday
+(recdays with fewer usable dimensions keep what they have, `n_pcs_mode` records it), written to
+`reward_progress_pcs15.{pkl,csv}`, figure `lec_vs_pfc_decoding_pcs15.svg`.
+Results (jobs 3600668 PFC, 3600669 LEC; same recdays, same null, 1000 refits). Mean over
+recdays; "sig" = recdays with p < 0.05 (LEC n = 22, PFC n = 24). No LEC recday and 2 PFC
+recdays (6 and 12 dimensions) had fewer than 15 PCs available.
+
+| held-out score | LEC 75 % (31.5 PCs) | LEC 15 PCs | PFC 75 % (19.3 PCs) | PFC 15 PCs |
+|---|---|---|---|---|
+| time: trial MAE (null 3.3) | 2.36 (19) | 2.45 (19) | 2.71 (21) | 2.72 (21) |
+| time: seconds r | 0.54 (21) | 0.52 (21) | 0.26 (22) | 0.23 (19) |
+| time: seconds MAE / span | 0.24 | 0.24 | 0.27 | 0.27 |
+| goal progress, balanced acc | 0.57 (19) | 0.58 (18) | 0.65 (24) | 0.65 (24) |
+| joint class acc (chance 0.033) | 0.100 (21) | 0.097 (20) | 0.093 (24) | 0.093 (24) |
+| held-out LD1 vs seconds, \|r\| | 0.44 (14) | 0.25 (7) | 0.09 (2) | 0.06 (1) |
+| held-out LD2 vs progress, \|rho\| | 0.32 (12) | 0.13 (5) | 0.12 (5) | 0.08 (1) |
+
+LEC 15-PC per mouse, seconds r: ah08 0.59, ah10 0.71, ly05 0.41, ly06 0.35, ly07 0.51 (all
+five above the PFC median of 0.12; PFC mice: ab03 0.66, ah07 0.52, ah04 0.29, me08 0.17,
+me11 0.12, me10 0.02, ah03 -0.01).
+
+Reading:
+- The **full-space readouts are not a dimensionality artefact**: with the LDA input fixed at 15
+  dimensions on every recday, LEC still reads out time in session better (seconds r 0.52 vs
+  0.23, trial MAE 2.45 vs 2.72 against the same null) and PFC still reads out goal progress
+  better (0.65 vs 0.58). The 12-20-PC overlap band above was a 3-recday selection of the
+  smallest LEC recordings, not a matched comparison.
+- The **axis-level picture is a dimensionality artefact**: LEC's held-out LD1-vs-time and
+  LD2-vs-progress alignments fall from 14/22 and 12/22 recdays to 7/22 and 5/22 at 15 PCs, and
+  PFC's were absent at both. "LD1 = time, LD2 = progress" describes the all-sessions fit in a
+  high-dimensional PCA space, not a held-out property of either region.
+- Still open: LEC recdays carry ~90 neurons vs PFC's ~50, so the 15 PCs summarise more cells.
+  A neuron-subsampled LEC run (PFC's median count, repeated draws) is the remaining control
+  before "LEC carries more time-in-session information" is a claim rather than a description.
+  Five LEC mice vs seven PFC mice.

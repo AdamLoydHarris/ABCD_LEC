@@ -530,7 +530,7 @@ def run_reward_progress_lda_analysis(data_dic, mouse_recday, valid_sessions,
                                       min_trials=MIN_TRIALS_DEFAULT,
                                       variance_thresh=PCA_VARIANCE_THRESH,
                                       conjunction='trial_progress',
-                                      plot=True):
+                                      plot=True, n_pcs=None):
     """
     Dataset -> PCA -> joint LDA on the conjunction label -> LD scatter and per-axis plots.
 
@@ -563,8 +563,14 @@ def run_reward_progress_lda_analysis(data_dic, mouse_recday, valid_sessions,
         print(f"  SKIP: only {n_classes} class.")
         return None
 
-    # PCA
+    # PCA: 75 % variance by default; n_pcs fixes the LDA input dimension across recdays and
+    # datasets (LEC recdays reach 75 % at ~29 PCs, PFC at ~16, and the time scores track it)
     X_pca, pca, _ = apply_pca_trialbins(X, variance_thresh)
+    if n_pcs is not None:
+        k = min(int(n_pcs), pca.n_components_)
+        X_pca = pca.transform(X)[:, :k]
+        print(f"  PCA: fixed {k} PCs ({np.sum(pca.explained_variance_ratio_[:k]):.1%} variance)"
+              + ('' if k == n_pcs else f'  [only {k} available]'))
 
     # a 2-D LDA needs two PCs; me10_20122021_21122021 (PFC) has one and used to crash here
     if X_pca.shape[1] < 2:
@@ -603,6 +609,7 @@ def run_reward_progress_lda_analysis(data_dic, mouse_recday, valid_sessions,
         'zero_var_mask'    : zero_var_mask,
         'filtered_sessions': filtered_sessions,
         'conjunction'      : conjunction,
+        'n_pcs_mode'       : f'fixed_{n_pcs}' if n_pcs is not None else f'var_{variance_thresh:g}',
     }
 
 
@@ -1071,11 +1078,12 @@ DATASET_COLOURS = {'lec': '#BE3455', 'pfc': '#0F4C81'}   # GridMaze Viva Magenta
 NULL_COLOUR, INK = '#B4B2A9', '#2C2C2A'                  # GridMaze Stone / Caviar
 
 
-def load_reward_progress_results(dataset, path=None):
-    """The pickle written by run_lda_reward_progress.py for 'lec' or 'pfc'."""
+def load_reward_progress_results(dataset, path=None, tag=''):
+    """The pickle written by run_lda_reward_progress.py for 'lec' or 'pfc'; `tag` picks a
+    variant such as '_pcs15' (reward_progress_pcs15.pkl)."""
     import os
     import pickle
-    path = path or REWARD_PROGRESS_PICKLES[dataset]
+    path = path or REWARD_PROGRESS_PICKLES[dataset].replace('.pkl', f'{tag}.pkl')
     if not os.path.exists(path):
         raise FileNotFoundError(
             f'{path} not found -- run: sbatch sbatch_files/lda_reward_progress.sbatch {dataset}')
@@ -1107,6 +1115,13 @@ def reward_progress_table(payload):
                 row[f'{k}_p'] = ro[f'{k}_p']
             row['prog_chance'] = 1.0 / len(PROGRESS_BINS)
             row['joint_chance'] = 1.0 / ro['n_classes']
+            # seconds MAE as a fraction of the mean 10-trial span, so datasets with different
+            # trial durations are comparable
+            t, s = np.asarray(res.get('t_sec', []), dtype=float), np.asarray(res['sess_id'])
+            spans = [np.nanmax(t[s == g]) - np.nanmin(t[s == g]) for g in np.unique(s)
+                     if len(t) and np.isfinite(t[s == g]).any()]
+            row['span_s_mean'] = float(np.mean(spans)) if spans else np.nan
+            row['sec_mae_frac'] = ro['sec_mae'] / row['span_s_mean'] if spans else np.nan
             rows.append(row)
         return pd.DataFrame(rows)
     for rd, dec in payload['decoding_results'].items():
@@ -1124,6 +1139,38 @@ def reward_progress_table(payload):
         row['progress_chance'] = 1.0 / len(PROGRESS_BINS)
         row['reward_chance'] = 1.0 / len(np.unique(res['y_reward']))
         rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def time_behaviour_table(payload):
+    """Per session: how trial index maps onto seconds. Pearson / Spearman r(t_sec, trial),
+    10-trial span, trial-duration mean, CV and drift (s per trial). The trial-index and
+    seconds readouts are comparable across datasets only if these agree."""
+    from scipy.stats import linregress, pearsonr, spearmanr
+    import pandas as pd
+    rows = []
+    for rd, res in payload['results_by_recday'].items():
+        t = np.asarray(res.get('t_sec', []), dtype=float)
+        if not len(t) or not np.isfinite(t).any():
+            continue
+        tr, st, s = res['trial_id'], res['state_id'], res['sess_id']
+        pr = np.asarray(res['y_progress']).astype(str)
+        for g in np.unique(s):
+            m = s == g
+            starts = {}
+            for k in np.unique(tr[m]):
+                v = t[m & (tr == k) & (st == 0) & (pr == PROGRESS_BINS[0])]
+                if len(v):
+                    starts[int(k)] = float(v[0])
+            ks = sorted(starts)
+            dur = np.diff([starts[k] for k in ks])
+            rows.append(dict(
+                dataset=payload['dataset'], recday=rd, mouse=rd.split('_')[0], session=int(g),
+                r_pearson=float(pearsonr(t[m], tr[m])[0]), r_spearman=float(spearmanr(t[m], tr[m])[0]),
+                span_s=float(np.nanmax(t[m]) - np.nanmin(t[m])),
+                trial_dur_mean=float(dur.mean()) if len(dur) else np.nan,
+                trial_dur_cv=float(dur.std() / dur.mean()) if len(dur) else np.nan,
+                dur_slope_s_per_trial=float(linregress(ks[:-1], dur).slope) if len(dur) > 2 else np.nan))
     return pd.DataFrame(rows)
 
 
@@ -1162,7 +1209,7 @@ def _strip_panel(ax, df, metric, datasets, rng, title, ylabel, chance_col=None, 
     ax.spines[['top', 'right']].set_visible(False)
 
 
-def plot_lec_vs_pfc_decoding(paths=None, out_path=None, alpha=0.05, seed=0):
+def plot_lec_vs_pfc_decoding(paths=None, out_path=None, alpha=0.05, seed=0, tag=''):
     """Held-out readouts of the joint LDA, LEC against PFC, 2 x 3 panels.
 
     Row 1: goal-progress accuracy | time MAE in trials | time MAE in seconds.
@@ -1178,7 +1225,7 @@ def plot_lec_vs_pfc_decoding(paths=None, out_path=None, alpha=0.05, seed=0):
     for ds in ('lec', 'pfc'):
         try:
             tables.append(reward_progress_table(
-                load_reward_progress_results(ds, (paths or {}).get(ds))))
+                load_reward_progress_results(ds, (paths or {}).get(ds), tag=tag)))
         except FileNotFoundError as exc:
             print(f'  skipping {ds}: {exc}')
     if not tables:

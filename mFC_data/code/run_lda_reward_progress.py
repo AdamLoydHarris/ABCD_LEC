@@ -81,6 +81,9 @@ def main():
     ap.add_argument('--min-trials', type=int, default=10, help='first N trials per session')
     ap.add_argument('--n-shuffles', type=int, default=1000)
     ap.add_argument('--ridge-alpha', type=float, default=1.0)
+    ap.add_argument('--n-pcs', type=int, default=None,
+                    help='fixed LDA input dimension for every recday (default: 75 %% variance); '
+                         'the pickle gets a _pcs<n> suffix unless --out is given')
     ap.add_argument('--recdays', default='', help='comma-separated subset (smoke test)')
     ap.add_argument('--out', default='')
     ap.add_argument('--legacy-decoding', action='store_true',
@@ -101,7 +104,8 @@ def main():
     for rd in recdays:
         res = lrg.run_reward_progress_lda_analysis(
             data_dic, rd, valid_sessions=valid_sessions_dic[rd], neuron_subset=None,
-            min_trials=args.min_trials, conjunction=args.conjunction, plot=False)
+            min_trials=args.min_trials, conjunction=args.conjunction, plot=False,
+            n_pcs=args.n_pcs)
         plt.close('all')
         if res is None:
             skipped[rd] = 'run_reward_progress_lda_analysis returned None (see log)'
@@ -120,8 +124,11 @@ def main():
         print(f'[{hrs(t0)}] done {rd}', flush=True)
 
     out = args.out or OUT_DEFAULT[args.dataset]
+    if not args.out and args.n_pcs is not None:
+        out = out.replace('.pkl', f'_pcs{args.n_pcs}.pkl')
     os.makedirs(os.path.dirname(out), exist_ok=True)
     payload = dict(dataset=args.dataset, conjunction=args.conjunction, min_trials=args.min_trials,
+                   n_pcs=args.n_pcs,
                    n_shuffles=args.n_shuffles, ridge_alpha=args.ridge_alpha, recdays=recdays,
                    valid_sessions_dic=valid_sessions_dic, results_by_recday=results_by_recday,
                    readout=readout, skipped=skipped, elapsed_s=time.time() - t0)
