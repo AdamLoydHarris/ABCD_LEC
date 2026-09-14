@@ -227,4 +227,18 @@ runner; `.pyc` untracked, outputs and the El-Gaby run trees ignored).
   fixed alpha is a firing-rate filter -- read the all-zero-fit fraction per alpha before the counts.
 - Reward x goal-progress LDA on both datasets through `run_lda_reward_progress.py` (jobs 3594885
   PFC, 3594886 LEC); pickles at `{data,mFC_data}/glm_outputs/{LEC,PFC}_lda/reward_progress.pkl`.
-  The module now skips 1-PC recdays instead of crashing.
+  The module now skips 1-PC recdays instead of crashing. **Landed the same day** (LOGO-CV balanced
+  accuracy, min_trials=10, 1000-shuffle null, per-recday; `data/figures/lda_reward_progress/`):
+  goal progress LEC 0.61 (21/22 recdays p<0.05, 5 mice) vs PFC 0.66 (24/24, 7 mice), chance 0.333;
+  reward number LEC 0.044 (14/22) vs PFC 0.037 (12/24), chance 0.025. LEC skips: ah08_20250624,
+  ly05_20250616, ly05_20250618 have < 3 sessions with >= 10 trials; PFC skips me10_20122021 (1 PC).
+  ly05 is the outlier mouse on progress (0.43); mice are the replicates, so this is a 5-vs-7-mouse
+  comparison with no regional difference worth claiming yet.
+  **Superseded the same evening** by one joint LDA on the trial x progress conjunction (30 classes,
+  the 4 states of a trial as 4 samples per class), read out on held-out sessions with a
+  within-session circular-shift null -- `code/LDA_REWARD_GOALPROGRESS.md`. Time in session as a
+  distance: trial MAE LEC 2.36 vs PFC 2.71 (null 3.3; 19/22 and 21/24 recdays p<0.05), seconds
+  r 0.54 vs 0.26; progress accuracy 0.57 vs 0.65 (chance 0.333). The in-sample "LD1 = time,
+  LD2 = progress" picture survives cross-validation in LEC (14/22, 12/22 recdays) but not in
+  PFC (2/24, 5/24). LEC recdays have ~2x PFC's neurons and PCs; no regional claim without a
+  count-matched control.

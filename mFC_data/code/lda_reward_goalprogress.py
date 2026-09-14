@@ -105,33 +105,31 @@ def filter_sessions_by_trials(data_dic, mouse_recday, valid_sessions,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-def extract_reward_progress_vectors(neurons_norm, sess_index,
-                                     n_trials_use):
-    """
-    Extract one averaged population vector per (trial, state, progress_bin)
-    from Neurons_norm.
+BIN_S = 0.025            # Trial_times are 25 ms bin indices
+CONJUNCTIONS = ('trial_progress', 'reward_progress')
 
-    Parameters
-    ----------
-    neurons_norm : np.ndarray  (n_neurons, n_trials, 360)
-    sess_index : int
-    n_trials_use : int
-        Only the first n_trials_use trials are extracted.
 
-    Returns
-    -------
-    X_sess : np.ndarray  (n_valid, n_neurons)
-    y_reward_sess : np.ndarray of int  (n_valid,)   0-based reward index (trial_idx * 4 + state_i)
-    y_progress_sess : np.ndarray of str  (n_valid,)  'early'/'middle'/'late'
-    y_conjunction_sess : np.ndarray of str  (n_valid,)  e.g. '07_early'
-    sess_id_sess : np.ndarray of int  (n_valid,)
-    trial_id_sess : np.ndarray of int  (n_valid,)
-    skipped : int  number of NaN vectors dropped
+def extract_reward_progress_vectors(neurons_norm, sess_index, n_trials_use,
+                                    trial_times=None, conjunction='trial_progress'):
     """
+    One averaged population vector per (trial, state, progress_bin) from Neurons_norm.
+
+    conjunction : 'trial_progress' -> class label f'{trial:02d}_{prog}', the 4 states of a
+                  trial are 4 samples of one class; 'reward_progress' -> the legacy
+                  f'{reward:02d}_{prog}' (reward = trial*4 + state), 1 sample per class.
+    trial_times : (n_trials, 5) state boundaries in 25 ms bins, or None. Each sample gets its
+                  centre time in seconds since the session's first A onset (NaN if None).
+
+    Returns X (n_valid, n_neurons), y_reward, y_progress, y_conjunction, sess_id, trial_id,
+    state_id, t_sec, skipped.
+    """
+    if conjunction not in CONJUNCTIONS:
+        raise ValueError(f"conjunction must be one of {CONJUNCTIONS}, got {conjunction!r}")
     n_neurons = neurons_norm.shape[0]
     n_trials  = min(n_trials_use, neurons_norm.shape[1])
+    tt = None if trial_times is None else np.asarray(trial_times, dtype=float)
 
-    X_list, y_rew, y_prog, y_conj, sid, tid = [], [], [], [], [], []
+    X_list, y_rew, y_prog, y_conj, sid, tid, stid, tsec = [], [], [], [], [], [], [], []
     skipped = 0
 
     for trial_idx in range(n_trials):
@@ -146,12 +144,21 @@ def extract_reward_progress_vectors(neurons_norm, sess_index,
                     skipped += 1
                     continue
 
+                if tt is not None and trial_idx < tt.shape[0] and state_i + 1 < tt.shape[1]:
+                    a, b = tt[trial_idx, state_i], tt[trial_idx, state_i + 1]
+                    t = (a + (b - a) * (prog_i + 0.5) / len(PROGRESS_BINS) - tt[0, 0]) * BIN_S
+                else:
+                    t = np.nan
+
+                key = trial_idx if conjunction == 'trial_progress' else reward_num
                 X_list.append(vec)
                 y_rew.append(reward_num)
                 y_prog.append(prog_label)
-                y_conj.append(f"{reward_num:02d}_{prog_label}")
+                y_conj.append(f"{key:02d}_{prog_label}")
                 sid.append(sess_index)
                 tid.append(trial_idx)
+                stid.append(state_i)
+                tsec.append(t)
 
     if len(X_list) == 0:
         return (np.empty((0, n_neurons)),
@@ -160,6 +167,8 @@ def extract_reward_progress_vectors(neurons_norm, sess_index,
                 np.empty(0, dtype=object),
                 np.empty(0, dtype=int),
                 np.empty(0, dtype=int),
+                np.empty(0, dtype=int),
+                np.empty(0, dtype=float),
                 skipped)
 
     return (np.vstack(X_list),
@@ -168,38 +177,29 @@ def extract_reward_progress_vectors(neurons_norm, sess_index,
             np.array(y_conj, dtype=object),
             np.array(sid, dtype=int),
             np.array(tid, dtype=int),
+            np.array(stid, dtype=int),
+            np.array(tsec, dtype=float),
             skipped)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 def build_reward_progress_dataset(data_dic, mouse_recday, valid_sessions,
                                    neuron_subset=None,
-                                   min_trials=MIN_TRIALS_DEFAULT):
+                                   min_trials=MIN_TRIALS_DEFAULT,
+                                   conjunction='trial_progress'):
     """
-    Build the (reward × progress) z-scored feature matrix across sessions.
+    Z-scored (trial x state x progress-bin) feature matrix across sessions, from Neurons_norm.
+    Feature vectors are z-scored per neuron across the concatenated dataset.
 
-    Neurons_norm is used as the data source (already spatially normalised).
-    Feature vectors are z-scored per neuron across the concatenated dataset
-    for cross-session comparability.
-
-    Returns
-    -------
-    X : np.ndarray  (n_samples, n_neurons)
-    y_reward : np.ndarray of int  (n_samples,)
-    y_progress : np.ndarray of str  (n_samples,)
-    y_conjunction : np.ndarray of str  (n_samples,)
-    sess_id : np.ndarray of int  (n_samples,)
-    trial_id : np.ndarray of int  (n_samples,)
-    zero_var_mask : np.ndarray of bool  (n_neurons,)
-    n_skipped : int
-    filtered_sessions : list
+    Returns X, y_reward, y_progress, y_conjunction, sess_id, trial_id, state_id, t_sec,
+    zero_var_mask, n_skipped, filtered_sessions.
     """
     filtered_sessions = filter_sessions_by_trials(
         data_dic, mouse_recday, valid_sessions, min_trials=min_trials
     )
 
     X_list, y_rew_list, y_prog_list, y_conj_list = [], [], [], []
-    sid_list, tid_list = [], []
+    sid_list, tid_list, stid_list, tsec_list = [], [], [], []
     total_skipped = 0
 
     for sess_i, sidx in enumerate(filtered_sessions):
@@ -211,8 +211,11 @@ def build_reward_progress_dataset(data_dic, mouse_recday, valid_sessions,
         print(f"  Session {sidx} (index {sess_i}): "
               f"{n_trials_sess} trials total, using first {min_trials}")
 
-        X_s, y_rew_s, y_prog_s, y_conj_s, sid_s, tid_s, sk = \
-            extract_reward_progress_vectors(nn, sess_i, min_trials)
+        X_s, y_rew_s, y_prog_s, y_conj_s, sid_s, tid_s, stid_s, tsec_s, sk = \
+            extract_reward_progress_vectors(
+                nn, sess_i, min_trials,
+                trial_times=data_dic[mouse_recday][sidx].get('Trial_times'),
+                conjunction=conjunction)
 
         total_skipped += sk
         if X_s.shape[0] == 0:
@@ -224,6 +227,8 @@ def build_reward_progress_dataset(data_dic, mouse_recday, valid_sessions,
         y_conj_list.append(y_conj_s)
         sid_list.append(sid_s)
         tid_list.append(tid_s)
+        stid_list.append(stid_s)
+        tsec_list.append(tsec_s)
 
     if not X_list:
         raise RuntimeError(
@@ -236,6 +241,8 @@ def build_reward_progress_dataset(data_dic, mouse_recday, valid_sessions,
     y_conjunction = np.concatenate(y_conj_list).astype(str)
     sess_id      = np.concatenate(sid_list)
     trial_id     = np.concatenate(tid_list)
+    state_id     = np.concatenate(stid_list)
+    t_sec        = np.concatenate(tsec_list)
 
     # Z-score per neuron across the full concatenated dataset
     mu  = X.mean(axis=0, keepdims=True)
@@ -250,11 +257,11 @@ def build_reward_progress_dataset(data_dic, mouse_recday, valid_sessions,
         print(f"  WARNING: {n_zero} neuron(s) with zero variance set to 0.")
 
     print(f"  Dataset: {X.shape[0]} samples ({total_skipped} skipped), "
-          f"{len(np.unique(y_conjunction))} conjunction classes")
+          f"{len(np.unique(y_conjunction))} {conjunction} classes")
 
     return (X, y_reward, y_progress, y_conjunction,
-            sess_id, trial_id, zero_var_mask, total_skipped,
-            filtered_sessions)
+            sess_id, trial_id, state_id, t_sec,
+            zero_var_mask, total_skipped, filtered_sessions)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -521,38 +528,30 @@ def plot_reward_progress_ld_axes(X_rp_ld, y_reward, y_progress,
 def run_reward_progress_lda_analysis(data_dic, mouse_recday, valid_sessions,
                                       neuron_subset=None,
                                       min_trials=MIN_TRIALS_DEFAULT,
-                                      variance_thresh=PCA_VARIANCE_THRESH):
+                                      variance_thresh=PCA_VARIANCE_THRESH,
+                                      conjunction='trial_progress',
+                                      plot=True):
     """
-    Full pipeline: build reward × goal-progress dataset → PCA → LDA →
-    visualise scatter and per-axis plots.
+    Dataset -> PCA -> joint LDA on the conjunction label -> LD scatter and per-axis plots.
 
-    Returns
-    -------
-    results : dict  or  None if the recday fails the session threshold.
-        'X'                : (n_samples, n_neurons)
-        'X_pca'            : (n_samples, n_pcs)
-        'X_rp_ld'          : (n_samples, n_lds)
-        'y_reward'         : (n_samples,) int
-        'y_progress'       : (n_samples,) str
-        'y_conjunction'    : (n_samples,) str  e.g. '07_early'
-        'sess_id'          : (n_samples,) int
-        'trial_id'         : (n_samples,) int
-        'pca'              : fitted PCA object
-        'lda_rp'           : fitted LDA object
-        'zero_var_mask'    : (n_neurons,) bool
-        'filtered_sessions': list
+    Returns None if the recday fails the session / PC gates, else a dict with
+    'X' (n_samples, n_neurons), 'X_pca', 'X_rp_ld', 'y_reward', 'y_progress', 'y_conjunction',
+    'y_time' (trial index, or reward index for the legacy conjunction), 'sess_id', 'trial_id',
+    'state_id', 't_sec' (s since the session's first A onset), 'pca', 'lda_rp', 'zero_var_mask',
+    'filtered_sessions', 'conjunction'.
     """
     print(f"\n{'='*70}")
-    print(f"Reward × goal-progress LDA: {mouse_recday}")
+    print(f"{conjunction} LDA: {mouse_recday}")
     print(f"Sessions: {valid_sessions}  |  min_trials={min_trials}")
     print(f"{'='*70}")
 
     try:
         (X, y_reward, y_progress, y_conjunction,
-         sess_id, trial_id, zero_var_mask, _,
-         filtered_sessions) = build_reward_progress_dataset(
+         sess_id, trial_id, state_id, t_sec,
+         zero_var_mask, _, filtered_sessions) = build_reward_progress_dataset(
             data_dic, mouse_recday, valid_sessions,
-            neuron_subset=neuron_subset, min_trials=min_trials
+            neuron_subset=neuron_subset, min_trials=min_trials,
+            conjunction=conjunction
         )
     except ValueError as e:
         print(f"  SKIP {mouse_recday}: {e}")
@@ -582,8 +581,10 @@ def run_reward_progress_lda_analysis(data_dic, mouse_recday, valid_sessions,
           f"(top-5 explained variance: "
           f"{lda_rp.explained_variance_ratio_[:min(5, n_lds)].round(3)})")
 
-    plot_reward_progress_ld_scatter(X_rp_ld, y_reward, y_progress, mouse_recday)
-    plot_reward_progress_ld_axes(X_rp_ld, y_reward, y_progress, mouse_recday)
+    y_time = trial_id if conjunction == 'trial_progress' else y_reward
+    if plot:
+        plot_reward_progress_ld_scatter(X_rp_ld, y_time, y_progress, mouse_recday)
+        plot_reward_progress_ld_axes(X_rp_ld, y_time, y_progress, mouse_recday)
 
     return {
         'X'                : X,
@@ -592,12 +593,16 @@ def run_reward_progress_lda_analysis(data_dic, mouse_recday, valid_sessions,
         'y_reward'         : y_reward,
         'y_progress'       : y_progress,
         'y_conjunction'    : y_conjunction,
+        'y_time'           : y_time,
         'sess_id'          : sess_id,
         'trial_id'         : trial_id,
+        'state_id'         : state_id,
+        't_sec'            : t_sec,
         'pca'              : pca,
         'lda_rp'           : lda_rp,
         'zero_var_mask'    : zero_var_mask,
         'filtered_sessions': filtered_sessions,
+        'conjunction'      : conjunction,
     }
 
 
@@ -918,6 +923,144 @@ def plot_aggregate_confusion_matrix(results_by_recday, decode_target='progress')
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# One cross-validated readout of the joint LDA for both variables (2026-09-14).
+def _split_conjunction(labels):
+    """'07_early' -> (7, 'early') as arrays."""
+    labels = np.asarray(labels).astype(str)
+    keys = np.array([int(s.split('_', 1)[0]) for s in labels], dtype=int)
+    progs = np.array([s.split('_', 1)[1] for s in labels], dtype=object)
+    return keys, progs
+
+
+def _safe_corr(a, b, kind='pearson'):
+    from scipy.stats import pearsonr, spearmanr
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
+    m = np.isfinite(a) & np.isfinite(b)
+    if m.sum() < 3 or np.std(a[m]) == 0 or np.std(b[m]) == 0:
+        return np.nan
+    f = pearsonr if kind == 'pearson' else spearmanr
+    return float(f(a[m], b[m])[0])
+
+
+def run_joint_lda_readout(results_dict, n_shuffles=1000, ridge_alpha=1.0, seed=0, verbose=True):
+    """
+    Leave-one-session-out readout of the joint conjunction LDA for both variables.
+
+    Per fold: LDA on the training sessions' y_conjunction; on the held-out session `predict`
+    gives a (time key, progress) pair per sample and `transform` gives LD scores. Scores:
+      key_mae / key_rmse / key_rho / key_acc  -- time key (trial index; reward index for legacy)
+      sec_mae / sec_r                          -- seconds, Ridge(alpha) on training LD scores
+      prog_acc (balanced) / prog_rho           -- goal progress, early < middle < late
+      joint_acc                                -- exact conjunction class (chance 1/n_classes)
+      ld1_r_key / ld1_r_sec / ld2_rho          -- |corr| of held-out LD1 with time, LD2 with progress
+    Null: the sample order within each session is circularly shifted (labels and t_sec together,
+    X fixed) and everything is refit, n_shuffles times. p = fraction of null at least as good
+    (<= for *_mae/*_rmse, >= otherwise). Returns the scores, `<score>_null` arrays,
+    `<score>_null_mean`, `<score>_p`, and the pooled held-out predictions.
+    """
+    from sklearn.linear_model import Ridge
+    from sklearn.metrics import balanced_accuracy_score
+
+    X = np.asarray(results_dict['X_pca'], dtype=float)
+    y_conj = np.asarray(results_dict['y_conjunction']).astype(str)
+    sess = np.asarray(results_dict['sess_id'])
+    t_sec = np.asarray(results_dict.get('t_sec', np.full(len(sess), np.nan)), dtype=float)
+    prog_rank = {p: i for i, p in enumerate(PROGRESS_BINS)}
+    n_classes = len(np.unique(y_conj))
+    logo = LeaveOneGroupOut()
+
+    def one_pass(labels, t):
+        out = {k: [] for k in ('key_t', 'key_p', 'prog_t', 'prog_p', 't_t', 't_p', 'ld1', 'ld2')}
+        for tr, te in logo.split(X, labels, sess):
+            if len(np.unique(labels[tr])) < 2:
+                continue
+            clf = LinearDiscriminantAnalysis()
+            try:
+                clf.fit(X[tr], labels[tr])
+            except Exception:
+                continue
+            k_p, p_p = _split_conjunction(clf.predict(X[te]))
+            k_t, p_t = _split_conjunction(labels[te])
+            Z_tr, Z_te = clf.transform(X[tr]), clf.transform(X[te])
+            ok = np.isfinite(t[tr])
+            if ok.sum() >= 10:
+                t_p = Ridge(alpha=ridge_alpha).fit(Z_tr[ok], t[tr][ok]).predict(Z_te)
+            else:
+                t_p = np.full(len(te), np.nan)
+            out['key_t'].append(k_t); out['key_p'].append(k_p)
+            out['prog_t'].append(p_t); out['prog_p'].append(p_p)
+            out['t_t'].append(t[te]); out['t_p'].append(t_p)
+            out['ld1'].append(Z_te[:, 0])
+            out['ld2'].append(Z_te[:, 1] if Z_te.shape[1] > 1 else np.full(len(te), np.nan))
+        return {k: (np.concatenate(v) if v else np.array([])) for k, v in out.items()}
+
+    def score(P):
+        if len(P['key_t']) == 0:
+            return {k: np.nan for k in ('key_mae', 'key_rmse', 'key_rho', 'key_acc', 'sec_mae', 'sec_r',
+                                        'prog_acc', 'prog_rho', 'joint_acc', 'ld1_r_key', 'ld1_r_sec',
+                                        'ld2_rho')}
+        err = P['key_p'] - P['key_t']
+        pr_t = np.array([prog_rank[p] for p in P['prog_t']], dtype=float)
+        pr_p = np.array([prog_rank[p] for p in P['prog_p']], dtype=float)
+        s = dict(
+            key_mae=float(np.mean(np.abs(err))),
+            key_rmse=float(np.sqrt(np.mean(err ** 2))),
+            key_rho=_safe_corr(P['key_t'], P['key_p'], 'spearman'),
+            key_acc=float(np.mean(err == 0)),
+            sec_mae=float(np.nanmean(np.abs(P['t_p'] - P['t_t']))) if np.isfinite(P['t_p']).any() else np.nan,
+            sec_r=_safe_corr(P['t_t'], P['t_p'], 'pearson'),
+            prog_acc=float(balanced_accuracy_score(P['prog_t'].astype(str), P['prog_p'].astype(str))),
+            prog_rho=_safe_corr(pr_t, pr_p, 'spearman'),
+            joint_acc=float(np.mean((err == 0) & (P['prog_t'] == P['prog_p']))),
+            ld1_r_key=abs(_safe_corr(P['ld1'], P['key_t'], 'pearson')),
+            ld1_r_sec=abs(_safe_corr(P['ld1'], P['t_t'], 'pearson')),
+            ld2_rho=abs(_safe_corr(P['ld2'], pr_t, 'spearman')),
+        )
+        return s
+
+    real = one_pass(y_conj, t_sec)
+    scores = score(real)
+    if verbose:
+        print(f"  joint LDA readout ({n_classes} classes): key MAE {scores['key_mae']:.2f}, "
+              f"sec MAE {scores['sec_mae']:.1f} s, r {scores['sec_r']:.2f}; progress acc "
+              f"{scores['prog_acc']:.3f}; joint acc {scores['joint_acc']:.3f}; "
+              f"|r| LD1~sec {scores['ld1_r_sec']:.2f}, |rho| LD2~prog {scores['ld2_rho']:.2f}")
+
+    rng = np.random.default_rng(seed)
+    nulls = {k: [] for k in scores}
+    for _ in range(n_shuffles):
+        y_sh, t_sh = y_conj.copy(), t_sec.copy()
+        for g in np.unique(sess):
+            idx = np.flatnonzero(sess == g)
+            if len(idx) < 2:
+                continue
+            k = int(rng.integers(1, len(idx)))
+            y_sh[idx] = np.roll(y_conj[idx], k)
+            t_sh[idx] = np.roll(t_sec[idx], k)
+        sc = score(one_pass(y_sh, t_sh))
+        for key in nulls:
+            nulls[key].append(sc[key])
+
+    out = dict(scores)
+    for key, vals in nulls.items():
+        arr = np.asarray(vals, dtype=float)
+        out[f'{key}_null'] = arr
+        out[f'{key}_null_mean'] = float(np.nanmean(arr)) if np.isfinite(arr).any() else np.nan
+        out[f'{key}_null_sd'] = float(np.nanstd(arr)) if np.isfinite(arr).any() else np.nan
+        if np.isfinite(scores[key]) and np.isfinite(arr).any():
+            better = arr <= scores[key] if key.endswith(('_mae', '_rmse')) else arr >= scores[key]
+            out[f'{key}_p'] = float(np.nanmean(better))
+        else:
+            out[f'{key}_p'] = np.nan
+    out.update(y_true_key=real['key_t'], y_pred_key=real['key_p'], y_true_prog=real['prog_t'],
+               y_pred_prog=real['prog_p'], t_true=real['t_t'], t_pred=real['t_p'],
+               n_classes=n_classes, n_shuffles=n_shuffles, ridge_alpha=ridge_alpha,
+               conjunction=results_dict.get('conjunction', 'reward_progress'))
+    return out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Cross-dataset summary from the pickles written by run_lda_reward_progress.py.
 _REPO = '/ceph/behrens/adam_harris/Taskspace_abstraction_lEC'
 REWARD_PROGRESS_PICKLES = {
@@ -940,10 +1083,32 @@ def load_reward_progress_results(dataset, path=None):
         return pickle.load(f)
 
 
+READOUT_METRICS = ('key_mae', 'key_rmse', 'key_rho', 'key_acc', 'sec_mae', 'sec_r',
+                   'prog_acc', 'prog_rho', 'joint_acc', 'ld1_r_key', 'ld1_r_sec', 'ld2_rho')
+
+
 def reward_progress_table(payload):
-    """One row per recday: n, accuracies, null mean/sd, p-values, chance levels."""
+    """One row per recday: n, every readout score with its null mean/sd and p, chance levels.
+    Legacy pickles (no 'readout') give the old two-decoder accuracies."""
     import pandas as pd
     rows = []
+    if 'readout' in payload:
+        for rd, ro in payload['readout'].items():
+            res = payload['results_by_recday'][rd]
+            row = dict(dataset=payload['dataset'], recday=rd, mouse=rd.split('_')[0],
+                       conjunction=ro.get('conjunction'), n_neurons=res['X'].shape[1],
+                       n_samples=res['X'].shape[0], n_pcs=res['X_pca'].shape[1],
+                       n_lds=res['X_rp_ld'].shape[1], n_classes=ro['n_classes'],
+                       n_sessions=len(res['filtered_sessions']))
+            for k in READOUT_METRICS:
+                row[k] = ro[k]
+                row[f'{k}_null_mean'] = ro[f'{k}_null_mean']
+                row[f'{k}_null_sd'] = ro[f'{k}_null_sd']
+                row[f'{k}_p'] = ro[f'{k}_p']
+            row['prog_chance'] = 1.0 / len(PROGRESS_BINS)
+            row['joint_chance'] = 1.0 / ro['n_classes']
+            rows.append(row)
+        return pd.DataFrame(rows)
     for rd, dec in payload['decoding_results'].items():
         res = payload['results_by_recday'][rd]
         row = dict(dataset=payload['dataset'], recday=rd, mouse=rd.split('_')[0],
@@ -962,16 +1127,51 @@ def reward_progress_table(payload):
     return pd.DataFrame(rows)
 
 
-def plot_lec_vs_pfc_decoding(paths=None, out_path=None, alpha=0.05, seed=0):
-    """LOGO-CV balanced accuracy for goal-progress and reward-number decoding, LEC against PFC.
+def _strip_panel(ax, df, metric, datasets, rng, title, ylabel, chance_col=None, ylim=None,
+                 alpha=0.05):
+    """Per-recday points (jittered), per-mouse open markers, null band (mean +/- 2 sd), the
+    number of recdays with p < alpha above each column."""
+    from matplotlib.patches import Rectangle
+    for i, ds in enumerate(datasets):
+        sub = df[df['dataset'] == ds]
+        nm, nsd = sub[f'{metric}_null_mean'].mean(), sub[f'{metric}_null_sd'].mean()
+        if np.isfinite(nm) and np.isfinite(nsd):
+            ax.add_patch(Rectangle((i - 0.32, nm - 2 * nsd), 0.64, 4 * nsd,
+                                   color=NULL_COLOUR, alpha=0.6, lw=0, zorder=1))
+        vals = sub[metric].to_numpy(dtype=float)
+        ax.scatter(i + rng.uniform(-0.18, 0.18, len(sub)), vals, s=8,
+                   color=DATASET_COLOURS[ds], alpha=0.65, lw=0, zorder=2)
+        mm = sub.groupby('mouse')[metric].mean()
+        xs = i + np.linspace(-0.12, 0.12, len(mm)) if len(mm) > 1 else np.array([i])
+        ax.scatter(xs, mm.values, s=24, facecolor='white', edgecolor=DATASET_COLOURS[ds],
+                   lw=1.0, zorder=3)
+        n_sig = int((sub[f'{metric}_p'] < alpha).sum())
+        ax.text(i, 1.02, f'{n_sig}/{len(sub)}', ha='center', va='bottom', fontsize=7,
+                color=DATASET_COLOURS[ds], transform=ax.get_xaxis_transform())
+    if chance_col is not None:
+        ax.axhline(df[chance_col].mean(), ls='--', lw=0.8, color=INK, zorder=0)
+    ax.set_xticks(range(len(datasets)))
+    ax.set_xticklabels([d.upper() for d in datasets])
+    ax.set_xlim(-0.6, len(datasets) - 0.4)
+    if ylim is not None:
+        ax.set_ylim(*ylim)
+    else:
+        ax.set_ylim(0, None)
+    ax.set_title(title, pad=10)
+    ax.set_ylabel(ylabel)
+    ax.spines[['top', 'right']].set_visible(False)
 
-    Small points = recdays (jittered); open markers = per-mouse means; grey band = shuffle null
-    (mean of the per-recday null means +/- 2 x mean null sd); dashed = chance. The text above
-    each column is the number of recdays significant at `alpha`. A dataset whose pickle is
-    missing is skipped with a note. Returns (fig, table).
+
+def plot_lec_vs_pfc_decoding(paths=None, out_path=None, alpha=0.05, seed=0):
+    """Held-out readouts of the joint LDA, LEC against PFC, 2 x 3 panels.
+
+    Row 1: goal-progress accuracy | time MAE in trials | time MAE in seconds.
+    Row 2: joint-class accuracy | held-out LD1 |r| vs seconds | held-out LD2 |rho| vs progress.
+    Points = recdays, open markers = per-mouse means, grey band = circular-shift null, dashed =
+    chance; the number above each column is recdays with p < alpha. A dataset whose pickle is
+    missing is skipped. Returns (fig, table).
     """
     import matplotlib as mpl
-    from matplotlib.patches import Rectangle
     import pandas as pd
 
     tables = []
@@ -984,6 +1184,8 @@ def plot_lec_vs_pfc_decoding(paths=None, out_path=None, alpha=0.05, seed=0):
     if not tables:
         raise FileNotFoundError('no reward_progress.pkl found for either dataset')
     df = pd.concat(tables, ignore_index=True)
+    if 'prog_acc' not in df:
+        raise ValueError('legacy pickle without a joint-LDA readout; re-run run_lda_reward_progress.py')
     datasets = [d for d in ('lec', 'pfc') if d in set(df['dataset'])]
 
     try:
@@ -993,34 +1195,18 @@ def plot_lec_vs_pfc_decoding(paths=None, out_path=None, alpha=0.05, seed=0):
         pass
 
     rng = np.random.default_rng(seed)
-    fig, axes = plt.subplots(1, 2, figsize=(5.0, 2.3))
-    titles = {'progress': f'goal progress ({len(PROGRESS_BINS)} classes)',
-              'reward': 'reward number (time in session)'}
-    for ax, target in zip(axes, ('progress', 'reward')):
-        for i, ds in enumerate(datasets):
-            sub = df[df['dataset'] == ds]
-            nm = sub[f'{target}_null_mean'].mean()
-            nsd = sub[f'{target}_null_sd'].mean()
-            ax.add_patch(Rectangle((i - 0.32, nm - 2 * nsd), 0.64, 4 * nsd,
-                                   color=NULL_COLOUR, alpha=0.6, lw=0, zorder=1))
-            jit = rng.uniform(-0.18, 0.18, len(sub))
-            ax.scatter(i + jit, sub[f'{target}_acc'], s=8, color=DATASET_COLOURS[ds],
-                       alpha=0.65, lw=0, zorder=2)
-            mm = sub.groupby('mouse')[f'{target}_acc'].mean()
-            xs = i + np.linspace(-0.12, 0.12, len(mm)) if len(mm) > 1 else np.array([i])
-            ax.scatter(xs, mm.values, s=24, facecolor='white', edgecolor=DATASET_COLOURS[ds],
-                       lw=1.0, zorder=3)
-            n_sig = int((sub[f'{target}_p'] < alpha).sum())
-            ax.text(i, 1.02, f'{n_sig}/{len(sub)} p<{alpha:g}', ha='center', va='bottom',
-                    fontsize=7, color=DATASET_COLOURS[ds], transform=ax.get_xaxis_transform())
-        ax.axhline(df[f'{target}_chance'].mean(), ls='--', lw=0.8, color=INK, zorder=0)
-        ax.set_xticks(range(len(datasets)))
-        ax.set_xticklabels([d.upper() for d in datasets])
-        ax.set_xlim(-0.6, len(datasets) - 0.4)
-        ax.set_ylim(0, 1.0 if target == 'progress' else max(0.2, df[f'{target}_acc'].max() * 1.15))
-        ax.set_title(titles[target], pad=10)
-        ax.spines[['top', 'right']].set_visible(False)
-    axes[0].set_ylabel('LOGO-CV balanced accuracy')
+    key_name = 'trials' if (df['conjunction'] == 'trial_progress').all() else 'rewards'
+    fig, axes = plt.subplots(2, 3, figsize=(7.2, 4.6))
+    panels = [
+        ('prog_acc', 'goal progress (3 classes)', 'balanced accuracy', 'prog_chance', (0, 1)),
+        ('key_mae', f'time in session: MAE ({key_name})', f'MAE ({key_name})', None, None),
+        ('sec_mae', 'time in session: MAE (s)', 'MAE (s)', None, None),
+        ('joint_acc', 'joint trial x progress class', 'accuracy', 'joint_chance', None),
+        ('ld1_r_sec', 'held-out LD1 vs seconds', '|r|', None, (0, 1)),
+        ('ld2_rho', 'held-out LD2 vs progress', '|rho|', None, (0, 1)),
+    ]
+    for ax, (metric, title, ylabel, chance_col, ylim) in zip(axes.ravel(), panels):
+        _strip_panel(ax, df, metric, datasets, rng, title, ylabel, chance_col, ylim, alpha)
     fig.tight_layout()
     if out_path:
         import os

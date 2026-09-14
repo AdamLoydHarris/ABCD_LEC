@@ -1,14 +1,16 @@
-"""Reward x goal-progress LDA (lda_reward_goalprogress.py) for one dataset, run under sbatch.
+"""Joint trial x goal-progress LDA (lda_reward_goalprogress.py) for one dataset, under sbatch.
 
-    python run_lda_reward_progress.py --dataset lec|pfc [--min-trials 10] [--n-shuffles 1000]
-                                      [--recdays rd1,rd2] [--out PATH]
+    python run_lda_reward_progress.py --dataset lec|pfc [--conjunction trial_progress|reward_progress]
+        [--min-trials 10] [--n-shuffles 1000] [--ridge-alpha 1.0] [--recdays rd1,rd2] [--out PATH]
+        [--legacy-decoding]
 
-Replaces cell 30 of {LEC,PFC}_lda_analyses.ipynb, which never completed on either dataset
-(1000-shuffle null per recday). Same file in code/ and mFC_data/code/. LEC reads
-data_dic_lec.pkl; PFC builds the same shape with build_data_dic_from_pfc(compute_norm=True).
+Same file in code/ and mFC_data/code/. LEC reads data_dic_lec.pkl; PFC builds the same shape
+with build_data_dic_from_pfc(compute_norm=True). Per recday: dataset -> PCA -> joint LDA, then
+run_joint_lda_readout (held-out time and progress scores with a circular-shift null).
 
-Output: a pickle {'dataset', 'min_trials', 'n_shuffles', 'recdays', 'valid_sessions_dic',
-'results_by_recday', 'decoding_results', 'skipped', 'elapsed_s'} plus a per-recday CSV.
+Output: pickle {'dataset', 'conjunction', 'min_trials', 'n_shuffles', 'ridge_alpha', 'recdays',
+'valid_sessions_dic', 'results_by_recday', 'readout', 'skipped', 'elapsed_s'} (+ the old
+'decoding_results' with --legacy-decoding) and a per-recday CSV from reward_progress_table.
 """
 from __future__ import annotations
 
@@ -34,24 +36,26 @@ def hrs(t0):
     return f'{(time.time() - t0) / 3600:.2f} h'
 
 
-def load_lec():
+def load_lec(only=None):
     with open(os.path.join(REPO, 'data', 'processed_data', 'data_dic_lec.pkl'), 'rb') as f:
         data_dic = pickle.load(f)
     recdays = sorted(k for k in data_dic if '_sb' not in k)
-    return data_dic, recdays
+    return data_dic, [r for r in recdays if not only or r in only]
 
 
-def load_pfc():
+def load_pfc(only=None):
     sys.path.insert(0, os.path.join(REPO, 'mFC_data', 'code'))
     from glm_analysis_v2 import build_data_dic_from_pfc
     data_folder = os.path.join(REPO, 'mFC_data', 'data')
     recdays = list(np.load(os.path.join(data_folder, 'MetaData', 'combined_ABCDonly_days.npy')).astype(str))
+    if only:
+        recdays = [r for r in recdays if r in only]
     data_dic = build_data_dic_from_pfc(data_folder, recdays, compute_norm=True, verbose=False)
     return data_dic, sorted(data_dic.keys())
 
 
 def build_valid_sessions(data_dic, recdays, min_trials=5):
-    """One session per unique task structure, >= min_trials trials -- the notebooks' cell 6."""
+    """One session per unique task structure with >= min_trials trials (the notebooks' cell 6)."""
     out = {}
     for rd in recdays:
         valid, tasks = [], []
@@ -73,11 +77,14 @@ def build_valid_sessions(data_dic, recdays, min_trials=5):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--dataset', required=True, choices=('lec', 'pfc'))
-    ap.add_argument('--min-trials', type=int, default=10,
-                    help='first N trials per session (the notebooks use 10)')
+    ap.add_argument('--conjunction', default='trial_progress', choices=('trial_progress', 'reward_progress'))
+    ap.add_argument('--min-trials', type=int, default=10, help='first N trials per session')
     ap.add_argument('--n-shuffles', type=int, default=1000)
+    ap.add_argument('--ridge-alpha', type=float, default=1.0)
     ap.add_argument('--recdays', default='', help='comma-separated subset (smoke test)')
     ap.add_argument('--out', default='')
+    ap.add_argument('--legacy-decoding', action='store_true',
+                    help='also run the old separate progress / reward-number decoding LDAs')
     args = ap.parse_args()
     t0 = time.time()
 
@@ -85,53 +92,44 @@ def main():
     sys.path.insert(0, os.path.join(REPO, tree))
     import lda_reward_goalprogress as lrg
 
-    data_dic, recdays = (load_lec if args.dataset == 'lec' else load_pfc)()
-    if args.recdays:
-        recdays = [r for r in recdays if r in args.recdays.split(',')]
+    only = set(args.recdays.split(',')) if args.recdays else None
+    data_dic, recdays = (load_lec if args.dataset == 'lec' else load_pfc)(only)
     valid_sessions_dic = build_valid_sessions(data_dic, recdays)
     print(f'[{hrs(t0)}] {args.dataset.upper()}: {len(recdays)} recdays loaded', flush=True)
 
-    results_by_recday, decoding_results, skipped, rows = {}, {}, {}, []
+    results_by_recday, readout, decoding_results, skipped = {}, {}, {}, {}
     for rd in recdays:
         res = lrg.run_reward_progress_lda_analysis(
-            data_dic, rd, valid_sessions=valid_sessions_dic[rd],
-            neuron_subset=None, min_trials=args.min_trials)
+            data_dic, rd, valid_sessions=valid_sessions_dic[rd], neuron_subset=None,
+            min_trials=args.min_trials, conjunction=args.conjunction, plot=False)
         plt.close('all')
         if res is None:
             skipped[rd] = 'run_reward_progress_lda_analysis returned None (see log)'
             continue
         results_by_recday[rd] = res
-        decoding_results[rd] = {}
-        for target in ('progress', 'reward'):
-            real_acc, null_accs, p_val = lrg.run_reward_progress_decoding(
-                res, decode_target=target, mouse_recday=rd, n_shuffles=args.n_shuffles)
-            plt.close('all')
-            decoding_results[rd][target] = {'real_acc': real_acc, 'null_accs': null_accs,
-                                            'p_value': p_val}
-        rows.append(dict(
-            recday=rd, mouse=rd.split('_')[0], n_neurons=res['X'].shape[1],
-            n_samples=res['X'].shape[0], n_pcs=res['X_pca'].shape[1],
-            n_lds=res['X_rp_ld'].shape[1], n_sessions=len(res['filtered_sessions']),
-            progress_acc=decoding_results[rd]['progress']['real_acc'],
-            progress_null_mean=float(np.mean(decoding_results[rd]['progress']['null_accs'])),
-            progress_p=decoding_results[rd]['progress']['p_value'],
-            reward_acc=decoding_results[rd]['reward']['real_acc'],
-            reward_null_mean=float(np.mean(decoding_results[rd]['reward']['null_accs'])),
-            reward_p=decoding_results[rd]['reward']['p_value'],
-            reward_chance=1.0 / len(np.unique(res['y_reward'])),
-        ))
+        readout[rd] = lrg.run_joint_lda_readout(res, n_shuffles=args.n_shuffles,
+                                                ridge_alpha=args.ridge_alpha)
+        if args.legacy_decoding:
+            decoding_results[rd] = {}
+            for target in ('progress', 'reward'):
+                real_acc, null_accs, p_val = lrg.run_reward_progress_decoding(
+                    res, decode_target=target, mouse_recday=rd, n_shuffles=args.n_shuffles)
+                plt.close('all')
+                decoding_results[rd][target] = {'real_acc': real_acc, 'null_accs': null_accs,
+                                                'p_value': p_val}
         print(f'[{hrs(t0)}] done {rd}', flush=True)
 
     out = args.out or OUT_DEFAULT[args.dataset]
     os.makedirs(os.path.dirname(out), exist_ok=True)
-    payload = dict(dataset=args.dataset, min_trials=args.min_trials, n_shuffles=args.n_shuffles,
-                   recdays=recdays, valid_sessions_dic=valid_sessions_dic,
-                   results_by_recday=results_by_recday, decoding_results=decoding_results,
-                   skipped=skipped, elapsed_s=time.time() - t0)
+    payload = dict(dataset=args.dataset, conjunction=args.conjunction, min_trials=args.min_trials,
+                   n_shuffles=args.n_shuffles, ridge_alpha=args.ridge_alpha, recdays=recdays,
+                   valid_sessions_dic=valid_sessions_dic, results_by_recday=results_by_recday,
+                   readout=readout, skipped=skipped, elapsed_s=time.time() - t0)
+    if args.legacy_decoding:
+        payload['decoding_results'] = decoding_results
     with open(out, 'wb') as f:
         pickle.dump(payload, f)
-    import pandas as pd
-    pd.DataFrame(rows).to_csv(out.replace('.pkl', '.csv'), index=False)
+    lrg.reward_progress_table(payload).to_csv(out.replace('.pkl', '.csv'), index=False)
     print(f'[{hrs(t0)}] wrote {out} ({len(results_by_recday)} recdays, '
           f'{len(skipped)} skipped: {skipped})', flush=True)
 
