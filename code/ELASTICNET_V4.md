@@ -8,8 +8,47 @@ leave-one-session-out across tasks, after El-Gaby et al. 2024 Figure 5
 which is left untouched so the two can be diffed; V4 in legacy mode reproduces V3 exactly.
 
 ```bash
-python elasticnet_v4_synthetics.py          # 28 controls — run this before trusting a result
+python elasticnet_v4_synthetics.py          # 30 controls — run this before trusting a result
 ```
+
+## Defaults are now reference-matched
+
+As of the Figure 5 reconciliation
+([`ELGABY_FIGURE5_RECONCILIATION.md`](ELGABY_FIGURE5_RECONCILIATION.md)) the defaults match
+El-Gaby et al. 2024, each verified against the paper's methods rather than inferred:
+
+| setting | now | was | why |
+|---|---|---|---|
+| `nonzero_lag_zero_lags` | **(0, 11)** | (11, 0, 1) | methods: "lag from anchor of **30° or more**"; 30° is one goal-progress bin |
+| `nonzero_lag_min` | **1** | 2 | the matching window (keep lags 1–10) |
+| `state_tuning_min_fraction` | **1/3** | — (OR across tasks) | methods: "state-tuned in **more than one-third of the recorded tasks**" |
+| `pref_phase_source` | **'test'** | 'train' | matches his cell 21 — **this is leakage**, see below |
+| `nonzero_lag_zero_lags_strict` | **(0,1,2,9,10,11)** | — | his 90° variant, now emitted every run |
+| `poisson_link` | **'linear'** | — | his code's readout; `'log'` is what the paper describes |
+
+**`pref_phase_source='test'` is leakage and is on by default.** The held-out session's phase
+tuning chooses which bins the held-out score is averaged over. It is the default only because
+the published numbers were produced that way; `pref_phase_source='train'` gives an unbiased
+score and is one flag away. Every run prints a warning when `'test'` is active, and
+`run_config.json` records it.
+
+**All three lag-exclusion levels are emitted on every run** — none, 30° and 90° — mirroring the
+three arrays the reference saves (`_mean`, `_nonzero_mean`, `_nonzero_strict_mean`), because the
+reported number is highly sensitive to which is chosen. `v4.three_panel_summary(table)` prints
+them side by side against the published values. `state_tuned_fraction` is exported too, so any
+tuning threshold can be re-applied post hoc without a re-fit.
+
+**A Poisson run emits BOTH links, from one fit.** `poisson_link` selects which one `corrs`
+reports; the other is computed alongside and stored as `corrs_altlink` /
+`corrs_nonzero_altlink` / `corrs_nonzero_strict_altlink` (and their `mean_*`). Verified: the
+alt-link values equal a dedicated run at the other setting to `max|diff| = 0`. This matters
+because a Poisson sweep costs ~2 h per direction, and the two readouts are not
+interchangeable — the paper describes `exp(Xβ + b)` while the code uses `Xβ`. For ElasticNet
+the link is the identity, so the alt-link arrays are NaN.
+
+Measured on pure Poisson noise under these defaults (30 cells × 4 seeds × 2 directions): the
+30° criterion fires on **30–33%**, the strict 90° one on **0.8%**, and the correlation stays
+unbiased (mean r = +0.04).
 
 ## Mirroring to the mFC (PFC) dataset
 
@@ -217,6 +256,31 @@ A fold whose beta vector is all-zero **abstains** from the per-fold vote rather 
 `build_data_dic.locs_to_int` maps SLEAP `nan` → integer **0**, and V3 only NaN'd codes > 9, so
 `keep = ~np.isnan(Ltr)` retained them — **4.1%** of bins in the session checked. The reference
 drops them. `drop_untracked_bins=True` (V4 default) NaNs codes < 1 as well.
+
+### All betas or only the non-zero-lag betas?
+
+Both are computed and both are now plotted, because the reference pairs them and we do not:
+
+| metric | prediction built from | top-3 exclusion applied? |
+|---|---|---|
+| El-Gaby `corrs_all` | **all** betas | **no** |
+| El-Gaby `corrs_all_nozero` | betas with lags {0,11} → NaN | **yes** |
+| El-Gaby `corrs_all_nozero_strict` | betas with {0,1,2,9,10,11} → NaN | **yes** |
+| ours `corrs` | **all** betas | applied to the *population* afterwards |
+| ours `corrs_nonzero` | betas with `nonzero_lag_zero_lags` zeroed | applied to the population |
+
+In the reference the exclusion and the beta-removal always travel together — "a non-zero-lag
+neuron scored with all its betas" is a combination he never computes. Our headline
+`mean_corrs` over `selected` neurons *is* that combination; his nearest equivalent is our
+`corrs_nonzero`. Report both.
+
+For *selected* neurons the two agree closely, which is what the top-3 test is meant to
+guarantee — measured over the selected units: median |Δr| = 0.002 (LEC) / 0.009 (PFC), and 87%
+of the predicted trace magnitude survives the removal. But not always: PFC `ah04` neuron N0
+passes the criterion yet goes from r = **+0.113 to −0.066** when lags {11,0,1} are dropped,
+because the test only constrains the three *largest* betas, not the total weight at those lags.
+That is exactly why `plot_neuron_pages` and `plot_fold_ratemap_pages` now draw the reduced-beta
+prediction as a dashed orange overlay and put both r values in the panel titles.
 
 ### And what the non-zero-lag criterion is not
 

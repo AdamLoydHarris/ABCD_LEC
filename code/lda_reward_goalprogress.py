@@ -268,6 +268,9 @@ def plot_reward_progress_ld_scatter(X_rp_ld, y_reward, y_progress,
     """
     rng = np.random.default_rng(seed)
     n_ld = min(X_rp_ld.shape[1], max_lds)
+    if n_ld < 2:
+        print(f"  {mouse_recday}: {n_ld} discriminant dimension -- no LD1 x LD2 scatter.")
+        return
 
     ld_pairs = [(0, 1)]
     if n_ld >= 3:
@@ -563,6 +566,13 @@ def run_reward_progress_lda_analysis(data_dic, mouse_recday, valid_sessions,
 
     # PCA
     X_pca, pca, _ = apply_pca_trialbins(X, variance_thresh)
+
+    # A 2-D LDA (LD1 = reward number, LD2 = goal progress) needs at least two PCs. One PFC
+    # recday (me10_20122021_21122021, a single usable neuron) reaches here with 1/1 PCs and
+    # used to crash in plot_reward_progress_ld_scatter (2026-09-14).
+    if X_pca.shape[1] < 2:
+        print(f"  SKIP {mouse_recday}: only {X_pca.shape[1]} PC(s) -- too few for a 2-D LDA.")
+        return None
 
     # LDA on conjunction labels
     lda_rp = LinearDiscriminantAnalysis()

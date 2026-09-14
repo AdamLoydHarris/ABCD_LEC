@@ -647,3 +647,56 @@ computed independently of anatomy.
 
 **No region is an exception.** There is no part of the recorded bank where state identity
 generalises.
+
+---
+
+## W1.8 — The reduced core model by region (GLM V3, 2026-09-07)
+
+Methods, design and the full result tables are in [`GLM_V3.md`](GLM_V3.md); this section records
+what the regional split adds. Design: `place`, `goal_progress` (time version), `speed`,
+`acceleration`, `time_from_reward`, fitted as a 2×2 over tfr coding {decile, uniform-in-seconds} ×
+leg cap {30, 60 s}, plus a goal-progress-only arm at each cap; engine `glm_analysis_v3` (v2 frozen,
+equivalence `max|diff| = 0`); 150 LEC jobs, 25/25 recdays per arm, key-contiguity PASS. Raw CPD, mouse
+chain (recday median → mouse mean → mean over mice).
+
+**Every region, on its own (primary arm uniform/30; all arms in `GLM_V3.md` §9.7).**
+
+| regressor | ENTl-sup | ENTl-deep | ENTm | SUB/ProS | CA1/HPF |
+|---|---|---|---|---|---|
+| place | 0.0099 | 0.0217 | 0.0193 | **0.0315** | 0.0256 |
+| goal_progress | 0.0000 | 0.0014 | 0.0001 | 0.0011 | 0.0005 |
+| speed | 0.0001 | 0.0030 | 0.0018 | 0.0038 | 0.0027 |
+| acceleration | −0.0002 | 0.0002 | 0.0001 | 0.0002 | −0.0002 |
+| time_from_reward | −0.0009 | 0.0004 | −0.0001 | −0.0005 | −0.0010 |
+| goal_progress, gp-only arm | 0.0008 | **0.0035** | 0.0013 | 0.0026 | 0.0011 |
+| time_from_reward, decile/30 | −0.0002 | **0.0015** | 0.0014 | 0.0004 | −0.0006 |
+
+n mice per region: ENTl-sup 5 (90 % ah08), ENTl-deep 5, ENTm 3 (63 % ly07), SUB/ProS 4, CA1/HPF 2.
+The place ordering — SUB/ProS > CA1/HPF > ENTl-deep > ENTm > ENTl-sup — holds in all six arms, as does
+ENTl-sup being lowest on every regressor (1.07 Hz; the rate confound of W0.1.4 is not resolved by
+this fit).
+
+**The primary contrast, ENTl-deep − SUB/ProS.** For `time_from_reward` the difference is positive in
+all four 2×2 arms (+0.0009 to +0.0014 raw CPD; within-recday permutation p 0.0005–0.005; every
+contributing mouse ≥ 0 in every arm, 4 mice — ah10, ly05, ly06, ly07). It survives rate matching
+(stratified on log rate within recday, 652 units) with a CI excluding zero in the two uniform arms
+(+0.0014 [0.0006, 0.0021]; +0.0005 [0.0002, 0.0010]) and keeps its sign with a CI spanning zero in
+the two decile arms; it survives the 50 µm boundary margin in three of four arms. **Candidate, not
+finding**, by the §5 rules: +0.001 CPD against a place CPD of 0.02–0.03, one robustness check failing
+in one or two arms, and 4 mice as the ceiling. For `goal_progress` there is **no** regional
+difference in any arm — including the gp-only arm, where its CPD is largest (ENTl-deep 0.0035 vs
+SUB/ProS 0.0026, p = 0.20).
+
+**What the reduced model does not change about the regional picture.** Place is the dominant
+regressor in every region (0.010–0.032 against ≤ 0.004 for anything else); the within-leg
+structure that the gp-only arm exposes (65 % of LEC neurons significant) is spread over the regions
+in the same proportions as place, with ENTl-deep highest; and once phase and absolute time compete,
+neither is regional except the small ENTl-deep time advantage above. PFC, fitted with the identical
+design, has more within-leg structure than any LEC region (gp-only 0.0087 vs ENTl-deep 0.0035) and
+less place than any (0.0072 vs ENTl-sup 0.0098) — `GLM_V3.md` §9.8.
+
+**Caveats carried from `GLM_V3.md` §6:** bigger CPDs than the 16-regressor fit are reassignment of
+shared variance (and the reduced model generalises marginally *better*, not worse — a prior refuted);
+the gp-vs-tfr split flips with the tfr coding; 11–21 % of tfr-significant neurons are first-bin
+(consumption) cells and a similar share peak in the sparsest last bin; the uniform/60 arm has empty
+top bins in 4 LEC recdays.

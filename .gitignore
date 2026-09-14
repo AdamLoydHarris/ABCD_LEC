@@ -3,22 +3,40 @@
 !README.md
 !/code
 !/mFC_data
+!/docs
+!/sbatch_files
 .DS_Store
 *.ipynb_checkpoints
 ._.DS_Store
 
+# Byte-code (116 .pyc files were tracked until 2026-09-14)
+__pycache__/
+*.pyc
+
+# Results, logs and scratch output -- never source
+mFC_data/glm_outputs/
+mFC_data/data
+code/slurm_v5/logs/
+code/Jobs/
+code/figures/
+code/rave_output
+code/brainreg_probe
+sbatch_files/slurm_outputs/
+sbatch_files/merge_*.sbatch
+docs/*.pdf
+
+# El-Gaby reproduction: the verbatim deposit and the two run trees (data + executed notebooks)
+# are not ours to version; the patched copies (`mFC_schema-main_unblocked*/`) are.
+mFC_data/mFC_schema-main/
+mFC_data/Intermediate_objects/
+mFC_data/replication_run/
+mFC_data/lec_replication_run/
+
 # Notebooks with large embedded outputs
 code/LEC_sploratory_analysis_with_glm_and_population.ipynb
 code/PFC_sploratory_analysis_with_glm_and_population.ipynb
-code/mEC_task_correlations copy.ipynb
-
-code/brainreg_probe
-mFC_data/data
-code/rave_output
+code/mEC_task_correlations.ipynb
 code/LEC_glm_tuning_variables_backup.ipynb
 code/LEC_glm_tuning_variables_dep.ipynb
-code/rave_visualiser copy.py
-code/rave_visualiser copy.ipynb
 code/LEC_elasticnet_regression_v3.ipynb
 mFC_data/code/PFC_elasticnet_regression_v3.ipynb
-mFC_data/glm_outputs/PFC_time_vs_progress/design_tables.pkl

@@ -17,7 +17,7 @@ The following code is organised as follows:
 # _3 Spikesorting quality control via spikeinterface
 ##   Filepath management functions
 
-@peterdoohan and @charlesdgburns
+adapted from code by @peterdoohan and @charlesdgburns
 """
 
 # %% Imports

@@ -57,6 +57,21 @@ def add_config_args(ap):
     ap.add_argument('--width-ms', type=int, default=250)
     ap.add_argument('--scheme', choices=('decile', 'uniform'), default='decile')
     ap.add_argument('--regset', choices=('full', 'matched'), default='full')
+    # V3 arms only (sections with `tfr_arm` / `cap_arm` in w1_refit.SECTIONS); ignored and
+    # stamped as None for the v2 sections, whose config stamps must stay byte-identical.
+    ap.add_argument('--leg-cap-s', type=float, default=30.0,
+                    help='V3 arms: drop legs longer than this; also the time_from_reward '
+                         'range under --tfr-scheme uniform')
+    ap.add_argument('--tfr-scheme', choices=('uniform', 'decile'), default='uniform',
+                    help='V3 core_progress_time: time_from_reward coding -- equal-width '
+                         'bins in seconds over [0, leg cap], or the v2 quantile path')
+    ap.add_argument('--tfr-bins', type=int, default=10,
+                    help='V3 core_progress_time: number of time_from_reward bins')
+    ap.add_argument('--normalise', choices=('session-centre', 'session-z', 'none'),
+                    default='session-centre',
+                    help='firing normalisation before the CV fit (w1_refit.NORMALISATIONS): '
+                         'per-session offset only (production), offset AND gain, or neither. '
+                         'A non-default choice appends _zscored / _nonorm to the section name')
     ap.add_argument('--permutations', type=int, default=100)
     ap.add_argument('--cv-perms', type=int, default=100)
     ap.add_argument('--no-cv', action='store_true')
@@ -69,21 +84,34 @@ def add_config_args(ap):
 
 
 def fit_one(recday, args):
-    import glm_analysis_v2 as glm
+    import importlib
     import w1_refit as w
 
     cfg = w.SECTIONS[args.section]
+    # The engine is a property of the SECTION: v2 for every production fit on disk (frozen so
+    # they stay reproducible), v3 for the reduced arms. See GLM_V3.md.
+    engine = cfg.get('engine', 'v2')
+    glm = importlib.import_module(f'glm_analysis_{engine}')
     regs = cfg['regressors']
     if args.regset == 'matched' and regs is not None:
         regs = w.matched_regressors(regs)
+    arm_kw = dict(leg_cap_s=args.leg_cap_s, tfr_scheme=args.tfr_scheme, tfr_bins=args.tfr_bins)
+    extra = w.arm_extra(cfg, normalise=args.normalise, **arm_kw)
+    norm_kw = w.norm_kwargs(args.normalise)
+    overrides = w.binning_overrides_for(cfg, **arm_kw)
+    max_leg = w.leg_cap_for(cfg, args.leg_cap_s)
     sect = w.section_name(args.section, width_ms=args.width_ms,
-                          scheme=args.scheme, regset=args.regset)
+                          scheme=args.scheme, regset=args.regset, extra=extra)
     factor = max(1, int(round(args.width_ms / 25)))
-    param = w.choose_parameterization(regs)
+    n_cols_override = {k: v['n_bins'] for k, v in (overrides or {}).items()} or None
+    param = w.choose_parameterization(regs, engine=engine, n_cols_override=n_cols_override)
+    v3_kwargs = {'binning_overrides': overrides} if engine != 'v2' else {}
 
-    print(f'recday={recday}  section={sect}')
+    print(f'recday={recday}  section={sect}  engine={engine}')
     print(f'  {len(regs) if regs else 9} regressors, {args.width_ms} ms bins '
-          f'(factor {factor}), {args.scheme} placement, {param}')
+          f'(factor {factor}), {args.scheme} placement, {param}, leg cap {max_leg} s'
+          + (f', time_from_reward {args.tfr_scheme} x{args.tfr_bins}' if overrides else '')
+          + f', normalise={args.normalise} {norm_kw}')
 
     data_dic = glm.load_data_dic(validate=True, apply_exclusions=True, verbose=True)
     if recday not in data_dic:
@@ -105,7 +133,7 @@ def fit_one(recday, args):
         regressors_to_include=regs,
         joint_drop_groups=joint,
         filter_correct_paths=cfg.get('filter_correct_paths', False),
-        max_transition_seconds=cfg.get('max_transition_seconds'),
+        max_transition_seconds=max_leg,
         compute_cpd=True,
         parameterization=param,
         downsample_factor=factor,
@@ -114,7 +142,8 @@ def fit_one(recday, args):
         cross_validate=not args.no_cv,
         cv_n_perm=0 if args.no_cv else args.cv_perms,
         cv_nulls=tuple(args.nulls),
-        cv_center_within_sessions=True,
+        **norm_kw,
+        **v3_kwargs,
     )
     el = time.time() - t0
 
@@ -127,7 +156,19 @@ def fit_one(recday, args):
                  'nulls': list(args.nulls),
                  'downsample_mode': 'bin',
                  'filter_correct_paths': cfg.get('filter_correct_paths', False),
-                 'max_transition_seconds': cfg.get('max_transition_seconds')}
+                 'max_transition_seconds': max_leg}
+    if engine != 'v2':
+        # Only the V3 arms carry these keys, so the v2 production stamps stay byte-identical
+        # and a later v2 shard still merges with the ones on disk.
+        tfr = (overrides or {}).get('time_from_reward')
+        cfg_stamp.update({'engine': engine, 'leg_cap_s': max_leg,
+                          'tfr_scheme': tfr['scheme'] if tfr else None,
+                          'tfr_bins': tfr['n_bins'] if tfr else None,
+                          'tfr_range_s': list(tfr['range_s']) if tfr and tfr['range_s'] else None})
+    # Stamped ONLY when non-default, so every stamp already on disk stays byte-identical and a
+    # later production shard still merges with the existing ones.
+    if args.normalise != 'session-centre':
+        cfg_stamp['normalise'] = args.normalise
     os.makedirs(args.shard_dir, exist_ok=True)
     names = _artifacts(True, not args.no_cv)
     for name, obj in zip(names, out):
@@ -141,8 +182,11 @@ def fit_one(recday, args):
 def merge(args):
     import w1_refit as w
 
+    cfg = w.SECTIONS[args.section]
+    extra = w.arm_extra(cfg, leg_cap_s=args.leg_cap_s, tfr_scheme=args.tfr_scheme,
+                        tfr_bins=args.tfr_bins, normalise=args.normalise)
     sect = w.section_name(args.section, width_ms=args.width_ms,
-                          scheme=args.scheme, regset=args.regset)
+                          scheme=args.scheme, regset=args.regset, extra=extra)
     names = _artifacts(True, not args.no_cv)
     os.makedirs(args.out_dir, exist_ok=True)
 

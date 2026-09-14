@@ -1,0 +1,34 @@
+# TODO List Sep 14 2026
+
+-  El-Gaby Unblocked poisson for both prospective vs retrospective lags (for both regions)
+
+- Regularise the poisson regression, perhaps a L1:L2 ratio parameter sweep
+
+- Sleep analysis to look for offline structure (rerun PFC and run LEC). Probably limit LEC to just deep LEC neurons. Will have to work out a way to define anchors robustly based on the regression rather than implementing the single-anchor-and-lag method from the paper. 
+
+- Make lagged spatial rate maps explicitly (analysis 2 for lagged spatial fields from the paper)
+
+- Find out if the lagged spatial neurons in LEC are better explained by time or task space
+
+- Are the lagged spatial neurons more 'event-vector' - look at the distribution of anchors
+
+- Add some measure of 'integrated experience' to the encoding model GLM to see if that expalins goal progress/time-in-session coding. Tim's suggestion is number of pokes.
+
+- Run the time-in-session vs goal-progress LDA to PFC data 
+
+- Get claude to work out what skills would be useful given our questions and codebase. Same for CLAUDE.md. grill me about writing style, code simplicity. 
+
+- Tidy up codebase
+
+- integrate the data from the mEC-targated neuropixels 1 mice from '/ceph/behrens/adam_harris/Taskspace_abstraction_mEC' into this repo so all the data is together
+
+- Estimate histology for the mEC-targeted mice (no DiI so will be difficult)
+
+- ABC-AB task switching RNN model. what representation does it learn? does it learn a period-2 and period-3 DSR separetely with some contextual gating? Or something else?
+
+- RNN doing ABCD both with and without an explicit task input. does it still learn DSRs? 
+
+- Message Anna-Lisa about her subspace analysis (https://github.com/AdamLoydHarris/goal_planning_GPS). I think she needs to do the regression analysis to make the subspaces for 'Now, Next+1, Next+2, Next+3' rather than having 'now' subspaces for A, B, C, and D
+- Discuss the Matt Nour perspetcive article plan with Mohamady to carve out some dedicated time. Reply in the affirmitive to Matt, read the current document, and meet to discuss plan.
+
+- Hippocampus arithmetic paper review for Nature Neuro. 

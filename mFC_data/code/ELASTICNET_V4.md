@@ -8,9 +8,25 @@ that document about the method applies here unchanged. This file records only wh
 about *this dataset*.
 
 ```bash
-python elasticnet_v4_synthetics.py          # 28 controls — run before trusting a result
+python elasticnet_v4_synthetics.py          # 30 controls — run before trusting a result
 diff ../../code/elasticnet_regression_v4.py elasticnet_regression_v4.py   # must be empty
 ```
+
+## Defaults are now reference-matched
+
+See [`../../code/ELGABY_FIGURE5_RECONCILIATION.md`](../../code/ELGABY_FIGURE5_RECONCILIATION.md)
+for the full derivation. Summary: `nonzero_lag_zero_lags=(0,11)` ("30° or more"),
+`state_tuning_min_fraction=1/3` ("state-tuned in more than one-third of the recorded tasks"),
+`pref_phase_source='test'` (his cell 21 — **leakage**, deliberate, warned about at run time),
+the 90° strict variant emitted every run, and `poisson_link` selecting which link `corrs`
+reports — **a Poisson run computes both** (`corrs_altlink` etc.), so his linear readout and the
+paper's `exp(Xβ + b)` come from one 2-hour fit rather than two.
+`v4.three_panel_summary(table)` prints all three lag levels against the published values.
+
+**The reconciliation outcome, on this dataset:** our effect is not weaker than the published
+one. Effect size `t/√n` = **0.490–0.494** against his **0.421** on the no-lag-filter panel, and
+**0.274** against **0.215** on the 30° panel. The apparent shortfall was a panel mismatch —
+our `{0,1,11}` criterion compared against his `{0,11}`.
 
 ## This is El-Gaby's own dataset
 

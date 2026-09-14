@@ -154,15 +154,20 @@ class RegressionConfigV4:
         # --- v4 ---
         lag_direction='past',
         restrict_to_pref_phase=True,
-        pref_phase_source='train',
+        pref_phase_source='test',
         drop_untracked_bins=True,
         alpha_mode='fixed',
         alpha_frac=0.1,
         state_reduce='mean',
         state_tuning_statistic='max',
-        nonzero_lag_zero_lags=(11, 0, 1),
-        nonzero_lag_min=2,
+        state_tuning_min_fraction=1 / 3,
+        poisson_link='linear',
+        nonzero_lag_zero_lags=(0, 11),
+        nonzero_lag_min=1,
         nonzero_lag_max=None,
+        nonzero_lag_zero_lags_strict=(0, 1, 2, 9, 10, 11),
+        nonzero_lag_min_strict=3,
+        nonzero_lag_max_strict=8,
         require_positive_top3=True,
         nz_per_fold=True,
     ):
@@ -174,6 +179,11 @@ class RegressionConfigV4:
             raise ValueError(f"alpha_mode must be 'fixed' or 'relative', got {alpha_mode!r}")
         if state_reduce not in ('mean', 'max'):
             raise ValueError(f"state_reduce must be 'mean' or 'max', got {state_reduce!r}")
+        if poisson_link not in ('linear', 'log'):
+            raise ValueError(f"poisson_link must be 'linear' or 'log', got {poisson_link!r}")
+        if not 0 <= state_tuning_min_fraction < 1:
+            raise ValueError('state_tuning_min_fraction must be in [0, 1), got '
+                             f'{state_tuning_min_fraction!r}')
 
         self.num_locations = num_locations
         self.num_goal_progress_bins = num_goal_progress_bins
@@ -200,9 +210,15 @@ class RegressionConfigV4:
             raise ValueError("state_tuning_statistic must be 'max' or 'mean', got "
                              f'{state_tuning_statistic!r}')
         self.state_tuning_statistic = state_tuning_statistic
+        self.state_tuning_min_fraction = state_tuning_min_fraction
+        self.poisson_link = poisson_link
         self.nonzero_lag_zero_lags = tuple(int(k) % num_lags for k in nonzero_lag_zero_lags)
         self.nonzero_lag_min = nonzero_lag_min
         self.nonzero_lag_max = num_lags - 2 if nonzero_lag_max is None else nonzero_lag_max
+        self.nonzero_lag_zero_lags_strict = tuple(int(k) % num_lags
+                                                  for k in nonzero_lag_zero_lags_strict)
+        self.nonzero_lag_min_strict = nonzero_lag_min_strict
+        self.nonzero_lag_max_strict = nonzero_lag_max_strict
         self.require_positive_top3 = require_positive_top3
         self.nz_per_fold = nz_per_fold
 
@@ -489,12 +505,18 @@ def elasticnet_alpha_max(X, y, l1_ratio):
     return float(np.abs(Xc.T @ yc).max() / denom)
 
 
-def fit_regression_v4(X, y, config):
-    """Fit the chosen estimator, dropping rows with NaNs. Returns the coefficient vector."""
+def fit_regression_v4(X, y, config, return_intercept=False):
+    """Fit the chosen estimator, dropping rows with NaNs.
+
+    Returns the coefficient vector, or `(coef, intercept)` with `return_intercept=True`.
+    The intercept exists only so `poisson_link='log'` can evaluate `exp(X@beta + b)` without
+    overflowing; Pearson is scale-invariant, so it changes no reported number.
+    """
     valid = ~np.isnan(y) & ~np.any(np.isnan(X), axis=1)
     Xv, yv = X[valid], y[valid]
     if len(yv) < 10 or np.all(yv == yv[0]):
-        return np.full(X.shape[1], np.nan)
+        nan = np.full(X.shape[1], np.nan)
+        return (nan, np.nan) if return_intercept else nan
 
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
@@ -513,13 +535,32 @@ def fit_regression_v4(X, y, config):
         try:
             model.fit(Xv, yv)
         except Exception:
-            return np.full(X.shape[1], np.nan)
+            nan = np.full(X.shape[1], np.nan)
+            return (nan, np.nan) if return_intercept else nan
+    if return_intercept:
+        return model.coef_, float(np.ravel(getattr(model, 'intercept_', 0.0))[0])
     return model.coef_
 
 
 # ============================================================================
 # Per-session preparation
 # ============================================================================
+
+def apply_link(eta, intercept, config):
+    """Turn the linear predictor into the predicted trace.
+
+    `poisson_link='linear'` reproduces his code, which computes `np.sum(regressors * coeffs)`
+    and never applies `exp` or the intercept -- so the Poisson variant's stated purpose,
+    robustness to the linearity assumption, is discarded at readout. `'log'` is what the paper
+    describes ("linear-nonlinear-Poisson ... logarithmic link function"). The ElasticNet branch
+    has an identity link either way, and its missing intercept is harmless because Pearson is
+    shift-invariant.
+    """
+    if not config.use_poisson or config.poisson_link == 'linear':
+        return eta
+    b = 0.0 if intercept is None or not np.isfinite(intercept) else intercept
+    return np.exp(np.clip(eta + b, -700, 700))
+
 
 def _prepare_session(session_data, config):
     """Build raw regressors / aligned locations / phases / neuron matrix for one session.
@@ -726,42 +767,65 @@ def run_cross_validated_regression_v4(data_dic, mouse_recday, config, valid_sess
     cv_coeffs = np.full((n_neurons, n_folds, n_reg), np.nan)
     corrs = np.full((n_neurons, n_folds), np.nan)
     corrs_nonzero = np.full((n_neurons, n_folds), np.nan)
+    corrs_nonzero_strict = np.full((n_neurons, n_folds), np.nan)
+    # Poisson only: the SAME three quantities under the other link, so his linear readout and
+    # the paper's log link are both available from one fit instead of two 2-hour runs.
+    alt_link = ('log' if config.poisson_link == 'linear' else 'linear') if config.use_poisson else None
+    corrs_altlink = np.full((n_neurons, n_folds), np.nan)
+    corrs_nonzero_altlink = np.full((n_neurons, n_folds), np.nan)
+    corrs_nonzero_strict_altlink = np.full((n_neurons, n_folds), np.nan)
     corrs_max = np.full((n_neurons, n_folds), np.nan)
     corrs_nonzero_max = np.full((n_neurons, n_folds), np.nan)
+    cv_intercepts = np.full((n_neurons, n_folds), np.nan)
     pref_phases = np.full((n_neurons, n_folds), -1, dtype=int)
     n_nonzero_betas = np.full((n_neurons, n_folds), np.nan)
 
     cv_actual_tuning = np.full((n_neurons, n_folds, config.total_bins), np.nan, dtype=np.float32)
     cv_predicted_tuning = np.full((n_neurons, n_folds, config.total_bins), np.nan, dtype=np.float32)
     cv_predicted_nz_tuning = np.full((n_neurons, n_folds, config.total_bins), np.nan, dtype=np.float32)
+    cv_predicted_nz_strict_tuning = np.full((n_neurons, n_folds, config.total_bins), np.nan,
+                                            dtype=np.float32)
     cv_tuning_correlations = np.full((n_neurons, n_folds), np.nan)
     cv_tuning_correlations_pref = np.full((n_neurons, n_folds), np.nan)
 
     state4 = {k: np.full((n_neurons, n_folds, nstates), np.nan, dtype=np.float32)
               for k in ('actual_mean', 'actual_max', 'predicted_mean', 'predicted_max',
-                        'predicted_nz_mean', 'predicted_nz_max')}
+                        'predicted_nz_mean', 'predicted_nz_max',
+                        'predicted_nz_strict_mean', 'predicted_nz_strict_max')}
 
     # lag columns zeroed for the `corrs_nonzero` prediction (default {11, 0, 1})
     lag_axis = np.arange(n_reg) % num_lags
     zero_cols = np.isin(lag_axis, np.asarray(config.nonzero_lag_zero_lags))
+    # His third saved array: the 90-degree ("one whole state") exclusion, emitted every run
+    # alongside the 30-degree one, mirroring Predicted_Actual_correlation_{,nonzero_,
+    # nonzero_strict_}mean.
+    zero_cols_strict = np.isin(lag_axis, np.asarray(config.nonzero_lag_zero_lags_strict))
 
     phase_norm = _phase_label_per_norm_bin(config)
 
     # state-tuning: a neuron is tuned if it passes in ANY used session. Deliberately includes
     # the held-out fold so the neuron set is identical across folds; `state_tuning_train_only`
     # in run_and_summarise_all_mice_v4 reports whether that choice moves the headline.
-    tuned_any = np.zeros(n_neurons, dtype=bool)
+    # Per-SESSION masks, kept rather than OR-ed away. The paper subsets to neurons
+    # "state-tuned in more than one-third of the recorded tasks"; V4 originally used the OR
+    # (tuned in >= 1 task), which passes 95% of units. Storing the fraction means any
+    # threshold can be re-applied later without a re-fit.
     alt_cfg = copy.copy(config)
     alt_cfg.state_tuning_statistic = 'mean' if config.state_tuning_statistic == 'max' else 'max'
-    tuned_alt = np.zeros(n_neurons, dtype=bool)
+    tuned_per_session = np.zeros((n_neurons, len(used)), dtype=bool)
+    tuned_alt_per_session = np.zeros((n_neurons, len(used)), dtype=bool)
     tuning_pref_state = np.full((n_neurons, len(used)), -1, dtype=int)
     for si, s in enumerate(used):
         m, pr = identify_state_tuned_neurons_raw(
             preps[s]['neuron_raw'], preps[s]['trial_times'], config, return_pref=True)
-        tuned_any |= m
+        tuned_per_session[:, si] = m
         tuning_pref_state[:, si] = pr
-        tuned_alt |= identify_state_tuned_neurons_raw(
+        tuned_alt_per_session[:, si] = identify_state_tuned_neurons_raw(
             preps[s]['neuron_raw'], preps[s]['trial_times'], alt_cfg)
+    tuned_fraction = tuned_per_session.mean(axis=1)
+    tuned_any = tuned_per_session.any(axis=1)
+    tuned_mask = tuned_fraction > config.state_tuning_min_fraction
+    tuned_alt = (tuned_alt_per_session.mean(axis=1) > config.state_tuning_min_fraction)
 
     # How unequal are the legs? The 'max' state-tuning statistic is confounded by this: on
     # constant-rate cells its false-positive rate is 6% at ratio 1x but ~100% at 3x.
@@ -815,14 +879,16 @@ def run_cross_validated_regression_v4(data_dic, mouse_recday, config, valid_sess
                 continue
 
             yfit = Ntr[:, ni] if rows is None else Ntr[rows, ni]
-            coeffs = fit_regression_v4(Xfit, yfit, config)
+            coeffs, intercept = fit_regression_v4(Xfit, yfit, config, return_intercept=True)
             cv_coeffs[ni, fold] = coeffs
+            cv_intercepts[ni, fold] = intercept
             if np.all(np.isnan(coeffs)):
                 continue
             n_nonzero_betas[ni, fold] = int(np.sum(np.abs(coeffs) > 1e-9))
 
             actual_norm = raw_to_norm(test['neuron'][:, ni], test_tt, config)
-            pred_norm = raw_to_norm(test_reg @ coeffs, test_tt, config)
+            pred_norm = raw_to_norm(
+                apply_link(test_reg @ coeffs, intercept, config), test_tt, config)
             if actual_norm is None or pred_norm is None:
                 continue
 
@@ -850,17 +916,49 @@ def run_cross_validated_regression_v4(data_dic, mouse_recday, config, valid_sess
             state4['predicted_mean'][ni, fold] = p_m
             state4['predicted_max'][ni, fold] = p_x
 
-            coeffs_nz = coeffs.copy()
-            coeffs_nz[zero_cols] = 0
-            pred_norm_nz = raw_to_norm(test_reg @ coeffs_nz, test_tt, config)
-            if pred_norm_nz is not None:
-                cv_predicted_nz_tuning[ni, fold] = pred_norm_nz
+            if alt_link is not None:
+                alt_cfg_link = copy.copy(config)
+                alt_cfg_link.poisson_link = alt_link
+                pred_alt = raw_to_norm(
+                    apply_link(test_reg @ coeffs, intercept, alt_cfg_link), test_tt, config)
+                if pred_alt is not None:
+                    ra_m, ra_x, *_ = _state_pref_corr(actual_norm, pred_alt, phase_norm, pref,
+                                                      nbps, nstates)
+                    corrs_altlink[ni, fold] = ra_m if config.state_reduce == 'mean' else ra_x
+
+            for cols, tag, store_r in ((zero_cols, 'nz', True),
+                                       (zero_cols_strict, 'nz_strict', False)):
+                coeffs_nz = coeffs.copy()
+                coeffs_nz[cols] = 0
+                if alt_link is not None:
+                    pa = raw_to_norm(apply_link(test_reg @ coeffs_nz, intercept, alt_cfg_link),
+                                     test_tt, config)
+                    if pa is not None:
+                        rza_m, rza_x, *_ = _state_pref_corr(actual_norm, pa, phase_norm, pref,
+                                                            nbps, nstates)
+                        rza = rza_m if config.state_reduce == 'mean' else rza_x
+                        if store_r:
+                            corrs_nonzero_altlink[ni, fold] = rza
+                        else:
+                            corrs_nonzero_strict_altlink[ni, fold] = rza
+                pred_norm_nz = raw_to_norm(
+                    apply_link(test_reg @ coeffs_nz, intercept, config), test_tt, config)
+                if pred_norm_nz is None:
+                    continue
                 rz_m, rz_x, _, pz_m, _, pz_x = _state_pref_corr(
                     actual_norm, pred_norm_nz, phase_norm, pref, nbps, nstates)
-                corrs_nonzero[ni, fold] = rz_m if config.state_reduce == 'mean' else rz_x
-                corrs_nonzero_max[ni, fold] = rz_x
-                state4['predicted_nz_mean'][ni, fold] = pz_m
-                state4['predicted_nz_max'][ni, fold] = pz_x
+                rz = rz_m if config.state_reduce == 'mean' else rz_x
+                if store_r:
+                    cv_predicted_nz_tuning[ni, fold] = pred_norm_nz
+                    corrs_nonzero[ni, fold] = rz
+                    corrs_nonzero_max[ni, fold] = rz_x
+                    state4['predicted_nz_mean'][ni, fold] = pz_m
+                    state4['predicted_nz_max'][ni, fold] = pz_x
+                else:
+                    cv_predicted_nz_strict_tuning[ni, fold] = pred_norm_nz
+                    corrs_nonzero_strict[ni, fold] = rz
+                    state4['predicted_nz_strict_mean'][ni, fold] = pz_m
+                    state4['predicted_nz_strict_max'][ni, fold] = pz_x
 
         if verbose:
             print(f"  fold {fold + 1}/{n_folds} (test session {test_s}) done")
@@ -872,14 +970,28 @@ def run_cross_validated_regression_v4(data_dic, mouse_recday, config, valid_sess
         'cv_coeffs': cv_coeffs,
         'corrs': corrs,
         'corrs_nonzero': corrs_nonzero,
+        'corrs_nonzero_strict': corrs_nonzero_strict,
         'corrs_max': corrs_max,
         'corrs_nonzero_max': corrs_nonzero_max,
+        'cv_intercepts': cv_intercepts,
+        'poisson_link': config.poisson_link,
+        'poisson_alt_link': alt_link,
+        'corrs_altlink': corrs_altlink,
+        'corrs_nonzero_altlink': corrs_nonzero_altlink,
+        'corrs_nonzero_strict_altlink': corrs_nonzero_strict_altlink,
+        'mean_corrs_altlink': np.nanmean(corrs_altlink, axis=1),
+        'mean_corrs_nonzero_altlink': np.nanmean(corrs_nonzero_altlink, axis=1),
+        'mean_corrs_nonzero_strict_altlink': np.nanmean(corrs_nonzero_strict_altlink, axis=1),
         'mean_corrs': np.nanmean(corrs, axis=1),
         'mean_corrs_nonzero': np.nanmean(corrs_nonzero, axis=1),
+        'mean_corrs_nonzero_strict': np.nanmean(corrs_nonzero_strict, axis=1),
         'mean_corrs_max': np.nanmean(corrs_max, axis=1),
         'pref_phases': pref_phases,
         'n_nonzero_betas': n_nonzero_betas,
-        'state_tuned_mask': tuned_any,
+        'state_tuned_mask': tuned_mask,             # fraction of tasks > state_tuning_min_fraction
+        'state_tuned_mask_any': tuned_any,          # the old OR (tuned in >= 1 task)
+        'state_tuned_fraction': tuned_fraction,     # re-threshold post hoc without a re-fit
+        'state_tuned_per_session': tuned_per_session,
         'state_tuned_mask_alt': tuned_alt,          # the other state_tuning_statistic
         'tuning_pref_state': tuning_pref_state,
         'state_duration_ratio': float(np.median(dur_ratios)),
@@ -887,6 +999,7 @@ def run_cross_validated_regression_v4(data_dic, mouse_recday, config, valid_sess
         'cv_actual_tuning': cv_actual_tuning,
         'cv_predicted_tuning': cv_predicted_tuning,
         'cv_predicted_nz_tuning': cv_predicted_nz_tuning,
+        'cv_predicted_nz_strict_tuning': cv_predicted_nz_strict_tuning,
         'cv_tuning_correlations': cv_tuning_correlations,
         'cv_tuning_correlations_pref': cv_tuning_correlations_pref,
         'mean_tuning_correlations': np.nanmean(cv_tuning_correlations, axis=1),
@@ -902,6 +1015,14 @@ def run_cross_validated_regression_v4(data_dic, mouse_recday, config, valid_sess
     nz_mask, peak_lags, votes = identify_nonzero_lag_neurons(results, config, return_votes=True)
     results['nonzero_lag_mask'] = nz_mask
     results['peak_lags'] = peak_lags
+    # the 90-degree ("one whole state") mask, from the same betas
+    strict_cfg = copy.copy(config)
+    strict_cfg.nonzero_lag_min = config.nonzero_lag_min_strict
+    strict_cfg.nonzero_lag_max = config.nonzero_lag_max_strict
+    strict_cfg.nonzero_lag_zero_lags = config.nonzero_lag_zero_lags_strict
+    m_s, p_s = identify_nonzero_lag_neurons(results, strict_cfg)
+    results['nonzero_lag_mask_strict'] = m_s
+    results['peak_lags_strict'] = p_s
     results['nz_fold_votes'] = votes                      # NaN = that fold abstained
     results['n_informative_folds'] = np.sum(~np.isnan(votes), axis=1)
     return results
@@ -1027,15 +1148,23 @@ def assert_beta_stripe(results, config, tol=1e-9):
 
 _EXPORT_ARRAYS = (
     'cv_coeffs', 'cv_actual_tuning', 'cv_predicted_tuning', 'cv_predicted_nz_tuning',
+    'cv_predicted_nz_strict_tuning',
     'cv_actual_mean_state4', 'cv_actual_max_state4',
     'cv_predicted_mean_state4', 'cv_predicted_max_state4',
     'cv_predicted_nz_mean_state4', 'cv_predicted_nz_max_state4',
+    'cv_predicted_nz_strict_mean_state4', 'cv_predicted_nz_strict_max_state4',
     'corrs', 'corrs_nonzero', 'corrs_max', 'corrs_nonzero_max',
     'cv_tuning_correlations', 'cv_tuning_correlations_pref',
     'mean_corrs', 'mean_corrs_nonzero', 'mean_corrs_max',
     'mean_tuning_correlations', 'mean_tuning_correlations_pref',
     'pref_phases', 'n_nonzero_betas', 'nz_fold_votes', 'n_informative_folds',
-    'state_tuned_mask', 'state_tuned_mask_alt', 'tuning_pref_state',
+    'state_tuned_mask', 'state_tuned_mask_any', 'state_tuned_fraction',
+    'state_tuned_per_session', 'state_tuned_mask_alt', 'tuning_pref_state',
+    'cv_intercepts', 'corrs_nonzero_strict', 'mean_corrs_nonzero_strict',
+    'corrs_altlink', 'corrs_nonzero_altlink', 'corrs_nonzero_strict_altlink',
+    'mean_corrs_altlink', 'mean_corrs_nonzero_altlink',
+    'mean_corrs_nonzero_strict_altlink',
+    'nonzero_lag_mask_strict', 'peak_lags_strict',
     'nonzero_lag_mask', 'peak_lags',
 )
 
@@ -1289,7 +1418,22 @@ def plot_neuron_pages(results, config, out_pdf, neuron_indices=None, per_page=6,
                     if not np.all(np.isnan(pred_folds[fi])):
                         ax_p.plot(bins, pred_folds[fi], color='red', lw=0.4, alpha=0.25)
                 l1, = ax_c.plot(bins, actual, color='tab:blue', lw=1.4, label='actual')
-                l2, = ax_p.plot(bins, pred, color='red', lw=1.4, label='predicted')
+                l2, = ax_p.plot(bins, pred, color='red', lw=1.4, label='predicted (all betas)')
+                # The reduced-beta prediction: the reference never scores a non-zero-lag
+                # neuron with all its betas -- its `corrs_all_nozero` is always computed from
+                # a prediction with the near-anchor lags removed. Show both.
+                handles = [l1, l2]
+                for key, col, lags, lab in (
+                        ('cv_predicted_nz_tuning', 'darkorange',
+                         config.nonzero_lag_zero_lags, '30deg'),
+                        ('cv_predicted_nz_strict_tuning', 'seagreen',
+                         config.nonzero_lag_zero_lags_strict, '90deg')):
+                    pnz = np.nanmean(results[key][ni], axis=0)
+                    if np.all(np.isnan(pnz)):
+                        continue
+                    ln, = ax_p.plot(bins, pnz, color=col, lw=1.1, ls='--',
+                                    label=f'pred, no lag {",".join(map(str, lags))} ({lab})')
+                    handles.append(ln)
                 ax_c.set_xlim(0, config.total_bins)
                 ax_c.set_xticks(np.arange(nstates) * nbps + nbps / 2)
                 ax_c.set_xticklabels(list('ABCD')[:nstates], fontsize=7)
@@ -1300,11 +1444,13 @@ def plot_neuron_pages(results, config, out_pdf, neuron_indices=None, per_page=6,
                 ax_p.set_ylabel('predicted', fontsize=7, color='red')
                 r_full = results['mean_tuning_correlations'][ni]
                 r_pref = results['mean_tuning_correlations_pref'][ni]
-                ax_c.set_title(f'360-bin r={r_full:.3f}   pref-phase-only r={r_pref:.3f}'
-                               '   (y-axes scaled independently; grey = predicted is 0 '
-                               'by construction)', fontsize=7)
+                ax_c.set_title(f'360-bin r={r_full:.3f}   pref-phase-only r={r_pref:.3f}   '
+                               f"n=4 r={results['mean_corrs'][ni]:.3f} / "
+                               f"{results['mean_corrs_nonzero'][ni]:.3f} (30deg) / "
+                               f"{results['mean_corrs_nonzero_strict'][ni]:.3f} (90deg)"
+                               '   (y-axes scaled independently)', fontsize=7)
                 if row == 0:
-                    ax_c.legend(handles=[l1, l2], fontsize=6, loc='upper right', ncol=2)
+                    ax_c.legend(handles=handles, fontsize=5.5, loc='upper right', ncol=3)
 
                 # --- panel 3: the n=4 readout the headline metric uses
                 a4 = results[f'cv_actual_{reduce_key}_state4'][ni]
@@ -1501,6 +1647,11 @@ def plot_fold_ratemap_pages(results, config, out_pdf, neuron_indices=None, per_p
                         ax.plot(bins, actual, color='tab:blue', lw=1.0)
                         axp = ax.twinx()
                         axp.plot(bins, pred, color='red', lw=1.0)
+                        for key, col in (('cv_predicted_nz_tuning', 'darkorange'),
+                                         ('cv_predicted_nz_strict_tuning', 'seagreen')):
+                            pnz = results[key][ni, fi]
+                            if not np.all(np.isnan(pnz)):
+                                axp.plot(bins, pnz, color=col, lw=0.9, ls='--')
                         axp.tick_params(axis='y', labelsize=4.5, labelcolor='red')
                         ax.set_xlim(0, config.total_bins)
                         ax.set_xticks(np.arange(nstates) * nbps + nbps / 2)
@@ -1509,9 +1660,10 @@ def plot_fold_ratemap_pages(results, config, out_pdf, neuron_indices=None, per_p
                         ax.tick_params(axis='y', labelcolor='tab:blue')
                     held = sessions[fi] if fi < len(sessions) else fi
                     r4 = results['corrs'][ni, fi]
-                    r360 = results['cv_tuning_correlations_pref'][ni, fi]
+                    r4z = results['corrs_nonzero'][ni, fi]
+                    r4s = results['corrs_nonzero_strict'][ni, fi]
                     ax.set_title(f'held-out {held} | pref {prefs[fi]}\n'
-                                 f'n=4 r={r4:.2f}  pref-bin r={r360:.2f}', fontsize=5.5)
+                                 f'r={r4:.2f} / {r4z:.2f} (30d) / {r4s:.2f} (90d)', fontsize=5.5)
 
                 ax = axes[row][-1]
                 a4 = results[f'cv_actual_{reduce_key}_state4'][ni]
@@ -1524,16 +1676,20 @@ def plot_fold_ratemap_pages(results, config, out_pdf, neuron_indices=None, per_p
                             continue
                         scale = np.nanmax(np.abs(v)) or 1.0
                         ax.plot(x, v / scale, color=col, lw=0.5, alpha=0.35)
-                for arr, col, lab in ((a4, 'tab:blue', 'actual'), (p4, 'red', 'predicted')):
+                z4 = results[f'cv_predicted_nz_{reduce_key}_state4'][ni]
+                for arr, col, lab, ls in ((a4, 'tab:blue', 'actual', '-'),
+                                          (p4, 'red', 'predicted', '-'),
+                                          (z4, 'darkorange', 'pred (no lag)', '--')):
                     m = np.nanmean(arr, axis=0)
                     if np.all(np.isnan(m)):
                         continue
                     ax.plot(x, m / (np.nanmax(np.abs(m)) or 1.0), color=col, marker='o',
-                            ms=3, lw=1.4, label=lab)
+                            ms=3, lw=1.4, ls=ls, label=lab)
                 ax.set_xticks(x)
                 ax.set_xticklabels(list('ABCD')[:nstates], fontsize=5)
                 ax.tick_params(labelsize=4.5)
-                ax.set_title(f"N{ni}  mean n=4 r={results['mean_corrs'][ni]:.3f}\n"
+                ax.set_title(f"N{ni}  mean n=4 r={results['mean_corrs'][ni]:.3f} / "
+                             f"{results['mean_corrs_nonzero'][ni]:.3f} no-lag\n"
                              f"NZ-lag={bool(results['nonzero_lag_mask'][ni])} "
                              f"peak lag={results['peak_lags'][ni]:.0f}", fontsize=5.5)
                 if row == 0:
@@ -1603,6 +1759,132 @@ def plot_example_betas(results, config, neuron_indices=None, num_examples=6, sav
 # Cross-mouse driver
 # ============================================================================
 
+def plot_cross_mouse_summary(all_results, config, save_path=None, paper_ref=True):
+    """The paper's three panels, pooled across recdays, plus the per-recday breakdown.
+
+    El-Gaby's Fig 5h shows the same correlation under two selections and ED Fig 8a adds a
+    third; the number moves a lot between them, so one histogram is not enough. Panels:
+
+        all state-tuned          no lag filter, all-betas correlation   (Fig 5h left)
+        non-zero-lag 30 deg      excludes lags {0, 11}                  (Fig 5h right)
+        non-zero-lag 90 deg      excludes {0,1,2,9,10,11}               (ED Fig 8a)
+
+    Each carries n, mean, t, P and the effect size t/sqrt(n) -- the last is what makes panels
+    with different n comparable, to each other and to the published values.
+    """
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    panels = (('all state-tuned', 'selected_all', 'mean_corr', '#888780'),
+              (f'non-zero-lag 30deg  (excl. {",".join(map(str, config.nonzero_lag_zero_lags))})',
+               'selected', 'mean_corr_nonzero', '#C03030'),
+              (f'non-zero-lag 90deg  (excl. '
+               f'{",".join(map(str, config.nonzero_lag_zero_lags_strict))})',
+               'selected_strict', 'mean_corr_nonzero_strict', '#2A6FB5'))
+    #: published ElasticNet values, for orientation only (PFC; Fig 5h / ED Fig 8a)
+    PAPER = {'selected_all': (489, 9.3, 0.421), 'selected': (329, 3.9, 0.215),
+             'selected_strict': (224, 2.53, 0.169)}
+
+    try:
+        table = build_unit_table(all_results, config, require_anatomy=False)
+    except Exception as exc:
+        print(f'  cross-mouse summary skipped: {exc}')
+        return None
+    if table.empty:
+        return None
+
+    fig, axes = plt.subplots(1, 4, figsize=(16, 3.6))
+    for ax, (label, sel_col, val_col, colour) in zip(axes, panels):
+        v = table.loc[table[sel_col], val_col].dropna().to_numpy() if sel_col in table else np.array([])
+        if not len(v):
+            ax.text(0.5, 0.5, 'no neurons', ha='center', va='center', transform=ax.transAxes)
+            ax.set_title(label, fontsize=8)
+            continue
+        ax.hist(v, bins=np.linspace(-1, 1, 41), color=colour, alpha=0.75, edgecolor='black',
+                linewidth=0.4)
+        ax.axvline(0, color='k', ls='--', lw=0.8)
+        ax.axvline(v.mean(), color='red', lw=1.6)
+        t, p = stats.ttest_1samp(v, 0) if len(v) > 1 else (np.nan, np.nan)
+        txt = (f"n={len(v)}\nmean={v.mean():+.3f}\n{np.mean(v > 0):.0%} > 0\n"
+               f"t={t:.2f}\np={p:.2g}\nt/sqrt(n)={t / np.sqrt(len(v)):.3f}")
+        if paper_ref and sel_col in PAPER:
+            pn, pt, pe = PAPER[sel_col]
+            txt += f"\n\npaper: n={pn}\n t={pt}, {pe:.3f}"
+        ax.text(0.97, 0.97, txt, transform=ax.transAxes, va='top', ha='right', fontsize=6,
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.85))
+        ax.set_xlabel('pref-phase state corr (n=4)')
+        ax.set_title(label, fontsize=8)
+    axes[0].set_ylabel('# neurons')
+
+    ax = axes[3]
+    by = (table[table.selected].groupby('recday').mean_corr_nonzero.agg(['mean', 'size'])
+          if 'recday' in table else None)
+    if by is not None and len(by):
+        x = np.arange(len(by))
+        ax.bar(x, by['mean'], color='#C03030', alpha=0.75, edgecolor='black', linewidth=0.4)
+        ax.axhline(0, color='k', ls='--', lw=0.8)
+        ax.set_xticks(x)
+        ax.set_xticklabels([f"{i}\n(n={int(n)})" for i, n in zip(by.index, by['size'])],
+                           rotation=90, fontsize=4)
+        ax.set_ylabel('mean corr')
+    ax.set_title('Per-recday, non-zero-lag 30deg', fontsize=8)
+
+    est = estimator_name(config)
+    leak = '  [pref phase from TEST -- leakage]' if config.pref_phase_source == 'test' else ''
+    fig.suptitle(f"V4 {est} anchoring - {config.lag_direction} lags - "
+                 f"state-tuned in >{config.state_tuning_min_fraction:.2f} of tasks{leak}",
+                 fontweight='bold', fontsize=10)
+    fig.tight_layout(rect=(0, 0, 1, 0.94))
+    if save_path:
+        fig.savefig(save_path, bbox_inches='tight')
+    return fig
+
+
+def regenerate_summary(out_dir, save=True):
+    """Redraw the cross-mouse summary for a finished run, from its exports alone.
+
+    Plotting code changes more often than fitting code, and a sweep costs hours. This rebuilds
+    the figure (and returns the three-panel table) from the `.npz` files, so a run never has to
+    be repeated just to pick up a figure change.
+
+        python -c "import elasticnet_regression_v4 as v4; v4.regenerate_summary('<run dir>')"
+    """
+    import glob
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    runs = {}
+    for path in sorted(glob.glob(os.path.join(out_dir, '*_arrays.npz'))):
+        res = load_regression_outputs(path)
+        runs[res['mouse_recday']] = res
+    if not runs:
+        raise FileNotFoundError(f'no *_arrays.npz in {out_dir}')
+
+    stored = dict(next(iter(runs.values()))['config'])
+    init = {k: v for k, v in stored.items()
+            if k in RegressionConfigV4.__init__.__code__.co_varnames}
+    init.pop('self', None)
+    config = RegressionConfigV4(**init)
+
+    # a run may have no anatomy (PFC) or a recday absent from unit_regions; either way the
+    # summary only needs the regression columns
+    original = globals()['load_unit_regions']
+    globals()['load_unit_regions'] = lambda path=None, required=True: (
+        None if not required else original(path))
+    try:
+        out = os.path.join(out_dir, f'cross_mouse_v4_{config.lag_direction}_summary.svg')
+        fig = plot_cross_mouse_summary(runs, config, save_path=out if save else None)
+        table = build_unit_table(runs, config, require_anatomy=False)
+    finally:
+        globals()['load_unit_regions'] = original
+    if fig is not None:
+        plt.close(fig)
+    print(f'{len(runs)} recdays -> {out if save else "(not saved)"}')
+    return three_panel_summary(table)
+
+
 def summarise_recday(results, config):
     """Per-recday diagnostics: the numbers that decide whether a run is interpretable."""
     nz = results['nonzero_lag_mask']
@@ -1637,6 +1919,13 @@ def summarise_recday(results, config):
         'state_duration_ratio': results['state_duration_ratio'],
         'frac_pref_state_is_shortest': results['frac_pref_state_is_shortest'],
         'n_state_tuned_alt_stat': int(results['state_tuned_mask_alt'].sum()),
+        'n_state_tuned_any': int(results['state_tuned_mask_any'].sum()),
+        'state_tuning_min_fraction': config.state_tuning_min_fraction,
+        'n_nonzero_lag_strict': int(results['nonzero_lag_mask_strict'].sum()),
+        'n_selected_strict': int((results['nonzero_lag_mask_strict'] & tuned
+                                  & np.isfinite(results['mean_corrs_nonzero_strict'])).sum()),
+        'pref_phase_source': config.pref_phase_source,
+        'poisson_link': config.poisson_link,
     }
 
 
@@ -1652,6 +1941,16 @@ def _print_recday_summary(s):
     print(f"  state-tuning confound: leg longest:shortest = {s['state_duration_ratio']:.2f}x, "
           f"{s['frac_pref_state_is_shortest']:.0%} of units prefer the SHORTEST leg "
           f"(chance 25%), state-tuned under the other statistic={s['n_state_tuned_alt_stat']}")
+    print(f"  state tuning: >{s['state_tuning_min_fraction']:.2f} of tasks -> "
+          f"{s['n_state_tuned']} (the old OR over tasks would give {s['n_state_tuned_any']}) | "
+          f"strict 90deg: NZ-lag={s['n_nonzero_lag_strict']} selected={s['n_selected_strict']}")
+    if s['pref_phase_source'] == 'test':
+        print('  *** pref_phase_source=\'test\': the HELD-OUT session chooses which bins the '
+              "held-out score averages over -- LEAKAGE, matching the reference. Use 'train' "
+              'for an unbiased score. ***')
+    if s.get('poisson_link') == 'log':
+        print("  poisson_link='log': prediction is exp(X@beta + b), the paper's LNP model "
+              "(his code uses the linear predictor instead)")
 
 
 def run_and_summarise_all_mice_v4(data_dic, config, valid_sessions_dic=None, save_dir=None,
@@ -1774,43 +2073,15 @@ def run_and_summarise_all_mice_v4(data_dic, config, valid_sessions_dic=None, sav
               f'({len(all_results)} recday(s) ran; check the diagnostics table).')
         return all_results, pooled, summary_table
 
-    allvals = np.concatenate(nonempty)
-    allvals = allvals[~np.isnan(allvals)]
-    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
-    ax = axes[0]
-    ax.hist(allvals, bins=40, color='darkorange', alpha=0.7, edgecolor='black')
-    ax.axvline(0, color='k', ls='--')
-    mean_all = np.mean(allvals) if len(allvals) else np.nan
-    ax.axvline(mean_all, color='red', lw=2, label=f"mean={mean_all:.3f}")
-    if len(allvals) > 1:
-        t, p = stats.ttest_1samp(allvals, 0)
-        ax.text(0.97, 0.97, f"n={len(allvals)}\nt={t:.2f}\np={p:.2e}",
-                transform=ax.transAxes, va='top', ha='right',
-                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-    ax.set_xlabel('pref-phase state corr (n=4)')
-    ax.set_ylabel('# neurons')
-    ax.set_title(f'Pooled - state-tuned NZ-lag ({config.lag_direction})')
-    ax.legend()
-
-    ax = axes[1]
-    labels = list(pooled.keys())
-    means = [np.nanmean(v) if len(v) else np.nan for v in pooled.values()]
-    ns = [int(np.sum(~np.isnan(v))) for v in pooled.values()]
-    x = np.arange(len(labels))
-    ax.bar(x, means, color='darkorange', alpha=0.7, edgecolor='black')
-    ax.axhline(0, color='k', ls='--')
-    ax.set_xticks(x)
-    ax.set_xticklabels([f"{l}\n(n={n})" for l, n in zip(labels, ns)], rotation=30, ha='right',
-                       fontsize=7)
-    ax.set_ylabel('mean corr')
-    ax.set_title('Per-mouse mean')
-    est = 'Poisson' if config.use_poisson else ('ElasticNet' if config.regularize else 'Linear')
-    fig.suptitle(f"V4 raw-time {est} anchoring - {config.lag_direction} lags", fontweight='bold')
-    fig.tight_layout()
-    if save_dir is not None:
-        fig.savefig(os.path.join(save_dir, f'cross_mouse_v4_{config.lag_direction}_summary.svg'),
-                    bbox_inches='tight')
-    plt.close(fig)
+    # The paper's three panels, pooled -- not just the single non-zero-lag histogram the
+    # earlier version drew, which showed one of the three and gave no way to see how much the
+    # number depends on which selection is used.
+    fig = plot_cross_mouse_summary(
+        all_results, config,
+        save_path=(os.path.join(save_dir, f'cross_mouse_v4_{config.lag_direction}_summary.svg')
+                   if save_dir is not None else None))
+    if fig is not None:
+        plt.close(fig)
 
     if export_dir is not None and summary_table is not None:
         summary_table.to_csv(os.path.join(export_dir,
@@ -1963,7 +2234,12 @@ def build_unit_table(all_results, config, regions=None, data_dic=None, strict=Tr
         block = reg.assign(
             lag_direction=res['lag_direction'],
             nonzero_lag=res['nonzero_lag_mask'],
+            nonzero_lag_strict=res['nonzero_lag_mask_strict'],
+            peak_lag_strict=res['peak_lags_strict'],
+            mean_corr_nonzero_strict=res['mean_corrs_nonzero_strict'],
             state_tuned=res['state_tuned_mask'],
+            state_tuned_fraction=res['state_tuned_fraction'],
+            state_tuned_any=res['state_tuned_mask_any'],
             peak_lag=res['peak_lags'],
             mean_corr=res['mean_corrs'],
             mean_corr_nonzero=res['mean_corrs_nonzero'],
@@ -1986,7 +2262,11 @@ def build_unit_table(all_results, config, regions=None, data_dic=None, strict=Tr
     if not rows:
         return pd.DataFrame()
     table = pd.concat(rows, ignore_index=True)
+    # The paper reports three panels; carry all three selections so a crosstab can use any.
     table['selected'] = (table.nonzero_lag & table.state_tuned & table.mean_corr.notna())
+    table['selected_strict'] = (table.nonzero_lag_strict & table.state_tuned
+                                & table.mean_corr_nonzero_strict.notna())
+    table['selected_all'] = (table.state_tuned & table.mean_corr.notna())
     table.attrs['has_anatomy'] = has_anatomy
     return table
 
@@ -2002,6 +2282,46 @@ def _resolve_group_col(table, group_col=None):
         if candidate in table.columns:
             return candidate
     raise KeyError(f'no grouping column found. Available: {sorted(table.columns)}')
+
+
+def three_panel_summary(table, group_col=None, verbose=True):
+    """The paper's three panels, side by side, from one unit table.
+
+    El-Gaby reports the same correlation under three selections, and the number moves a lot
+    between them, so reporting one without the others is misleading:
+
+        all state-tuned        -> Fig 5h left    (no lag filter)
+        + non-zero-lag 30 deg  -> Fig 5h right   (excludes lags {0, 11})
+        + non-zero-lag 90 deg  -> ED Fig 8a      (excludes {0,1,2,9,10,11})
+
+    Each row is `n`, mean r, fraction > 0, t and P, over the correlation appropriate to that
+    panel -- the all-betas one for the first, the reduced-beta ones for the other two.
+    """
+    import pandas as pd
+    from scipy import stats as st
+
+    panels = (('all state-tuned', 'selected_all', 'mean_corr'),
+              ('non-zero-lag 30deg', 'selected', 'mean_corr_nonzero'),
+              ('non-zero-lag 90deg (strict)', 'selected_strict', 'mean_corr_nonzero_strict'))
+    rows = []
+    for label, sel_col, val_col in panels:
+        if sel_col not in table.columns or val_col not in table.columns:
+            continue
+        v = table.loc[table[sel_col], val_col].dropna().to_numpy()
+        t, p = st.ttest_1samp(v, 0) if len(v) > 1 else (np.nan, np.nan)
+        rows.append({'panel': label, 'n': len(v),
+                     'mean_r': round(float(v.mean()), 4) if len(v) else np.nan,
+                     'frac_pos': round(float(np.mean(v > 0)), 3) if len(v) else np.nan,
+                     't': round(float(t), 2), 'P': float(p),
+                     'effect_size': round(float(t / np.sqrt(len(v))), 3) if len(v) else np.nan})
+    out = pd.DataFrame(rows)
+    if verbose:
+        print(out.to_string(index=False))
+        print('\nEl-Gaby et al. 2024, ElasticNet, PFC (Fig 5h / ED 8a):')
+        print('  all state-tuned  n=489 t=9.3  P=5.3e-19  effect size 0.421')
+        print('  non-zero-lag     n=329 t=3.9  P=1.08e-4  effect size 0.215')
+        print('  strict 90deg     n=224 t=2.53 P=0.012    effect size 0.169')
+    return out
 
 
 def region_summary(table, group_col=None, verbose=True):

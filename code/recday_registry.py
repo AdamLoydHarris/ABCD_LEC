@@ -79,18 +79,34 @@ STALE_CACHE_RECDAYS: dict[str, str] = {
 #: caches have 91 -- the wrong day).
 #:
 #: Post-refit sections are identifiable by name: `w1_refit.section_name` stamps the
-#: configuration into it as `{regset}_{width}ms_{scheme}`. A section carrying that stamp
-#: postdates the fix, so the stale list must not apply to it.
-_POST_REFIT_SECTION = re.compile(r'__(full|matched)_\d+ms_(decile|uniform)$')
+#: configuration into it as `{regset}_{width}ms_{scheme}`, optionally followed by a V3 arm
+#: token (`_cap30s_tfrU10b`, `_cap60s`; see `w1_refit.arm_extra`). A section carrying that
+#: stamp postdates the fix, so the stale list must not apply to it. The optional group is
+#: what keeps the V3 fits from silently losing `ly05_20250618_20250619` at load time -- the
+#: regex used to be anchored right after the scheme.
+_POST_REFIT_SECTION = re.compile(r'__(full|matched)_\d+ms_(decile|uniform)(_[A-Za-z0-9_.]+)?$')
 
 
 def is_post_refit_section(section_name) -> bool:
-    """True if `section_name` was produced by the W1 production refit.
+    """True if `section_name` was produced by the W1 production refit or a V3 arm.
 
     Used to stop `STALE_CACHE_RECDAYS` from dropping good recdays out of the new fits while
     still protecting every pre-refit cache that genuinely holds the wrong day's spikes.
     """
     return bool(section_name and _POST_REFIT_SECTION.search(str(section_name)))
+
+
+# Every name the production and V3 fits are written under must match, and the pre-refit
+# names must not -- checked at import so a naming change cannot silently re-arm the stale list.
+for _name in ('all_regressors__full_250ms_decile', 'all_regressors__matched_250ms_decile',
+              'core_progress_time__matched_250ms_decile_cap30s_tfrU10b',
+              'core_progress_time__matched_250ms_decile_cap60s_tfrD10b',
+              'core_progress_only__matched_250ms_decile_cap30s',
+              'core_progress_only__matched_250ms_decile_cap60s'):
+    assert is_post_refit_section(_name), _name
+for _name in ('all_regressors', 'distance_gp_state_filtered', 'pokes_filtered'):
+    assert not is_post_refit_section(_name), _name
+del _name
 
 
 # ---------------------------------------------------------------------------

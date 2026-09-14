@@ -72,6 +72,32 @@ STALE_CACHE_RECDAYS: dict[str, str] = {
         "109-unit arrays (docs/BUG_ly05_recday_mismatch.md)",
 }
 
+#: Mirror of the LEC registry's post-refit test (the stale entry above names an LEC recday,
+#: so it is inert here -- but `glm_analysis_v*._stale_or_excluded` calls this function by
+#: name and the two copies must agree). Production names carry `{regset}_{width}ms_{scheme}`,
+#: V3 arms append a token (`_cap30s_tfrU10b`, `_cap60s`; see `w1_refit.arm_extra`).
+_POST_REFIT_SECTION = re.compile(r'__(full|matched)_\d+ms_(decile|uniform)(_[A-Za-z0-9_.]+)?$')
+
+
+def is_post_refit_section(section_name) -> bool:
+    """True if `section_name` was produced by the W1 production refit or a V3 arm.
+
+    Used to stop `STALE_CACHE_RECDAYS` from dropping good recdays out of the new fits while
+    still protecting every pre-refit cache that genuinely holds the wrong day's spikes.
+    """
+    return bool(section_name and _POST_REFIT_SECTION.search(str(section_name)))
+
+
+for _name in ('all_regressors__full_250ms_decile', 'all_regressors__matched_250ms_decile',
+              'core_progress_time__matched_250ms_decile_cap30s_tfrU10b',
+              'core_progress_time__matched_250ms_decile_cap60s_tfrD10b',
+              'core_progress_only__matched_250ms_decile_cap30s',
+              'core_progress_only__matched_250ms_decile_cap60s'):
+    assert is_post_refit_section(_name), _name
+for _name in ('all_regressors', 'distance_gp_state_filtered', 'pokes_filtered'):
+    assert not is_post_refit_section(_name), _name
+del _name
+
 
 # ---------------------------------------------------------------------------
 # recday <-> block, by date
