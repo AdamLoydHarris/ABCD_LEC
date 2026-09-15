@@ -145,3 +145,9 @@ bash $P/50_sbatch_notebook.sh "Figure5_Figure6.ipynb" --skip 9 --time 48:00:00
 `Basic_analysis` and `Behavioural Analysis (Figure 1)` read PFC raw files through
 `Data_folder`; `Figure7` needs a sleep source LEC does not have; `Figure2_UMAP` needs
 undeposited inputs even on PFC.
+
+> **2026-09-15.** `Figure5_Regression_prospective.ipynb` (VARIANT-PRO, both copies) ran to
+> EXIT=0 (LEC 3594655, PFC 3594658); results in `LEC_REPRODUCTION.md` / PFC `REPRODUCTION.md`
+> dated 2026-09-15. `96_extract_figure5_stats.py` now iterates `_prospective`. The Figure2 ->
+> bridge -> Figure3_fast -> checks chain (3591210-3591213) is still queued behind
+> Figure5_Figure6 (3591114).

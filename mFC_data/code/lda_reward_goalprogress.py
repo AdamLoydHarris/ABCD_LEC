@@ -1075,7 +1075,13 @@ REWARD_PROGRESS_PICKLES = {
     'pfc': f'{_REPO}/mFC_data/glm_outputs/PFC_lda/reward_progress.pkl',
 }
 DATASET_COLOURS = {'lec': '#BE3455', 'pfc': '#0F4C81'}   # GridMaze Viva Magenta / Classic Blue
+GROUP_COLOURS = {'ENTl': '#0F4C81', 'ENTl-deep': '#0F4C81', 'ENTl-sup': '#45B5AA',   # anatomy_split
+                 'ENTm': '#6B3FA0', 'SUB': '#BE3455', 'SUBCA1': '#BE3455', 'CA1': '#FF6F61'}
 NULL_COLOUR, INK = '#B4B2A9', '#2C2C2A'                  # GridMaze Stone / Caviar
+
+
+def _colour(label):
+    return DATASET_COLOURS.get(label) or GROUP_COLOURS.get(label) or INK
 
 
 def load_reward_progress_results(dataset, path=None, tag=''):
@@ -1142,6 +1148,34 @@ def reward_progress_table(payload):
     return pd.DataFrame(rows)
 
 
+def aggregate_draw_readouts(readouts):
+    """Combine run_joint_lda_readout outputs from repeated neuron subsamples of one recday:
+    scores are averaged over draws, null arrays pooled, p recomputed against the pooled null
+    (a single draw's null is wider than the null of a draw-mean, so p is conservative)."""
+    out = {}
+    for k in READOUT_METRICS:
+        vals = np.array([r[k] for r in readouts], dtype=float)
+        pooled = np.concatenate([np.asarray(r[f'{k}_null'], dtype=float) for r in readouts])
+        real = float(np.nanmean(vals))
+        out[k] = real
+        out[f'{k}_draws'] = vals
+        out[f'{k}_null'] = pooled
+        out[f'{k}_null_mean'] = float(np.nanmean(pooled)) if np.isfinite(pooled).any() else np.nan
+        out[f'{k}_null_sd'] = float(np.nanstd(pooled)) if np.isfinite(pooled).any() else np.nan
+        if np.isfinite(real) and np.isfinite(pooled).any():
+            better = pooled <= real if k.endswith(('_mae', '_rmse')) else pooled >= real
+            out[f'{k}_p'] = float(np.nanmean(better))
+        else:
+            out[f'{k}_p'] = np.nan
+    last = readouts[-1]
+    for k in ('y_true_key', 'y_pred_key', 'y_true_prog', 'y_pred_prog', 't_true', 't_pred'):
+        out[k] = last[k]
+    out.update(n_classes=last['n_classes'], n_shuffles=last['n_shuffles'] * len(readouts),
+               ridge_alpha=last['ridge_alpha'], conjunction=last['conjunction'],
+               n_draws=len(readouts))
+    return out
+
+
 def time_behaviour_table(payload):
     """Per session: how trial index maps onto seconds. Pearson / Spearman r(t_sec, trial),
     10-trial span, trial-duration mean, CV and drift (s per trial). The trial-index and
@@ -1187,18 +1221,18 @@ def _strip_panel(ax, df, metric, datasets, rng, title, ylabel, chance_col=None, 
                                    color=NULL_COLOUR, alpha=0.6, lw=0, zorder=1))
         vals = sub[metric].to_numpy(dtype=float)
         ax.scatter(i + rng.uniform(-0.18, 0.18, len(sub)), vals, s=8,
-                   color=DATASET_COLOURS[ds], alpha=0.65, lw=0, zorder=2)
+                   color=_colour(ds), alpha=0.65, lw=0, zorder=2)
         mm = sub.groupby('mouse')[metric].mean()
         xs = i + np.linspace(-0.12, 0.12, len(mm)) if len(mm) > 1 else np.array([i])
-        ax.scatter(xs, mm.values, s=24, facecolor='white', edgecolor=DATASET_COLOURS[ds],
+        ax.scatter(xs, mm.values, s=24, facecolor='white', edgecolor=_colour(ds),
                    lw=1.0, zorder=3)
         n_sig = int((sub[f'{metric}_p'] < alpha).sum())
         ax.text(i, 1.02, f'{n_sig}/{len(sub)}', ha='center', va='bottom', fontsize=7,
-                color=DATASET_COLOURS[ds], transform=ax.get_xaxis_transform())
+                color=_colour(ds), transform=ax.get_xaxis_transform())
     if chance_col is not None:
         ax.axhline(df[chance_col].mean(), ls='--', lw=0.8, color=INK, zorder=0)
     ax.set_xticks(range(len(datasets)))
-    ax.set_xticklabels([d.upper() for d in datasets])
+    ax.set_xticklabels([d.upper() if d in DATASET_COLOURS else d for d in datasets])
     ax.set_xlim(-0.6, len(datasets) - 0.4)
     if ylim is not None:
         ax.set_ylim(*ylim)
@@ -1221,19 +1255,26 @@ def plot_lec_vs_pfc_decoding(paths=None, out_path=None, alpha=0.05, seed=0, tag=
     import matplotlib as mpl
     import pandas as pd
 
+    # `paths`: {label: pickle path}. Default labels are the two datasets; any other labels (e.g.
+    # 'ENTl' / 'SUBCA1' region-restricted runs of one dataset) are plotted as the columns.
+    if paths is None:
+        paths = {ds: None for ds in ('lec', 'pfc')}
     tables = []
-    for ds in ('lec', 'pfc'):
+    for label, path in paths.items():
+        ds = label if label in DATASET_COLOURS else 'lec'
         try:
-            tables.append(reward_progress_table(
-                load_reward_progress_results(ds, (paths or {}).get(ds), tag=tag)))
+            tb = reward_progress_table(load_reward_progress_results(ds, path, tag=tag))
         except FileNotFoundError as exc:
-            print(f'  skipping {ds}: {exc}')
+            print(f'  skipping {label}: {exc}')
+            continue
+        tb['dataset'] = label
+        tables.append(tb)
     if not tables:
-        raise FileNotFoundError('no reward_progress.pkl found for either dataset')
+        raise FileNotFoundError('no reward_progress pickle found for any label')
     df = pd.concat(tables, ignore_index=True)
     if 'prog_acc' not in df:
         raise ValueError('legacy pickle without a joint-LDA readout; re-run run_lda_reward_progress.py')
-    datasets = [d for d in ('lec', 'pfc') if d in set(df['dataset'])]
+    datasets = [d for d in paths if d in set(df['dataset'])]
 
     try:
         from glm_analysis_v2 import apply_gridmaze_style

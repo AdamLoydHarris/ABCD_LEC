@@ -32,6 +32,18 @@ OUT_DEFAULT = {
 }
 
 
+#: alias -> set of `unit_regions` group labels (anatomy_split.REGION_COLORS keys)
+REGION_GROUPS = {
+    'ENTl': {'ENTl-sup', 'ENTl-deep'},
+    'ENTl-deep': {'ENTl-deep'},
+    'ENTl-sup': {'ENTl-sup'},
+    'ENTm': {'ENTm'},
+    'SUB': {'SUB/ProS'},
+    'CA1': {'CA1/HPF'},
+    'SUBCA1': {'SUB/ProS', 'CA1/HPF'},
+}
+
+
 def hrs(t0):
     return f'{(time.time() - t0) / 3600:.2f} h'
 
@@ -84,6 +96,14 @@ def main():
     ap.add_argument('--n-pcs', type=int, default=None,
                     help='fixed LDA input dimension for every recday (default: 75 %% variance); '
                          'the pickle gets a _pcs<n> suffix unless --out is given')
+    ap.add_argument('--subsample-neurons', type=int, default=None,
+                    help='random neuron subset of this size per recday (recdays with fewer keep '
+                         'all); repeated --n-draws times; pickle suffix _sub<n>')
+    ap.add_argument('--n-draws', type=int, default=10)
+    ap.add_argument('--seed', type=int, default=0)
+    ap.add_argument('--region-group', default=None, choices=sorted(REGION_GROUPS),
+                    help='LEC only: restrict to units of this anatomical group (unit_regions.pkl); '
+                         'combine with --subsample-neurons for a count-matched readout; suffix _grp<name>')
     ap.add_argument('--recdays', default='', help='comma-separated subset (smoke test)')
     ap.add_argument('--out', default='')
     ap.add_argument('--legacy-decoding', action='store_true',
@@ -100,19 +120,62 @@ def main():
     valid_sessions_dic = build_valid_sessions(data_dic, recdays)
     print(f'[{hrs(t0)}] {args.dataset.upper()}: {len(recdays)} recdays loaded', flush=True)
 
+    unit_regions = None
+    if args.region_group is not None:
+        if args.dataset != 'lec':
+            raise SystemExit('--region-group needs per-unit anatomy, which only the LEC dataset has')
+        import elasticnet_regression_v5 as v5
+        unit_regions = v5.load_unit_regions()
+
     results_by_recday, readout, decoding_results, skipped = {}, {}, {}, {}
+    rng = np.random.default_rng(args.seed)
     for rd in recdays:
-        res = lrg.run_reward_progress_lda_analysis(
-            data_dic, rd, valid_sessions=valid_sessions_dic[rd], neuron_subset=None,
-            min_trials=args.min_trials, conjunction=args.conjunction, plot=False,
-            n_pcs=args.n_pcs)
-        plt.close('all')
-        if res is None:
+        n_neurons = next(v for k, v in data_dic[rd].items()
+                         if k != 'valid_sessions' and isinstance(v, dict))['Neurons_norm'].shape[0]
+        pool = np.arange(n_neurons)
+        if unit_regions is not None:
+            groups = np.asarray(unit_regions[rd]['group'])
+            assert len(groups) == n_neurons, (rd, len(groups), n_neurons)
+            pool = np.flatnonzero(np.isin(groups, list(REGION_GROUPS[args.region_group])))
+            if args.subsample_neurons is not None and len(pool) < args.subsample_neurons:
+                skipped[rd] = f'{len(pool)} {args.region_group} units < {args.subsample_neurons}'
+                print(f'  SKIP {rd}: {skipped[rd]}', flush=True)
+                continue
+            if len(pool) < 2:
+                skipped[rd] = f'{len(pool)} {args.region_group} units'
+                continue
+        if args.subsample_neurons is not None and len(pool) > args.subsample_neurons:
+            subsets = [np.sort(rng.choice(pool, args.subsample_neurons, replace=False))
+                       for _ in range(args.n_draws)]
+        elif unit_regions is not None:
+            subsets = [pool]          # exactly the target (or no subsampling): the whole group once
+        else:
+            subsets = [None]          # fewer neurons than the target: one full draw
+        draws, res = [], None
+        for subset in subsets:
+            res = lrg.run_reward_progress_lda_analysis(
+                data_dic, rd, valid_sessions=valid_sessions_dic[rd], neuron_subset=subset,
+                min_trials=args.min_trials, conjunction=args.conjunction, plot=False,
+                n_pcs=args.n_pcs)
+            plt.close('all')
+            if res is None:
+                break
+            draws.append(lrg.run_joint_lda_readout(res, n_shuffles=args.n_shuffles,
+                                                   ridge_alpha=args.ridge_alpha,
+                                                   verbose=len(subsets) == 1))
+        if res is None or not draws:
             skipped[rd] = 'run_reward_progress_lda_analysis returned None (see log)'
             continue
+        res['n_neurons_total'] = n_neurons
+        res['n_neurons_pool'] = int(len(pool))
+        res['region_group'] = args.region_group
+        res['neuron_subsets'] = None if (len(subsets) == 1 and subsets[0] is None) else subsets
         results_by_recday[rd] = res
-        readout[rd] = lrg.run_joint_lda_readout(res, n_shuffles=args.n_shuffles,
-                                                ridge_alpha=args.ridge_alpha)
+        readout[rd] = draws[0] if len(draws) == 1 else lrg.aggregate_draw_readouts(draws)
+        if len(draws) > 1:
+            print(f"  {len(draws)} draws of {args.subsample_neurons}/{n_neurons} neurons: "
+                  f"seconds r {readout[rd]['sec_r']:.2f} (draw sd {np.nanstd(readout[rd]['sec_r_draws']):.2f}), "
+                  f"trial MAE {readout[rd]['key_mae']:.2f}, progress acc {readout[rd]['prog_acc']:.3f}")
         if args.legacy_decoding:
             decoding_results[rd] = {}
             for target in ('progress', 'reward'):
@@ -126,9 +189,15 @@ def main():
     out = args.out or OUT_DEFAULT[args.dataset]
     if not args.out and args.n_pcs is not None:
         out = out.replace('.pkl', f'_pcs{args.n_pcs}.pkl')
+    if not args.out and args.region_group is not None:
+        out = out.replace('.pkl', f'_grp{args.region_group}.pkl')
+    if not args.out and args.subsample_neurons is not None:
+        out = out.replace('.pkl', f'_sub{args.subsample_neurons}.pkl')
     os.makedirs(os.path.dirname(out), exist_ok=True)
     payload = dict(dataset=args.dataset, conjunction=args.conjunction, min_trials=args.min_trials,
-                   n_pcs=args.n_pcs,
+                   n_pcs=args.n_pcs, subsample_neurons=args.subsample_neurons,
+                   region_group=args.region_group,
+                   n_draws=args.n_draws if args.subsample_neurons is not None else 1, seed=args.seed,
                    n_shuffles=args.n_shuffles, ridge_alpha=args.ridge_alpha, recdays=recdays,
                    valid_sessions_dic=valid_sessions_dic, results_by_recday=results_by_recday,
                    readout=readout, skipped=skipped, elapsed_s=time.time() - t0)

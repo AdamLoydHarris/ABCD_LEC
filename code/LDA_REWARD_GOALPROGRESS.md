@@ -165,6 +165,107 @@ Reading:
   PFC's were absent at both. "LD1 = time, LD2 = progress" describes the all-sessions fit in a
   high-dimensional PCA space, not a held-out property of either region.
 - Still open: LEC recdays carry ~90 neurons vs PFC's ~50, so the 15 PCs summarise more cells.
-  A neuron-subsampled LEC run (PFC's median count, repeated draws) is the remaining control
+  A neuron-subsampled run (PFC's median count, repeated draws) is the remaining control
   before "LEC carries more time-in-session information" is a claim rather than a description.
   Five LEC mice vs seven PFC mice.
+
+## Anatomy: does the LEC time readout track the fraction of units actually in ENTl? — 2026-09-14
+
+Per-unit labels from `unit_regions.pkl` (Neuron_raw row order; counts match the LDA's
+n_neurons on all 22 recdays). Spearman across the 22 LEC recdays, 15-PC run:
+
+| readout | vs ENTl fraction | vs SUB/ProS fraction | vs CA1/HPF fraction | vs n units |
+|---|---|---|---|---|
+| seconds r | +0.32 (p 0.15) | -0.31 | +0.31 | **+0.70 (p < 0.001)** |
+| trial MAE | -0.40 (p 0.06) | +0.21 | -0.01 | **-0.46 (p 0.03)** |
+| progress acc | +0.35 (p 0.11) | -0.22 | -0.16 | **+0.59 (p 0.004)** |
+
+Per mouse (composition = mean fraction of units; 15-PC readouts):
+
+| mouse | recdays | units | ENTl | ENTl-deep | SUB/ProS | CA1/HPF | ENTm | seconds r | trial MAE | progress acc |
+|---|---|---|---|---|---|---|---|---|---|---|
+| ah08 | 4 | 152 | 1.00 | 0.22 | 0.00 | 0.00 | 0.00 | 0.59 | 2.11 | 0.64 |
+| ah10 | 5 | 154 | 0.50 | 0.49 | 0.23 | 0.15 | 0.03 | 0.71 | 2.07 | 0.64 |
+| ly05 | 3 | 94 | 0.44 | 0.35 | 0.15 | 0.28 | 0.06 | 0.41 | 2.84 | 0.40 |
+| ly06 | 5 | 71 | 0.41 | 0.37 | 0.39 | 0.00 | 0.14 | 0.35 | 2.63 | 0.56 |
+| ly07 | 5 | 85 | 0.21 | 0.21 | 0.34 | 0.00 | 0.42 | 0.51 | 2.69 | 0.60 |
+
+Per-mouse Spearman(ENTl fraction, seconds r) = +0.60 (n = 5, p = 0.28); the two best mice
+(ah10, ah08) are also the two with twice the units, so ENTl fraction and unit count are
+confounded across mice, and ly07 (21 % ENTl, 42 % ENTm) reads out time as well as ah08.
+Reading: the recday-level covariate that predicts the readout is **how many units were
+recorded**, not their ENTl share; nothing here separates ENTl from SUB/CA1. The direct test is a
+region-restricted, count-matched readout (ENTl-deep vs SUB/ProS units within the same recdays,
+the `anatomy_split` primary contrast, 3 mice), not a correlation over 5 mice. At the 75 % PCA
+rule the LD1-vs-seconds alignment correlated with ENTl fraction (+0.69) and against SUB/ProS
+(-0.55), but that measure collapsed at 15 PCs (+0.22, +0.05), so it is the dimensionality
+artefact again.
+
+## Neuron-count-matched control — 2026-09-14, `--subsample-neurons 50 --n-draws 10`
+
+Every recday with more than 50 neurons is subsampled to 50 at random, 10 draws (seed 0), the
+joint LDA + readout run per draw with 200 circular-shift refits; scores are averaged over draws
+and the nulls pooled (2000 per recday; `aggregate_draw_readouts`). Recdays at or below 50
+neurons run once with all neurons. PCA keeps the 75 % rule. Both datasets, so PFC's large
+recdays (up to 117 neurons) are capped too. Written to `reward_progress_sub50.{pkl,csv}`,
+figure `lec_vs_pfc_decoding_sub50.svg`. Results (jobs 3608161 PFC, 3608162 LEC), mean over
+recdays, "sig" = recdays with p < 0.05:
+
+| held-out score | LEC all (111 units, 31.5 PCs) | LEC 50 units (19 PCs) | PFC all (52 units, 19.3 PCs) | PFC ≤50 units (36 mean, 15 PCs) |
+|---|---|---|---|---|
+| time: trial MAE (null 3.3) | 2.36 (19/22) | 2.63 (18/22) | 2.71 (21/24) | 2.76 (21/24) |
+| time: seconds r | 0.54 (21/22) | 0.39 (19/22) | 0.26 (22/24) | 0.21 (20/24) |
+| goal progress, balanced acc | 0.57 (19/22) | 0.56 (18/22) | 0.65 (24/24) | 0.64 (24/24) |
+| joint class acc | 0.100 | 0.086 | 0.093 | 0.089 |
+| held-out LD1 vs seconds, \|r\| | 0.44 | 0.16 | 0.09 | 0.07 |
+| held-out LD2 vs progress, \|rho\| | 0.32 | 0.13 | 0.12 | 0.10 |
+
+LEC per mouse at 50 units, seconds r: ah08 0.41, ah10 0.46, ly05 0.29, ly06 0.35, ly07 0.40
+(all five above PFC's 0.21 mean; PFC mice range -0.01 to 0.66).
+
+Reading: halving LEC's neurons costs it about a third of its time readout (seconds r 0.54 →
+0.39, trial MAE 2.36 → 2.63) while progress is untouched (0.57 → 0.56); PFC barely moves because
+most of its recdays were already at or below 50 (mean 36 after the cap, so the match is still
+imperfect in PFC's favour on progress and against it on time). At matched count LEC still
+reads out time better (0.39 vs 0.21) and PFC still reads out progress better (0.56 vs 0.64).
+The axis alignment collapses again (0.44 → 0.16). Descriptive at 5 vs 7 mice.
+
+## Within-recday anatomy test — 2026-09-14, `--region-group ENTl|SUBCA1 --subsample-neurons 25 --n-draws 10`
+
+The direct test the correlation above cannot give: the joint LDA and readout on **ENTl units
+only** (ENTl-sup + ENTl-deep) and on **SUB/ProS + CA1/HPF units only**, 25 randomly drawn units
+per recday, 10 draws, 200 circular-shift refits per draw, nulls pooled (`aggregate_draw_readouts`),
+75 % PCA rule. Group membership from `unit_regions.pkl` (Neuron_raw row order). Recdays with
+fewer than 25 units in a group are skipped for that group: 19 recdays qualify for ENTl (ah08,
+ah10, ly05, 4 of ly06), 20 for SUB/CA1 (ah10, ly05, ly06, ly07), **14 for both (ah10, ly05,
+ly06)** -- the paired comparison uses those 14; mice are the replicates (3). Pickles
+`reward_progress_grpENTl_sub25.pkl`, `reward_progress_grpSUBCA1_sub25.pkl`; figure
+`lec_ENTl_vs_SUBCA1_sub25.svg`.
+
+Results (jobs 3608330 ENTl, 3632999 SUB/CA1 -- the first SUB/CA1 job died on a list-vs-array
+comparison for a recday with exactly 25 group units; fixed in the runner). ENTl ran on 16
+recdays (4 mice), SUB/CA1 on 18 (4 mice); the session gate removed two of the 14 paired recdays,
+leaving **12 paired recdays in 3 mice (ah10, ly05, ly06)**. Paired comparison, mean over the 12,
+Wilcoxon signed-rank across recdays (descriptive: recdays within a mouse are not independent):
+
+| held-out score, 25 units | ENTl | SUB/ProS + CA1 | ENTl better in | Wilcoxon p |
+|---|---|---|---|---|
+| time: trial MAE (null 3.3) | 2.84 | 3.09 | 10/12 | 0.042 |
+| time: seconds r | 0.29 | 0.12 | 10/12 | 0.034 |
+| time: seconds MAE / span | 0.27 | 0.31 | 10/12 | 0.064 |
+| goal progress, balanced acc | 0.55 | 0.51 | 10/12 | 0.003 |
+| joint class acc (chance 0.033) | 0.075 | 0.063 | 10/12 | 0.009 |
+
+Per mouse (paired recdays), seconds r ENTl vs SUB/CA1: ah10 0.38 vs 0.15, ly05 0.24 vs -0.02,
+ly06 0.23 vs 0.17; progress 0.61 vs 0.56, 0.43 vs 0.42, 0.55 vs 0.52. All three mice go the
+same way on time; ly06's difference is small.
+
+Reading: at equal unit count and within the same recordings, the entorhinal units carry more
+time-in-session information than the subicular / hippocampal units, and slightly more progress
+information. This is the first result in this document that separates ENTl from the rest of
+the probe rather than describing the mixture. Caveats, in order: 3 mice; SUB/ProS fires ~3x
+ENTl-deep (`docs/handoff/README.md` §4) and no rate-matching was applied here, so a
+rate-matched draw (`anatomy_split.rate_match`) is the next robustness check; ENTl in these mice
+is mostly ENTl-deep (ah08's superficial units have no SUB/CA1 counterpart); with 25 units the
+absolute readouts are far below the full-recday ones (seconds r 0.29 vs 0.54), so this is a
+per-unit comparison, not a statement about what either population as a whole encodes.

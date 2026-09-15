@@ -308,3 +308,26 @@ LEC-specific ones are also in `EDITS.md` under "Deliberately NOT edited".
 | `Neurons_norm` vs pipeline: "a large discrepancy is a real finding" | identical (r = 1.0000, 20,809 neuron-sessions) |
 | V5 reference 887/392/129 | superseded by the corrected pool 1170/544/203; his code gives 1144/402/94 (ElasticNet) |
 | Figure5_Figure6 "should run" | needs LEC-03 and ~26 h (cell 17 scales with neurons x sessions) |
+
+## 2026-09-15 — Prospective lags through his own code (VARIANT-PRO, `Figure5_Regression_prospective.ipynb`)
+
+Cell 15's bump model run on the time-reversed session and un-reversed (the V5 `future`
+construction); every output namespaced `_prospective`. Job 3594655, 3.9 h, EXIT=0. Sign check:
+the prospective prep arrays equal `elasticnet_regression_v5.generate_regressors_raw(...,
+'future')` to max|diff| = 0 on all 6 sessions of ah08_20250613 (and the retrospective ones equal
+`'past'` the same way), so the two directions are exactly his model run both ways. Prep arrays
+(~16 GB) deleted after cell 26; coefficients and correlations kept.
+
+Poisson (alpha = 1), State_95 pool, his cell-26 semantics, 25 recdays / 2851 units:
+
+| panel | retrospective (deposited direction) | prospective |
+|---|---|---|
+| all state-tuned | n 1235, r +0.362, t 35.4 | n 1154, r +0.434, t 38.3 |
+| non-zero-lag, 30° excluded | n 541, r +0.204, t 9.9 | n 367, r +0.136, t 5.5 |
+| non-zero-lag, 90° excluded | n 153, r +0.092, t 2.15 | n 98, r +0.075, t 1.36 |
+
+Lag-0 (place-like) prediction is as good or better prospectively; the non-zero-lag panels are
+weaker prospectively in both count and effect size. Same ordering as V5 spec 12 vs 13 (his
+criterion + gate, `repro_poisson_v5_{past,future}`): 30° panel 558 (t 9.6) vs 359 (t 5.0),
+90° 165 (t 2.5) vs 92 (t 1.4). Stats in `logs/figure5_stats.{json,csv}` (`lag_set` =
+`12-lag PROSPECTIVE (VARIANT-PRO)`).

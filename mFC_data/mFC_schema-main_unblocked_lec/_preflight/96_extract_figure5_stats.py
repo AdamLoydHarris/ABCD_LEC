@@ -78,7 +78,8 @@ def run(model_prefix, addition2=''):
                        for rd in found]).astype(bool)
 
     out = dict(model='Poisson' if model_prefix else 'ElasticNet',
-               lag_set='12-lag' if addition2 == '' else '24-lag (_beyond)',
+               lag_set={'': '12-lag', '_beyond': '24-lag (_beyond)',
+                        '_prospective': '12-lag PROSPECTIVE (VARIANT-PRO)'}.get(addition2, addition2),
                recdays_found=len(found), recdays_total=len(days),
                n_neurons=int(state.size), n_state_tuned=int(state.sum()),
                n_phase_tuned=int(phase.sum()), panels={})

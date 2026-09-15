@@ -330,3 +330,19 @@ lasso α ∈ {0.01, 0.003, 0.001}, elastic net l1 = 0.5 at α = 0.003; jobs 3595
 the synthetic they already correlate only 0.988 — and the **all-zero-fit fraction per α**: under an
 L1 penalty a fixed α is a firing-rate filter (control 13's algebra), so n changes with α.
 Results: pending.
+
+## 2026-09-15 — spec 13 landed: the V5 2×2×2 is complete
+
+`repro_poisson_v5_future_20260915_025940` (LEC, Poisson, his criterion + positive-mean gate,
+25/25 recdays, 5.0 h). Against its past counterpart `repro_poisson_v5_past_20260908_192043`,
+his semantics, linear readout (the exp readout agrees to 3 decimals):
+
+| panel | past | future | paper |
+|---|---|---|---|
+| all state-tuned, ≥1 finite fold | 1256, r 0.362, t 35.1 | 1158, r 0.441, t 39.0 | 489, t 10.7 |
+| 30°, ≥1 passing fold | 558, r 0.200, t 9.6 | 359, r 0.131, t 5.0 | 346, t 4.7 |
+| 90°, ≥1 passing fold | 165, r 0.101, t 2.5 | 92, r 0.079, t 1.4 | 229, t 2.8 |
+
+Same ordering as his own code run both ways (`LEC_REPRODUCTION.md` 2026-09-15: 541 → 367 at
+30°, 153 → 98 at 90°): retrospective anchoring carries the non-zero-lag effect in LEC;
+prospective matches or beats it only at lag 0.

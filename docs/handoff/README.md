@@ -248,3 +248,16 @@ runner; `.pyc` untracked, outputs and the El-Gaby run trees ignored).
   12 -> 5 recdays) and was absent in PFC, and trial number maps onto seconds identically in the
   two datasets (r 0.98 both; CV 0.40 vs 0.38; drift -4 s/trial both; LEC trials ~15 % longer).
   Remaining confound: neuron count (90 vs 50) -- a subsampled-LEC run is the next control.
+  **2026-09-15, 50-unit subsample (10 draws):** LEC seconds r 0.54 → 0.39, trial MAE 2.36 → 2.63,
+  progress unchanged; PFC 0.26 → 0.21 (mean 36 units after the cap). LEC still > PFC on time,
+  PFC > LEC on progress at matched count. Anatomy: recday readouts track unit count (rho +0.70),
+  not ENTl share (+0.32). **Within-recday ENTl-25 vs SUB/CA1-25 (12 paired recdays, 3 mice):**
+  ENTl units read out time better (seconds r 0.29 vs 0.12, trial MAE 2.84 vs 3.09; 10/12 recdays,
+  all 3 mice same direction) and progress slightly better (0.55 vs 0.51). First ENTl-vs-rest
+  separation in the LDA work; not yet rate-matched (SUB fires ~3x) -- `anatomy_split.rate_match`
+  next.
+- **El-Gaby prospective lags landed 2026-09-15** (his code both ways, sign-checked to
+  max|diff| = 0 against V5 in both regions): LEC 30° panel 541 → 367, 90° 153 → 98; PFC 296 → 253,
+  79 → 50 (t -0.26). Retrospective carries the non-zero-lag effect everywhere; write-ups in the
+  two `*REPRODUCTION.md` dated 2026-09-15. V5 spec 13 (LEC Poisson future, repro + gate) also
+  landed: 30° 558 (past) vs 359 (future) -- `ELASTICNET_V5.md` 2026-09-15.

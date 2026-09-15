@@ -565,3 +565,18 @@ downstream number differs, and the deposit contains no way to tell which was his
 Against that target the result so far is good: every deterministic checkpoint in Figure2
 matches exactly, including the 2182 / 1287 / 860 / 1252 neuron counts, and the only
 divergences trace to an unseeded permutation test in his own code.
+
+## 2026-09-15 — Prospective lags through his own code (VARIANT-PRO, `Figure5_Regression_prospective.ipynb`)
+
+Same variant as the LEC copy (cell 15 on the time-reversed session, `_prospective` suffix); job
+3594658, 3.4 h, EXIT=0; sign check vs V5 `future` regressors: max|diff| = 0 on all 6 sessions of
+ab03_01092023. Prep arrays deleted after cell 26. Poisson (alpha = 1), State_95 pool, his cell-26
+semantics, 25 recdays / 1252 units:
+
+| panel | retrospective | prospective |
+|---|---|---|
+| all state-tuned | n 581, r +0.272, t 17.1 | n 537, r +0.271, t 15.1 |
+| non-zero-lag, 30° excluded | n 296, r +0.174, t 6.8 | n 253, r +0.110, t 3.4 |
+| non-zero-lag, 90° excluded | n 79, r +0.160, t 2.67 | n 50, r -0.022, t -0.26 |
+
+Retrospective > prospective at non-zero lags, as in LEC and as in V5 specs 2 vs 5.
