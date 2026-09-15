@@ -580,3 +580,14 @@ semantics, 25 recdays / 1252 units:
 | non-zero-lag, 90° excluded | n 79, r +0.160, t 2.67 | n 50, r -0.022, t -0.26 |
 
 Retrospective > prospective at non-zero lags, as in LEC and as in V5 specs 2 vs 5.
+
+**Figure-file collision, found and fixed 2026-09-15 10:40.** Cell 38 names its SVGs
+`Output_folder + addition + 'GLM_analysis_<name>.svg'` with `addition = 'Poisson_'` only, so the
+prospective run's cell 38 overwrote the three retrospective `Poisson_GLM_analysis_*.svg` (the
+`.npy` results and `logs/figure5_stats.{json,csv}` were always namespaced and unaffected).
+Fix: VARIANT-PRO-10 puts `addition2` into the figure name
+(`_prospectivePoisson_GLM_analysis_*.svg`); the retrospective figures were regenerated from
+the intact retrospective correlation files by re-running cells 32/38 of the deposited notebook
+(`executed/Figure5_Regression_figs_only.ipynb`), and the prospective ones by the same cells of
+the rebuilt variant (`executed/Figure5_Regression_prospective_figs_only.ipynb`). The full-run
+executed notebooks are unchanged records.

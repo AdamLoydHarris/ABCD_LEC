@@ -151,3 +151,5 @@ undeposited inputs even on PFC.
 > dated 2026-09-15. `96_extract_figure5_stats.py` now iterates `_prospective`. The Figure2 ->
 > bridge -> Figure3_fast -> checks chain (3591210-3591213) is still queued behind
 > Figure5_Figure6 (3591114).
+> Figure-name collision fixed the same morning (VARIANT-PRO-10; see `LEC_REPRODUCTION.md`).
+> `20_apply_edits.py` variants now support `line_subs` for statements that continue with a backslash.

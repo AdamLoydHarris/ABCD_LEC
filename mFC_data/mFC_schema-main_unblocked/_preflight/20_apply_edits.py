@@ -368,6 +368,13 @@ VARIANTS['prospective'] = dict(
         ('PRO-08', 32, "    addition2=''", "    addition2='_prospective'"),
         ('PRO-09', 38, "    addition2=''", "    addition2='_prospective'"),
     ],
+    # cell 38 names its SVGs from `addition` alone, so the first prospective run (2026-09-15)
+    # overwrote the retrospective Poisson figures; the suffix goes into the file name too. The
+    # statement continues with a backslash, hence a whole-line substitution.
+    line_subs=[
+        ('PRO-10', 38, 62, "plt.savefig(Output_folder+addition+'GLM_analysis_'",
+         "    plt.savefig(Output_folder+addition2+addition+'GLM_analysis_'+name+'.svg',\\"),
+    ],
 )
 
 
@@ -394,6 +401,19 @@ def write_variant(name):
         marker = f'   # VARIANT-{eid}'
         src_txt = src_txt.replace(old, new + marker)
         cell['source'] = [l + '\n' for l in src_txt.split('\n')[:-1]] + [src_txt.split('\n')[-1]]
+        applied.append(eid)
+
+    # whole-line replacement with the marker on its own line above: for statements that continue
+    # with a backslash, where a trailing comment would swallow the continuation
+    for eid, ci, line, guard, new_line in v.get('line_subs', []):
+        cell = nb['cells'][ci]
+        lines = ''.join(cell['source']).split('\n')
+        if guard not in lines[line]:
+            raise SystemExit(f'FATAL variant {name}: {v["src"]} c{ci} L{line} '
+                             f'guard {guard!r} not found; actual {lines[line]!r}')
+        indent = _indent_of(lines[line])
+        lines[line:line + 1] = [f'{indent}# VARIANT-{eid}', new_line]
+        cell['source'] = [l + '\n' for l in lines[:-1]] + [lines[-1]]
         applied.append(eid)
 
     for eid, ci, line, guard in v['ops']:
