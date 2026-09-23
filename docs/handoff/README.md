@@ -261,3 +261,40 @@ runner; `.pyc` untracked, outputs and the El-Gaby run trees ignored).
   79 → 50 (t -0.26). Retrospective carries the non-zero-lag effect everywhere; write-ups in the
   two `*REPRODUCTION.md` dated 2026-09-15. V5 spec 13 (LEC Poisson future, repro + gate) also
   landed: 30° 558 (past) vs 359 (future) -- `ELASTICNET_V5.md` 2026-09-15.
+- **PFC Figure7 (sleep/replay) is NOT reproduced** (verified 2026-09-15): it ran on 2026-09-11
+  under `--allow-errors` and 18 of 23 cells errored; cell 11 expects an 18-column per-mouse
+  MetaData sheet, the deposit has 12 (+6-column `_sleep`). No Figure7 output exists for either
+  region. The sleep TODO starts with an F7 unblocking edit that rebuilds that table
+  (`mFC_data/mFC_schema-main_unblocked/REPRODUCTION.md` §Figure7).
+  **Unblocked 2026-09-15** (`12_make_figure7_inputs.py` overlay: 18-column sheets, ISO dates, repaired
+  Ephys, 21-recday day list; edits F7-03/04; LEC: shards + real session arrays, LEC-05/06). PFC ran
+  clean (23 cells, 0 errors). **Fig. 7d's V is not reproduced**: the far arm (180-360°, r > 0, t +3.7)
+  reproduces, the close arm (0-180°, r < 0) does not (t -1.15 vs his -3.59 / paper -5.16); his own
+  stored cell 86 is a V, ours a sawtooth, in both the all-recday run and the variant that mimics his
+  12-recday state. The sleep shards are his; the pair sets and angles come from our Figure3 /
+  Figure5_Figure6 runs (none deposited) -- that is where it enters. LEC Figure7 (3633768) queued
+  behind the attempt-2c chain.
+
+**2026-09-18, mEC integration started** -- survey and plan in `docs/handoff/MEC_INTEGRATION.md`. The
+cohort-7 mEC data (bp01, bp02, bp04; NP1.0) was already sorted with this repo's KS4 pipeline in Aug 2025
+(251 QC units over 12 merged blocks, 606 over 24 single days) but never aligned to behaviour. Plan: a
+`DATASET` switch in `recday_registry` and the `code/preprocessing/*.py` stages, LEC defaults unchanged,
+writing `data/processed_data/data_dic_mec.pkl` with both merged and single-day recdays tagged. Rule
+from the user: nothing is deleted or overwritten; fixes are copies.
+
+**2026-09-18, second pass (same document, §7):** the port surfaced alignment defects in the **LEC v1
+data** -- `Neuron_raw` origins off by 2-8 bins for ah08/ly06/ly05 (partner box's rsync pulse, probe
+reference offsets, one recday on an unrelated train), 59.95 fps cameras tracked at 60 fps, cameras
+dropping frames in bursts of up to 230 frames -- none visible to the old validators. Fixes: rsync
+trains from raw TTL, spikes binned on the fitted clock (`neuron_raw_v2/`), a monotone-alignment frame
+clock (`code/preprocessing/frame_clock.py`), tracking into `data/processed_v2/`, all to be assembled
+as `data_dic_lec_v2.pkl` beside the untouched v1 (`load_data_dic(version='v2')`). Open-field and
+object sessions now carry tracking in cm plus `session_type`, `arena`, `objects` (LEC box: corners
+clicked per session, 50 cm box frame; objects from `object_click.ipynb` only).
+
+**2026-09-19/20, bp histology registered** (`code/histology_refit/MEC_REGISTRATION.md`, plan
+`MEC_REGISTRATION_PLAN.md`): BP1/BP2/BP3 = bp01/bp02/**bp04** to `allen_mouse_10um` with the LEC brainreg
+recipe (CPU partition, 220 GB); bp02 and bp04 clean, bp01's left hemisphere folded and unusable
+(a third of it is missing). The raw AP data give a brain surface per recording
+(`probe_surface_from_raw.py`): bp01 tip ~3.5 mm deep, bp04 ~3.7 mm, bp02 >= 4.0 mm. Probe track
+and unit labels not yet done.

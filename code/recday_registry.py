@@ -43,13 +43,43 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+#: Which dataset this process works on. `TSA_DATASET=mec` in the environment switches every
+#: path and mouse list below to the cohort-7 mEC tree; the CLI scripts set it from their
+#: `--dataset` flag before importing this module. Unset means LEC, and every value is then
+#: what it was before the switch existed (docs/handoff/MEC_INTEGRATION.md).
+DATASET = os.environ.get("TSA_DATASET", "lec")
+
+#: Per-dataset facts that are not derivable from the tree. `qc_gate` records the
+#: `get_single_units` thresholds the sorting ran with -- the amplitude threshold differs by
+#: probe (NP2 per-shank CAR needed 20; NP1 kept the original 40) -- so a re-gate can be
+#: reproduced without reading the merge script's history.
+DATASETS = {
+    "lec": dict(
+        root=Path(__file__).resolve().parents[1],
+        mice=("ah08", "ah10", "ly05", "ly06", "ly07"),   # ah09 has histology but no recordings
+        probe="Neuropixels 2.0, 4-shank",
+        qc_gate=dict(isi_violations_ratio_lt=0.1, amplitude_cutoff_lt=0.1, firing_rate_gt=0.1,
+                     presence_ratio_gt=0.9, amplitude_median_abs_gt=20, sd_ratio_lt=3),
+    ),
+    "mec": dict(
+        root=Path("/ceph/behrens/adam_harris/Taskspace_abstraction_mEC"),
+        mice=("bp01", "bp02", "bp04"),
+        probe="Neuropixels 1.0",
+        qc_gate=dict(isi_violations_ratio_lt=0.1, amplitude_cutoff_lt=0.1, firing_rate_gt=0.1,
+                     presence_ratio_gt=0.9, amplitude_median_abs_gt=40, sd_ratio_lt=3),
+    ),
+}
+if DATASET not in DATASETS:
+    raise KeyError(f"TSA_DATASET={DATASET!r}; known datasets: {sorted(DATASETS)}")
+
+REPO_ROOT = DATASETS[DATASET]["root"]
 EPHYS_ROOT = REPO_ROOT / "data" / "preprocessed" / "ephys"
 METADATA_DIR = REPO_ROOT / "data" / "metadata"
 PYCONTROL_DIR = REPO_ROOT / "data" / "raw" / "pycontrol"
 
-#: Mice with ephys. ah09 has histology but no recordings.
-EPHYS_MICE = ("ah08", "ah10", "ly05", "ly06", "ly07")
+#: Mice with ephys, for the active dataset.
+EPHYS_MICE = DATASETS[DATASET]["mice"]
+QC_GATE = DATASETS[DATASET]["qc_gate"]
 
 #: Recdays that must not enter any `data_dic`-joined analysis, with the reason.
 #: Empty is the healthy state -- an entry here means known-bad data is on disk.
@@ -121,15 +151,55 @@ def blocks_for(mouse: str) -> tuple[str, ...]:
 
 
 def block_to_recday(mouse: str, block: str) -> str:
-    """``ah08`` + ``2025-06-13_2025-06-15_preprocessed`` -> ``ah08_20250613_20250615``."""
+    """``ah08`` + ``2025-06-13_2025-06-15_preprocessed`` -> ``ah08_20250613_20250615``.
+
+    A single-day block (``2024-03-21_preprocessed``, mEC only) gives ``bp01_20240321``.
+    """
     dates = re.findall(r"(\d{4})-(\d{2})-(\d{2})", block)
     return f"{mouse}_" + "_".join("".join(d) for d in dates)
 
 
+#: Most dates one sort may concatenate. The July 2025 ABCDE week is sorted as one 6-day block
+#: so that the interleaved ABCD and ABCDE sessions share a unit set; 2-day blocks are still
+#: the June default. A cap is kept so a malformed name still raises instead of parsing.
+MAX_RECDAY_DATES = 6
+
+
+def recday_dates(recday: str) -> tuple[str, tuple[str, ...]]:
+    """``ly05_20250618_20250619`` -> ``('ly05', ('20250618', '20250619'))``.
+
+    One to `MAX_RECDAY_DATES` dates. The mEC tree has both 2-day merged sorts and single-day
+    sorts of the same recordings; LEC June is 2-day, LEC July is one 6-day block. Anything
+    that builds a path or a filter from a recday's dates should go through this rather than
+    `split_recday`.
+    """
+    mouse, *dates = str(recday).split("_")
+    if (not 1 <= len(dates) <= MAX_RECDAY_DATES
+            or not all(re.fullmatch(r"\d{8}", d) for d in dates)):
+        raise ValueError(f"not a recday name: {recday!r}")
+    return mouse, tuple(dates)
+
+
+def recday_kind(recday: str) -> str:
+    """``'merged'`` for a multi-date recday, ``'single'`` for a one-date recday.
+
+    The two kinds hold the same physical units twice, so a pooled analysis must pick one.
+    A 6-day July block is `merged` like a 2-day June one: both are multi-day sorts, and no
+    single-day sort of the same recordings exists to collide with.
+    """
+    return "single" if len(recday_dates(recday)[1]) == 1 else "merged"
+
+
 def split_recday(recday: str) -> tuple[str, str, str]:
-    """``ly05_20250618_20250619`` -> ``('ly05', '20250618', '20250619')``."""
-    mouse, date1, date2 = str(recday).split("_")
-    return mouse, date1, date2
+    """``ly05_20250618_20250619`` -> ``('ly05', '20250618', '20250619')``.
+
+    Two-date recdays only; raises on any other length so a caller that assumes two dates
+    fails loudly instead of building a path from a missing one. Use `recday_dates`.
+    """
+    mouse, dates = recday_dates(recday)
+    if len(dates) != 2:
+        raise ValueError(f"{recday} has {len(dates)} date(s), not 2; use recday_dates()")
+    return mouse, dates[0], dates[1]
 
 
 def recday_to_block(recday: str) -> str:
@@ -137,7 +207,7 @@ def recday_to_block(recday: str) -> str:
 
     Raises `KeyError` if no block matches -- never falls back to a positional guess.
     """
-    mouse, _, _ = split_recday(recday)
+    mouse, _ = recday_dates(recday)
     for block in blocks_for(mouse):
         if block_to_recday(mouse, block) == str(recday):
             return block
@@ -147,7 +217,7 @@ def recday_to_block(recday: str) -> str:
 
 def kilosort_dir(recday: str) -> Path:
     """`kilosort_output` directory for the block whose dates match `recday`."""
-    mouse, _, _ = split_recday(recday)
+    mouse, _ = recday_dates(recday)
     return EPHYS_ROOT / mouse / recday_to_block(recday) / "kilosort_output"
 
 
@@ -159,9 +229,18 @@ def qc_unit_count(recday: str) -> int:
     return int(len(np.load(kilosort_dir(recday) / "QC_single_units.npy")))
 
 
-def all_recdays() -> list[str]:
-    """Every recday the ephys directory can support, from the block directories."""
-    return sorted(block_to_recday(m, b) for m in EPHYS_MICE for b in blocks_for(m))
+def all_recdays(kind: str | None = None) -> list[str]:
+    """Every recday the ephys directory can support, from the block directories.
+
+    `kind` restricts to ``'merged'`` or ``'single'`` recdays; the default (None) keeps
+    every block on disk, which for LEC is identical to the pre-switch behaviour.
+    """
+    recdays = sorted(block_to_recday(m, b) for m in EPHYS_MICE for b in blocks_for(m))
+    if kind is None:
+        return recdays
+    if kind not in ("merged", "single"):
+        raise ValueError(f"kind must be 'merged', 'single' or None, not {kind!r}")
+    return [r for r in recdays if recday_kind(r) == kind]
 
 
 # ---------------------------------------------------------------------------
@@ -184,46 +263,145 @@ def task_session_rows(recday: str) -> pd.DataFrame:
     (date, Behaviour). Row `i` is session `i` -- the same ordering the extraction uses
     to number sessions, and the same one `extract_pokes.sessions_for_mouse` reproduces.
     """
-    mouse, date1, date2 = split_recday(recday)
+    mouse, dates = recday_dates(recday)
     meta = pd.read_csv(METADATA_DIR / f"MetaData-{mouse}.csv", dtype=str)
     meta = meta.assign(_date=meta["Date"].map(_normalise_date))
-    rows = meta[meta["_date"].isin((date1, date2))
+    rows = meta[meta["_date"].isin(dates)
                 & meta["Behaviour"].notna()
                 & (meta["Behaviour"].astype(str) != "-")]
     return rows.sort_values(["_date", "Behaviour"]).reset_index(drop=True)
 
 
-def pycontrol_file(recday: str, session: int) -> Path:
-    """Path to the pyControl .txt for one session of a recday.
+#: Sheet `Structure_abstract` spellings -> the session types the pipeline distinguishes.
+_SESSION_TYPES = {"abcd": "ABCD", "abcde": "ABCDE", "abcd_ot": "ABCD_ot",
+                  "object": "object", "objectvector": "object", "objects": "object",
+                  "openfield": "openfield", "open_field": "openfield"}
 
-    Resolved from the recday's **own two dates**, so a file from another day can never be
-    returned: the filename carries the date, and it is checked against the recday name.
+
+def session_type(recday: str, session: int) -> str:
+    """``'ABCD' | 'ABCDE' | 'object' | 'openfield' | ...`` from the sheet's `Structure_abstract`.
+
+    LEC object sessions are typed `Object` and run the ABCD task file with no A_on; mEC ones are
+    `objectvector` on the pyControl-2 open-field task. Both become `'object'`. Unknown spellings
+    are returned stripped, so a caller can decide rather than crash.
     """
-    mouse, date1, date2 = split_recday(recday)
+    raw = str(task_session_rows(recday).iloc[session]["Structure_abstract"]).strip()
+    return _SESSION_TYPES.get(raw.lower(), raw)
+
+
+def pycontrol_file(recday: str, session: int) -> Path:
+    """Path to the pyControl file for one session of a recday.
+
+    Resolved from the recday's **own dates**, so a file from another day can never be
+    returned: the filename carries the date, and it is checked against the recday name.
+    ABCD sessions are pyControl-1 ``.txt``; the mEC open-field sessions are pyControl-2
+    ``.tsv`` with the same stem, tried second. LEC has ``.txt`` only, so its resolution is
+    unchanged.
+    """
+    mouse, dates = recday_dates(recday)
     rows = task_session_rows(recday)
     if session >= len(rows):
         raise KeyError(f"{recday} has {len(rows)} task sessions in the metadata, "
                        f"no session {session}")
     row = rows.iloc[session]
     date = str(row["_date"])
-    if date not in (date1, date2):
+    if date not in dates:
         raise AssertionError(f"{recday} s{session} resolved to date {date}")
     stamp = str(int(float(row["Behaviour"]))).zfill(6)
-    path = PYCONTROL_DIR / f"{mouse}-{date[:4]}-{date[4:6]}-{date[6:]}-{stamp}.txt"
-    if not path.exists():
-        raise FileNotFoundError(path)
-    return path
+    day = f"{date[:4]}-{date[4:6]}-{date[6:]}"
+    stem = PYCONTROL_DIR / f"{mouse}-{day}-{stamp}"
+    for suffix in (".txt", ".tsv"):
+        if stem.with_suffix(suffix).exists():
+            return stem.with_suffix(suffix)
+    # The stamp is hand-typed. Five mEC sessions have it 1-20 s off the real filename; LEC
+    # has none. Accept the UNIQUE file of that mouse on that same date within 60 s, so the
+    # date guarantee above still holds and a typo cannot pull in a neighbouring session.
+    near = [p for p in PYCONTROL_DIR.glob(f"{mouse}-{day}-??????.t??")
+            if p.suffix in (".txt", ".tsv")
+            and abs(_stamp_seconds(p.stem[-6:]) - _stamp_seconds(stamp)) <= STAMP_TOLERANCE_S]
+    if len(near) == 1:
+        return near[0]
+    raise FileNotFoundError(f"{stem}.txt|.tsv ({len(near)} files within {STAMP_TOLERANCE_S}s)")
+
+
+#: Seconds of hand-typed Behaviour-stamp error tolerated when the exact file is absent.
+STAMP_TOLERANCE_S = 60
+
+
+def match_ephys_stamp(recday: str, session: int, candidates) -> str | None:
+    """The concat recording time (``HH-MM-SS``) that session `session`'s sheet row names.
+
+    Exact match first; otherwise the UNIQUE candidate within `STAMP_TOLERANCE_S` on the same
+    date (bp02 2024-03-28 is typed ``14-30-34`` for the folder ``14-30-43``). `candidates` is
+    an iterable of (date_YYYYMMDD, time_HH-MM-SS) pairs, e.g. from
+    `recording_sessions_in_concat.csv`. Returns None when nothing qualifies.
+    """
+    row = task_session_rows(recday).iloc[session]
+    date, stamp = str(row["_date"]), str(row["Ephys"])
+    cands = [t for d, t in candidates if str(d) == date]
+    if stamp in cands:
+        return stamp
+    try:
+        want = _stamp_seconds(stamp.replace("-", ""))
+    except (ValueError, IndexError):
+        return None
+    near = [t for t in cands if abs(_stamp_seconds(t.replace("-", "")) - want) <= STAMP_TOLERANCE_S]
+    return near[0] if len(near) == 1 else None
+
+
+def _stamp_seconds(hhmmss: str) -> int:
+    return int(hhmmss[:2]) * 3600 + int(hhmmss[2:4]) * 60 + int(hhmmss[4:6])
+
+
+def metadata_stamp_discrepancies(verbose: bool = True) -> pd.DataFrame:
+    """Sessions whose metadata `Behaviour` stamp is not the pyControl filename's stamp.
+
+    Advisory, like `metadata_task_discrepancies`: the file was found by the 60 s rule and
+    the data is right; the spreadsheet is off by the seconds shown.
+    """
+    rows = []
+    for recday in all_recdays("merged") or all_recdays():
+        table = task_session_rows(recday)
+        for session, row in table.iterrows():
+            try:
+                path = pycontrol_file(recday, session)
+            except (FileNotFoundError, KeyError, AssertionError):
+                continue
+            typed = str(int(float(row["Behaviour"]))).zfill(6)
+            if path.stem[-6:] != typed:
+                rows.append({"recday": recday, "session": session, "metadata_Behaviour": typed,
+                             "pycontrol_stamp": path.stem[-6:],
+                             "offset_s": _stamp_seconds(path.stem[-6:]) - _stamp_seconds(typed)})
+    table = pd.DataFrame(rows)
+    if verbose:
+        print(f"{len(table)} Behaviour stamps resolved by the {STAMP_TOLERANCE_S}s rule"
+              + (":" if len(table) else ""))
+        if len(table):
+            print(table.to_string(index=False))
+    return table
 
 
 def pycontrol_active_poke(path: Path) -> tuple[int, ...] | None:
-    """The rewarded port sequence from a pyControl file's own `V ... active_poke` line.
+    """The rewarded port sequence from a pyControl file's own `active_poke` variable.
 
     Machine-written by the task, so this is ground truth for what the animal actually ran
-    -- unlike the hand-typed `Structure` column of the metadata CSV.
+    -- unlike the hand-typed `Structure` column of the metadata CSV. pyControl-1 ``.txt``
+    files carry it as a ``V <t> active_poke [..]`` line; pyControl-2 ``.tsv`` files as a
+    ``variable`` row whose JSON content has an ``active_poke`` key (the mEC open-field task
+    has none, so those return None).
     """
-    for line in Path(path).read_text().split("\n"):
+    import ast
+    import json
+    path = Path(path)
+    if path.suffix == ".tsv":
+        for line in path.read_text().split("\n"):
+            parts = line.split("\t")
+            if len(parts) == 4 and parts[1] == "variable" and "active_poke" in parts[3]:
+                value = json.loads(parts[3]).get("active_poke")
+                return tuple(int(x) for x in value) if value is not None else None
+        return None
+    for line in path.read_text().split("\n"):
         if line.startswith("V ") and "active_poke" in line:
-            import ast
             return tuple(ast.literal_eval(line[2:].split(" active_poke ")[1]))
     return None
 

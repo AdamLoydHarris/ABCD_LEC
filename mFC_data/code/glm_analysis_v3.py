@@ -478,7 +478,8 @@ def compute_poke_arrays(pokes, n_bins, max_duration_bins=_POKE_MAX_DURATION_BINS
 
 
 
-def load_data_dic(path=None, *, validate=True, apply_exclusions=True, verbose=True):
+def load_data_dic(path=None, *, dataset=None, recday_kind=None, version=None, validate=True,
+                  apply_exclusions=True, verbose=True):
     """Load a `data_dic` pickle, drop known-bad recdays, and check the pairing.
 
     Use this instead of a bare `pickle.load`. The two validators it runs are the only
@@ -490,7 +491,21 @@ def load_data_dic(path=None, *, validate=True, apply_exclusions=True, verbose=Tr
     Parameters
     ----------
     path : str, optional
-        Defaults to `../data/processed_data/data_dic_lec.pkl` relative to this file.
+        Defaults to `../data/processed_data/data_dic_lec.pkl` relative to this file, or to
+        `data_dic_<dataset>.pkl` under that dataset's tree when `dataset` is given.
+    dataset : {'lec', 'mec'}, optional
+        Which dataset the pickle belongs to. Must equal the registry's active dataset
+        (`TSA_DATASET` in the environment, read at import), because the validators below
+        check against that tree's sorted blocks and pyControl files. None means the
+        pre-existing LEC behaviour.
+    recday_kind : {'merged', 'single'}, optional
+        Keep only recdays of that kind. The mEC pickle holds both 2-day merged and
+        single-day recdays of the same recordings -- the same physical units twice -- so a
+        dataset that has both kinds REQUIRES a choice; LEC has merged only and needs none.
+    version : str, optional
+        A tagged rebuild, e.g. 'v2' -> `data_dic_lec_v2.pkl` (fitted rsync/frame clocks, object
+        and open-field sessions with tracking, `session_type`/`arena`/`objects` keys). None is
+        the pickle every existing result was computed from.
     validate : bool, default True
         Raise if any recday's `Neuron_raw` row count disagrees with the QC unit count of
         the sorted block it is named after, or if any session's `Task` disagrees with its
@@ -500,18 +515,37 @@ def load_data_dic(path=None, *, validate=True, apply_exclusions=True, verbose=Tr
     """
     import os
 
+    registry = _recday_registry()
+    if dataset is not None:
+        if registry is None:
+            raise RuntimeError("load_data_dic(dataset=...) needs recday_registry")
+        if dataset != registry.DATASET:
+            raise ValueError(f"dataset={dataset!r} but recday_registry is on {registry.DATASET!r}; "
+                             "set TSA_DATASET before importing (the CLI scripts do it from --dataset)")
+        if path is None:
+            path = os.path.join(str(registry.REPO_ROOT), 'data', 'processed_data',
+                                f'data_dic_{dataset}' + (f'_{version}' if version else '') + '.pkl')
     if path is None:
         path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                            '..', 'data', 'processed_data', 'data_dic_lec.pkl')
+                            '..', 'data', 'processed_data',
+                            'data_dic_lec' + (f'_{version}' if version else '') + '.pkl')
     data_dic = _load_pickle(path)
     if verbose:
         print(f"load_data_dic: {len(data_dic)} recdays from {os.path.basename(path)}")
 
-    registry = _recday_registry()
     if registry is None:
         if verbose:
             print("  recday_registry unavailable — exclusions and guards SKIPPED")
         return data_dic
+
+    kinds = {registry.recday_kind(str(k)) for k in data_dic} if hasattr(registry, 'recday_kind') else set()
+    if recday_kind is None and len(kinds) > 1:
+        raise ValueError(f"this data_dic holds {sorted(kinds)} recdays (the same units twice); "
+                         "pass recday_kind='merged' or 'single'")
+    if recday_kind is not None:
+        data_dic = {k: v for k, v in data_dic.items() if registry.recday_kind(str(k)) == recday_kind}
+        if verbose:
+            print(f"  recday_kind={recday_kind}: {len(data_dic)} recdays kept")
 
     if apply_exclusions:
         data_dic = registry.apply_exclusions(data_dic, verbose=verbose)
@@ -4219,7 +4253,7 @@ def _artifact_path(save_dir, section_name, key, ext):
 
 # Matches a mouse_recday key like 'ah08_20250613_20250615'. Used to tell a cached
 # artifact that can be filtered by recday from one that pools across them.
-_RECDAY_RE = __import__('re').compile(r'^[a-z]{2}\d{2}_\d{8}_\d{8}$')
+_RECDAY_RE = __import__('re').compile(r'^[a-z]{2}\d{2}(_\d{8}){1,6}$')   # 1-6 dates: mEC single days, 2-day merges, the 6-day LEC July block
 
 
 # Result keys that `save_section` / `load_glm_results` understand for fitted

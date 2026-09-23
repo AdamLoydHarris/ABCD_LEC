@@ -43,3 +43,7 @@ code/LEC_glm_tuning_variables_backup.ipynb
 code/LEC_glm_tuning_variables_dep.ipynb
 code/LEC_elasticnet_regression_v3.ipynb
 mFC_data/code/PFC_elasticnet_regression_v3.ipynb
+
+# Stage-script SLURM logs and editor/notebook backups (2026-09-23)
+code/preprocessing/slurm_outputs/
+*.bak

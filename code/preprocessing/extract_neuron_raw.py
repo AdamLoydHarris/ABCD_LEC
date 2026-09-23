@@ -35,10 +35,15 @@ recovered from the stored arrays instead, and reported as such — see `recover_
 """
 
 import argparse
+import os
 import sys
 from functools import lru_cache
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+# `--dataset` must reach recday_registry before it is imported (default: lec, unchanged).
+if "--dataset" in sys.argv:
+    os.environ["TSA_DATASET"] = sys.argv[sys.argv.index("--dataset") + 1]
 
 import numpy as np
 import pandas as pd
@@ -46,10 +51,27 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import recday_registry as rr                                          # noqa: E402
 
-# Output path (alongside the sibling trialtimes_ / pokes_ files' consumers)
-NEURON_PATH = rr.REPO_ROOT / "data" / "processed_data" / "neuron_raw_mingyutest"
+# Output path (alongside the sibling trialtimes_ / pokes_ files' consumers). The mEC tree
+# keeps the same directory names so `build_data_dic` reads both trees identically.
+# `--out <name>` redirects (the fitted-clock re-derivation writes `neuron_raw_v2`).
+_OUT_NAME = sys.argv[sys.argv.index("--out") + 1] if "--out" in sys.argv else "neuron_raw_mingyutest"
+NEURON_PATH = rr.REPO_ROOT / "data" / "processed_data" / _OUT_NAME
+LEGACY_NEURON_PATH = rr.REPO_ROOT / "data" / "processed_data" / "neuron_raw_mingyutest"
 TRIALTIMES_PATH = rr.REPO_ROOT / "data" / "processed_data" / "trialtimes_raw_mingyutest"
-RSYNC_PATH = rr.REPO_ROOT / "data" / "processed_data" / "ephys_rsync_mingyutest"
+
+#: How spikes are put on the pyControl clock.
+#:   'legacy' (default): first cached pulse = pyControl rsync[0], constant shift, uniform
+#:            750-sample bins. Byte-identical to every array on disk.
+#:   'fitted': the recording's fitted line ephys_sample = a * t_ms + b (from
+#:            `extract_rsync_from_ttl.py`, `rsync_fit_*.json`, this mouse's own train matched
+#:            by pairwise offset), every spike mapped to pyControl ms and binned on the 25 ms
+#:            grid. Removes the partner-pulse origin error (ah08/ly06: -64 ms) and the
+#:            3-25 ms drift. Sleep-box sessions have no pyControl clock and stay legacy.
+SYNC = sys.argv[sys.argv.index("--sync") + 1] if "--sync" in sys.argv else "legacy"
+# LEC's legacy rsync caches are the untracked `_mingyutest` set; the fitted clock always
+# comes from the TTL-derived `ephys_rsync/` (both datasets).
+RSYNC_PATH = rr.REPO_ROOT / "data" / "processed_data" / (
+    "ephys_rsync_mingyutest" if (rr.DATASET == "lec" and SYNC == "legacy") else "ephys_rsync")
 
 # Constants
 BIN_MS = 25                      # bin width, matching trialtimes and the tracking arrays
@@ -100,8 +122,11 @@ def session_map(recday: str) -> Tuple[List[int], List[int]]:
     key = {(d, t): i for i, (d, t) in enumerate(zip(table["date"], table["time"]))}
 
     wake: List[int] = []
-    for _, row in rr.task_session_rows(recday).iterrows():
-        hit = key.get((str(row["_date"]), str(row["Ephys"])))
+    for s, row in rr.task_session_rows(recday).iterrows():
+        # Exact (date, Ephys) first; the registry's 60 s rule covers hand-typed stamps
+        # (bp02 2024-03-28 reads 14-30-34 for the 14-30-43 folder).
+        stamp = rr.match_ephys_stamp(recday, s, key.keys())
+        hit = key.get((str(row["_date"]), stamp)) if stamp else None
         if hit is None:
             raise KeyError(f"{recday}: metadata Ephys {row['_date']} {row['Ephys']} "
                            f"is not in recording_sessions_in_concat.csv")
@@ -113,7 +138,7 @@ def session_map(recday: str) -> Tuple[List[int], List[int]]:
 
 def first_rsync_sample(recday: str, concat_row: int) -> Optional[int]:
     """First sync-pulse sample of one recording, in that recording's own timebase."""
-    mouse, _, _ = rr.split_recday(recday)
+    mouse, _ = rr.recday_dates(recday)
     row = concat_table(recday).iloc[concat_row]
     date = str(row["date"])
     path = (RSYNC_PATH / mouse /
@@ -180,6 +205,54 @@ def _parse_pycontrol(path: Path):
     """`extract_pokes.parse_pycontrol`, imported lazily to keep the module import cheap."""
     from extract_pokes import parse_pycontrol
     return parse_pycontrol(path)
+
+
+def fitted_clock(recday: str, concat_row: int) -> Optional[dict]:
+    """`{'a': samples per ms, 'b': samples}` of one recording's fitted clock, or None."""
+    import json
+    mouse, _ = rr.recday_dates(recday)
+    row = concat_table(recday).iloc[concat_row]
+    date = str(row["date"])
+    path = RSYNC_PATH / mouse / f"rsync_fit_{date[:4]}-{date[4:6]}-{date[6:]}_{row['time']}.json"
+    if not path.exists():
+        return None
+    fit = json.loads(path.read_text())
+    return dict(a=float(fit["a_samples_per_ms"]), b=float(fit["b_samples"]),
+                n_matched=int(fit["n_matched"]), n_rsync=int(fit["n_rsync"]))
+
+
+def session_window_fitted(recday: str, session: int, concat_row: int) -> Tuple[dict, int, int]:
+    """`(clock, t0_ms, n_bins)` for a task session on the fitted clock.
+
+    t0 is the pyControl time of bin 0: the first A_on snapped to the 25 ms grid (as
+    `extract_pokes.to_bins` does), or rsync[0] for a session with no completed trials. n_bins
+    is `trialtimes.max()` for scored sessions, else the bins up to the recording's last sample.
+    """
+    clock = fitted_clock(recday, concat_row)
+    if clock is None:
+        raise FileNotFoundError(f"{recday} s{session}: no rsync_fit json")
+    if clock["n_matched"] < 0.5 * clock["n_rsync"]:
+        raise ValueError(f"{recday} s{session}: only {clock['n_matched']}/{clock['n_rsync']} rsyncs matched")
+    times, _ = _parse_pycontrol(rr.pycontrol_file(recday, session))
+    a_on = times.get("A_on", np.array([], dtype=np.int64))
+    tt = trialtimes(recday, session)
+    n_samples = int(concat_table(recday)["n_samples"].iloc[concat_row])
+    if len(a_on) == 0 or tt.size == 0:
+        t0 = int(times["rsync"][0])
+        t_end = (n_samples - clock["b"]) / clock["a"]
+        return clock, t0, int(np.floor((t_end - t0) / BIN_MS))
+    return clock, (int(a_on[0]) // BIN_MS) * BIN_MS, int(tt.max())
+
+
+def bin_session_fitted(spike_samples: np.ndarray, unit_rows: np.ndarray, n_units: int,
+                       clock: dict, t0_ms: int, n_bins: int) -> np.ndarray:
+    """Spike counts per (unit, 25 ms pyControl bin): sample -> ms through the fitted line."""
+    t_ms = (spike_samples.astype(np.float64) - clock["b"]) / clock["a"]
+    bins = np.floor(t_ms / BIN_MS).astype(np.int64) - (t0_ms // BIN_MS)
+    keep = (unit_rows >= 0) & (bins >= 0) & (bins < n_bins)
+    counts = np.zeros((n_units, n_bins), dtype=np.int64)
+    np.add.at(counts, (unit_rows[keep], bins[keep]), 1)
+    return counts.astype(NEURON_DTYPE)
 
 
 # ---------------------------------------------------------------------------
@@ -282,6 +355,15 @@ def extract_recday(recday: str, verbose: bool = True):
             samples = spike_times[lo:hi] - start
             unit_rows = lut[spike_clusters[lo:hi]]
 
+            if SYNC == "fitted" and not is_sleep:
+                try:
+                    clock, t0, n_bins = session_window_fitted(recday, idx, concat_row)
+                except (KeyError, FileNotFoundError, ValueError) as exc:
+                    unresolved[name] = str(exc)
+                    continue
+                out[name] = bin_session_fitted(samples, unit_rows, len(qc), clock, t0, n_bins)
+                continue
+
             try:
                 origin, n_bins = session_window(recday, idx, concat_row, sleep=is_sleep)
             except (KeyError, FileNotFoundError) as exc:
@@ -338,6 +420,7 @@ def process(recdays: List[str], *, write: bool, verbose: bool = True) -> pd.Data
 
         for name, array in sorted(arrays.items()):
             path = NEURON_PATH / f"{name}.npy"
+            extra = {}
             if path.exists():
                 existing = np.load(path)
                 exact = (existing.shape == array.shape
@@ -348,6 +431,7 @@ def process(recdays: List[str], *, write: bool, verbose: bool = True) -> pd.Data
                     print(f"  {name}: MISMATCH stored {existing.shape} "
                           f"vs rebuilt {array.shape}")
             elif write:
+                path.parent.mkdir(parents=True, exist_ok=True)   # first write in a new tree
                 np.save(path, array)
                 status = "written"
                 if verbose:
@@ -356,15 +440,56 @@ def process(recdays: List[str], *, write: bool, verbose: bool = True) -> pd.Data
                 status = "missing"
                 if verbose:
                     print(f"  {name}: absent (use --write to create) {array.shape}")
+            if SYNC == "fitted" and NEURON_PATH != LEGACY_NEURON_PATH:
+                extra = compare_with_legacy(name, array)
             rows.append({"recday": recday, "array": name, "status": status,
-                         "n_units": array.shape[0], "n_bins": array.shape[1]})
+                         "n_units": array.shape[0], "n_bins": array.shape[1], **extra})
     return pd.DataFrame(rows)
+
+
+def compare_with_legacy(name: str, array: np.ndarray, max_lag: int = 40) -> dict:
+    """How far the fitted-clock array sits from the legacy one: the lag (bins) that best aligns
+    the two population-rate traces, and the fraction of bins with identical counts at that lag.
+    Origin errors show as a non-zero lag (ah08/ly06: expect -2 or -3); drift shows as a lag
+    that would grow along the session, so the same is reported for the last quarter."""
+    legacy = LEGACY_NEURON_PATH / f"{name}.npy"
+    if not legacy.exists():
+        return {"legacy": "absent"}
+    old = np.load(legacy).astype(np.int64)
+    new = array.astype(np.int64)
+    n = min(old.shape[1], new.shape[1])
+    if n < 4 * max_lag or old.shape[0] != new.shape[0]:
+        return {"legacy": "incomparable", "legacy_n_bins": old.shape[1]}
+    po, pn = old[:, :n].sum(axis=0).astype(float), new[:, :n].sum(axis=0).astype(float)
+    po, pn = po - po.mean(), pn - pn.mean()
+
+    def best_lag(a, b):
+        m = len(a)
+        lags = range(-max_lag, max_lag + 1)
+        cc = [np.dot(a[max(0, -l):m - max(0, l)], b[max(0, l):m - max(0, -l)]) for l in lags]
+        return int(list(lags)[int(np.argmax(cc))])
+
+    lag_all = best_lag(po, pn)
+    q = n // 4
+    lag_last = best_lag(po[-q:] - po[-q:].mean(), pn[-q:] - pn[-q:].mean()) if q > 4 * max_lag else None
+    shifted_old = old[:, max(0, lag_all):n - max(0, -lag_all)]
+    shifted_new = new[:, max(0, -lag_all):n - max(0, lag_all)]
+    same = float(np.mean(shifted_old == shifted_new))
+    return {"legacy": "compared", "legacy_n_bins": int(old.shape[1]), "lag_bins_new_minus_legacy": lag_all,
+            "lag_bins_last_quarter": lag_last, "frac_bins_identical_at_lag": round(same, 4),
+            "spikes_legacy": int(old.sum()), "spikes_new": int(new.sum())}
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--dataset", default=rr.DATASET, choices=sorted(rr.DATASETS),
+                        help="which tree to work on (read before import; default lec)")
     parser.add_argument("--recdays", nargs="*", default=None,
                         help="recdays to process (default: every block on disk)")
+    parser.add_argument("--sync", choices=("legacy", "fitted"), default=SYNC,
+                        help="spike clock (read before import; default legacy = byte-identical)")
+    parser.add_argument("--out", default=_OUT_NAME,
+                        help="output directory name under data/processed_data (read before import)")
     parser.add_argument("--write", action="store_true",
                         help="create arrays that do not exist yet; never overwrites")
     parser.add_argument("--validate-only", action="store_true",
@@ -377,7 +502,22 @@ def main():
                      verbose=not args.quiet)
 
     counts = report["status"].value_counts().to_dict()
-    print(f"\n{len(recdays)} recday(s): {counts}")
+    print(f"\n{len(recdays)} recday(s): {counts}  [sync={SYNC}, out={NEURON_PATH.name}]")
+    if "lag_bins_new_minus_legacy" in report:
+        cmp = report.dropna(subset=["lag_bins_new_minus_legacy"])
+        cmp = cmp[~cmp["array"].str.contains("_sb_")]
+        if len(cmp):
+            cmp = cmp.assign(mouse=cmp["recday"].str[:4])
+            print("fitted vs legacy, task sessions: lag (bins, new minus legacy) per mouse")
+            print(cmp.groupby("mouse")["lag_bins_new_minus_legacy"].describe()[["count", "min", "50%", "max"]].to_string())
+            print("fraction of bins identical at that lag: median "
+                  f"{cmp['frac_bins_identical_at_lag'].median():.3f}, min {cmp['frac_bins_identical_at_lag'].min():.3f}")
+            qc = NEURON_PATH.parent / f"neuron_raw_fitted_vs_legacy_{rr.DATASET}.csv"
+            k = 0
+            while (p := qc.with_name(qc.stem + (f".v{k}" if k else "") + ".csv")).exists():
+                k += 1
+            report.to_csv(p, index=False)
+            print(f"comparison -> {p}")
 
     bad = report[report["status"] == "MISMATCH"]
     if len(bad):

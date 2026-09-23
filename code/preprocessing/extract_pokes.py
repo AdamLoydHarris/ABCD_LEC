@@ -20,14 +20,23 @@ the independently generated trialtimes_*.npy.
 
 import argparse
 import ast
+import json
+import os
 import sys
 import numpy as np
 import pandas as pd
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-# Base paths
-BASE_PATH = Path("/ceph/behrens/adam_harris/Taskspace_abstraction_lEC")
+# `--dataset` must reach recday_registry before it is imported (default: lec, unchanged).
+if "--dataset" in sys.argv:
+    os.environ["TSA_DATASET"] = sys.argv[sys.argv.index("--dataset") + 1]
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import recday_registry as rr                                          # noqa: E402
+
+# Base paths, from the registry so `--dataset mec` moves every one of them together
+BASE_PATH = rr.REPO_ROOT
 DATA_PATH = BASE_PATH / "data"
 METADATA_PATH = DATA_PATH / "metadata"
 RAW_PATH = DATA_PATH / "raw"
@@ -51,7 +60,7 @@ STATE_NAMES = ["A_on", "B_on", "C_on", "D_on", "E_on"]
 POKE_COLUMNS = ["entry_bin", "exit_bin", "port", "rewarded", "state"]
 
 # List of mice to process
-MICE = ["ah08", "ah10", "ly05", "ly06", "ly07"]
+MICE = list(rr.EPHYS_MICE)
 
 
 # ---------------------------------------------------------------------------
@@ -60,7 +69,7 @@ MICE = ["ah08", "ah10", "ly05", "ly06", "ly07"]
 
 def parse_pycontrol(pycontrol_file: Path) -> Tuple[Dict[str, np.ndarray], Optional[List[int]]]:
     """
-    Parse a pyControl v1.x session file.
+    Parse a pyControl session file: v1.x `.txt` (ABCD tasks) or v2 `.tsv` (mEC open field).
 
     The ID -> name mapping is built from this file's own S (states) and E (events)
     header lines. It must never be hardcoded: METraining_Task_v1 and ABCDE_v1 use
@@ -71,6 +80,8 @@ def parse_pycontrol(pycontrol_file: Path) -> Tuple[Dict[str, np.ndarray], Option
         times: {event_or_state_name: array of timestamps in ms}
         active_poke: the rewarded port sequence from the V line, or None if absent
     """
+    if Path(pycontrol_file).suffix == ".tsv":
+        return parse_pycontrol_v2(Path(pycontrol_file))
     lines = [line.strip() for line in pycontrol_file.read_text().split("\n") if line.strip()]
 
     state_ids = ast.literal_eval(next(l for l in lines if l[0] == "S")[2:])
@@ -89,6 +100,31 @@ def parse_pycontrol(pycontrol_file: Path) -> Tuple[Dict[str, np.ndarray], Option
     active_line = next((l for l in variable_lines if "active_poke" in l), None)
     active_poke = ast.literal_eval(active_line.split(" active_poke ")[1]) if active_line else None
 
+    return times, active_poke
+
+
+def parse_pycontrol_v2(pycontrol_file: Path) -> Tuple[Dict[str, np.ndarray], Optional[List[int]]]:
+    """
+    Parse a pyControl v2 `.tsv` (columns time[s], type, subtype, content) into the same
+    `(times, active_poke)` shape as `parse_pycontrol`: event and state names come from the
+    `content` column, times are rounded to integer ms. Only the mEC open-field sessions use
+    this format; they have `rsync` events and no `A_on`, so downstream code takes its
+    no-trials branch.
+    """
+    df = pd.read_csv(pycontrol_file, sep="\t")
+    times: Dict[str, List[int]] = {}
+    for kind in ("event", "state"):
+        for name, group in df[df["type"] == kind].groupby("content"):
+            ms = np.rint(group["time"].to_numpy(float) * 1000).astype(np.int64)
+            times.setdefault(str(name), []).extend(ms.tolist())
+    times = {name: np.array(sorted(ts), dtype=np.int64) for name, ts in times.items()}
+
+    active_poke = None
+    for content in df.loc[df["type"] == "variable", "content"].astype(str):
+        if "active_poke" in content:
+            value = json.loads(content).get("active_poke")
+            if value is not None:
+                active_poke = [int(x) for x in value]
     return times, active_poke
 
 
@@ -290,69 +326,123 @@ def _normalise_date(date_str: str) -> str:
     return f"{parts[0]}-{int(parts[1]):02d}-{int(parts[2]):02d}"
 
 
-def sessions_for_mouse(mouse_id: str) -> List[Tuple[str, str, int, Path]]:
+def sessions_for_mouse(mouse_id: str) -> List[Tuple[str, int, Path]]:
     """
     Map every existing trialtimes file for a mouse to its source pycontrol file.
 
-    Session index is the ordinal of the task session within the ephys date-pair:
-    take the metadata rows for the two dates that have a Behaviour time, sort by
-    (Date, Behaviour), and count. This reproduces the on-disk session indices for
-    all 191 sessions with no fuzzy datetime matching -- the filename is built exactly.
+    Session index is the ordinal of the task session within the recday's dates: the
+    metadata rows for those dates that have a Behaviour time, sorted by (Date, Behaviour).
+    Resolution goes through `recday_registry.pycontrol_file`, which builds the filename
+    from the recday's own dates (exact stamp first, then the unique file within 60 s) --
+    the same ordering this function used to compute by hand, verified identical on all
+    211 LEC sessions.
 
-    Returns [(date1, date2, session_idx, pycontrol_file)].
+    Returns [(recday, session_idx, pycontrol_file)]; the recday has one or two dates.
     """
-    metadata = pd.read_csv(METADATA_PATH / f"MetaData-{mouse_id}.csv")
     sessions = []
-
     for trialtimes_file in sorted(TRIALTIMES_PATH.glob(f"trialtimes_{mouse_id}_*.npy")):
-        _, _, date1, date2, session_idx = trialtimes_file.stem.split("_")
-        session_idx = int(session_idx)
-
-        dates = [f"{d[:4]}-{int(d[4:6])}-{int(d[6:])}" for d in (date1, date2)]
-        rows = metadata[
-            metadata["Date"].astype(str).isin(dates)
-            & metadata["Behaviour"].notna()
-            & (metadata["Behaviour"].astype(str) != "-")
-        ].sort_values(
-            ["Date", "Behaviour"],
-            key=lambda col: pd.to_datetime(col) if col.name == "Date" else col,
-        )
-
-        if session_idx >= len(rows):
-            print(f"  WARNING: {trialtimes_file.name} has no metadata row (index out of range)")
+        parts = trialtimes_file.stem.split("_")
+        recday, session_idx = "_".join(parts[1:-1]), int(parts[-1])
+        try:
+            pycontrol_file = rr.pycontrol_file(recday, session_idx)
+        except (KeyError, AssertionError) as exc:
+            print(f"  WARNING: {trialtimes_file.name} has no metadata row ({exc})")
             continue
-
-        row = rows.iloc[session_idx]
-        behaviour_time = str(int(float(row["Behaviour"]))).zfill(6)
-        pycontrol_file = PYCONTROL_PATH / f"{mouse_id}-{_normalise_date(row['Date'])}-{behaviour_time}.txt"
-
-        if not pycontrol_file.exists():
-            print(f"  WARNING: no pycontrol file {pycontrol_file.name} for {trialtimes_file.name}")
+        except FileNotFoundError as exc:
+            print(f"  WARNING: no pycontrol file for {trialtimes_file.name} ({exc})")
             continue
-
-        sessions.append((date1, date2, session_idx, pycontrol_file))
-
+        sessions.append((recday, session_idx, pycontrol_file))
     return sessions
 
 
-def get_end_bin(mouse_id: str, date1: str, date2: str, session_idx: int) -> int:
+def get_end_bin(recday: str, session_idx: int) -> int:
     """
     Session length in 25 ms bins.
 
     trialtimes.max() equals Neuron_raw.shape[1] exactly, so the last trial's next-A_on
     defines the end of the neural recording.
     """
-    trial_times = np.load(TRIALTIMES_PATH / f"trialtimes_{mouse_id}_{date1}_{date2}_{session_idx}.npy")
+    trial_times = np.load(TRIALTIMES_PATH / f"trialtimes_{recday}_{session_idx}.npy")
     return int(trial_times.max()) if trial_times.size else 0
+
+
+def _save_new(path: Path, array: np.ndarray) -> str:
+    """Write unless an identical array is already there; never replace a differing one."""
+    if path.exists():
+        existing = np.load(path, allow_pickle=True)
+        if existing.shape == array.shape and np.array_equal(existing, array):
+            return "identical"
+        n = 1
+        while (alt := path.with_name(f"{path.stem}.conflict{n}.npy")).exists():
+            n += 1
+        np.save(alt, array)
+        return f"CONFLICT -> {alt.name}"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.save(path, array)
+    return "written"
+
+
+def write_trialtimes(verbose: bool = True) -> pd.DataFrame:
+    """
+    Create `trialtimes_{recday}_{s}.npy` and `Task_data_{recday}_{s}.npy` from pyControl.
+
+    For LEC these files already exist (written by an untracked script) and this only
+    confirms them; for mEC it is the writer. The LEC conventions, measured against all 191
+    on-disk sessions (373 arrays identical, 0 created, dry check 2026-09-18):
+
+    - no `active_poke` (the mEC open-field .tsv sessions): neither file is written;
+    - the sheet does not call the session ABCD (LEC's 20 `Object` sessions, whose pyControl
+      program was the ABCD task but never started a trial): neither file is written;
+    - the sheet calls it ABCD but there is no completed trial (12 LEC sessions, 3 of them
+      with no A_on at all): an EMPTY trialtimes of shape (0,) float64, plus Task_data;
+    - otherwise trialtimes (n_trials, n_states + 1) float64 and Task_data (n_states,) int64.
+    """
+    rows = []
+    for recday in rr.all_recdays():
+        table = rr.task_session_rows(recday)
+        for session in range(len(table)):
+            try:
+                pycontrol_file = rr.pycontrol_file(recday, session)
+            except (FileNotFoundError, KeyError, AssertionError) as exc:
+                rows.append(dict(recday=recday, session=session, status=f"unresolved: {exc}"))
+                continue
+            times, active_poke = parse_pycontrol(pycontrol_file)
+            if active_poke is None:
+                rows.append(dict(recday=recday, session=session, pycontrol=pycontrol_file.name,
+                                 status="no active_poke (not an ABCD session); nothing written"))
+                continue
+            sheet_task = str(table.iloc[session]["Structure_abstract"]).strip().upper().startswith("ABCD")
+            if not sheet_task and len(times.get("A_on", [])) == 0:
+                rows.append(dict(recday=recday, session=session, pycontrol=pycontrol_file.name,
+                                 status=f"sheet says {table.iloc[session]['Structure_abstract']!r}, "
+                                        "no A_on; nothing written"))
+                continue
+            trial_times = make_trial_times(times, n_states=len(active_poke)).astype(np.float64)
+            if trial_times.size == 0:
+                trial_times = np.zeros((0,), dtype=np.float64)   # LEC's on-disk empty shape
+            s1 = _save_new(TRIALTIMES_PATH / f"trialtimes_{recday}_{session}.npy", trial_times)
+            s2 = _save_new(TRIALTIMES_PATH / f"Task_data_{recday}_{session}.npy",
+                           np.asarray(active_poke, dtype=np.int64))
+            rows.append(dict(recday=recday, session=session, pycontrol=pycontrol_file.name,
+                             n_trials=len(trial_times), n_states=len(active_poke),
+                             status=f"trialtimes {s1}; Task_data {s2}"))
+            if verbose:
+                print(f"  {recday} s{session}: {len(trial_times)} trials, task {active_poke} "
+                      f"[{s1} / {s2}]")
+    table = pd.DataFrame(rows)
+    if verbose:
+        print(f"\n{len(table)} sessions:")
+        print(table["status"].str.split(";").str[0].value_counts().to_string())
+    return table
 
 
 # ---------------------------------------------------------------------------
 # Loading
 # ---------------------------------------------------------------------------
 
-def load_pokes(mouse_id: str, date1: str, date2: str, session_idx: int) -> np.ndarray:
+def load_pokes(recday: str, session_idx: int) -> np.ndarray:
     """Load a poke event table. Columns are POKE_COLUMNS."""
-    return np.load(TRIALTIMES_PATH / f"pokes_{mouse_id}_{date1}_{date2}_{session_idx}.npy")
+    return np.load(TRIALTIMES_PATH / f"pokes_{recday}_{session_idx}.npy")
 
 
 def pokes_to_dense(pokes: np.ndarray, n_bins: int) -> np.ndarray:
@@ -381,9 +471,9 @@ def process_all(verbose: bool = True) -> pd.DataFrame:
         if verbose:
             print(f"\n{mouse_id}: {len(sessions)} sessions")
 
-        for date1, date2, session_idx, pycontrol_file in sessions:
+        for recday, session_idx, pycontrol_file in sessions:
             times, active_poke = parse_pycontrol(pycontrol_file)
-            end_bin = get_end_bin(mouse_id, date1, date2, session_idx)
+            end_bin = get_end_bin(recday, session_idx)
 
             if end_bin == 0:
                 # Session with no completed trials; write an empty table so
@@ -395,12 +485,12 @@ def process_all(verbose: bool = True) -> pd.DataFrame:
             else:
                 pokes, stats = make_pokes_array(times, active_poke, end_bin)
 
-            output_file = TRIALTIMES_PATH / f"pokes_{mouse_id}_{date1}_{date2}_{session_idx}.npy"
-            np.save(output_file, pokes)
+            output_file = TRIALTIMES_PATH / f"pokes_{recday}_{session_idx}.npy"
+            saved = _save_new(output_file, pokes)      # identical files are left alone
 
             qc_rows.append({
-                "mouse": mouse_id, "d1": date1, "d2": date2, "sess": session_idx,
-                "pycontrol_file": pycontrol_file.name, "end_bin": end_bin, **stats,
+                "mouse": mouse_id, "recday": recday, "sess": session_idx,
+                "pycontrol_file": pycontrol_file.name, "end_bin": end_bin, "saved": saved, **stats,
             })
 
             if verbose:
@@ -418,9 +508,14 @@ def process_all(verbose: bool = True) -> pd.DataFrame:
                       f"{stats['n_rewarded']} rewarded{suffix}")
 
     qc = pd.DataFrame(qc_rows)
-    qc.to_csv(QC_REPORT_PATH, index=False)
+    report = QC_REPORT_PATH
+    n = 1
+    while report.exists():                      # never overwrite an earlier QC report
+        report = QC_REPORT_PATH.with_name(f"{QC_REPORT_PATH.stem}.v{n}.csv")
+        n += 1
+    qc.to_csv(report, index=False)
     if verbose:
-        print(f"\nWrote {len(qc)} poke files and QC report -> {QC_REPORT_PATH}")
+        print(f"\n{len(qc)} poke files ({qc['saved'].value_counts().to_dict()}); QC report -> {report}")
     return qc
 
 
@@ -440,11 +535,11 @@ def validate(verbose: bool = True) -> bool:
     failures = []
 
     for mouse_id in MICE:
-        for date1, date2, session_idx, pycontrol_file in sessions_for_mouse(mouse_id):
-            tag = f"{mouse_id}_{date1}_{date2}_{session_idx}"
+        for recday, session_idx, pycontrol_file in sessions_for_mouse(mouse_id):
+            tag = f"{recday}_{session_idx}"
             times, active_poke = parse_pycontrol(pycontrol_file)
             reference = np.load(TRIALTIMES_PATH / f"trialtimes_{tag}.npy").astype(np.int64)
-            pokes = load_pokes(mouse_id, date1, date2, session_idx)
+            pokes = load_pokes(recday, session_idx)
             n_checked += 1
 
             # 1. Trialtimes round-trip
@@ -502,6 +597,11 @@ def validate(verbose: bool = True) -> bool:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--dataset", default=rr.DATASET, choices=sorted(rr.DATASETS),
+                        help="which tree to work on (read before import; default lec)")
+    parser.add_argument("--write-trialtimes", action="store_true",
+                        help="create trialtimes_/Task_data_ files from pyControl first "
+                             "(mEC has none; on LEC this only confirms the existing files)")
     parser.add_argument("--validate", action="store_true",
                         help="Check the written files against trialtimes")
     parser.add_argument("--validate-only", action="store_true",
@@ -510,6 +610,9 @@ def main():
     args = parser.parse_args()
 
     verbose = not args.quiet
+
+    if args.write_trialtimes:
+        write_trialtimes(verbose=verbose)
 
     if not args.validate_only:
         process_all(verbose=verbose)

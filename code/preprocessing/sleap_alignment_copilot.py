@@ -17,6 +17,7 @@ Workflow:
 
 import os
 import re
+import sys
 import numpy as np
 import pandas as pd
 from scipy import signal
@@ -25,8 +26,14 @@ from typing import Optional, Tuple, List, Dict
 from datetime import datetime, timedelta
 import warnings
 
-# Base paths
-BASE_PATH = Path("/ceph/behrens/adam_harris/Taskspace_abstraction_lEC")
+# `--dataset` must reach recday_registry before it is imported (default: lec, unchanged).
+if "--dataset" in sys.argv:
+    os.environ["TSA_DATASET"] = sys.argv[sys.argv.index("--dataset") + 1]
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import recday_registry as rr                                          # noqa: E402
+
+# Base paths, from the registry so `--dataset mec` moves every one of them together
+BASE_PATH = rr.REPO_ROOT
 DATA_PATH = BASE_PATH / "data"
 METADATA_PATH = DATA_PATH / "metadata"
 RAW_PATH = DATA_PATH / "raw"
@@ -35,7 +42,26 @@ PROCESSED_PATH = DATA_PATH / "processed"
 
 # Input paths
 SLEAP_PATH = PREPROCESSED_PATH / "sleap" / "maze"
+SLEAP_PATH_OPENFIELD = PREPROCESSED_PATH / "sleap" / "openfield"   # openfield_to_xy.py output
 EPHYS_PATH = PREPROCESSED_PATH / "ephys"
+
+#: Which sheet sessions to align: 'task' (ABCD-type, the LEC default), 'openfield' (object and
+#: open-field sessions, anchored at pyControl rsync[0] like extract_neuron_raw's no-trials
+#: branch; needs SYNC_METHOD 'matched') or 'all'.
+SESSIONS = "task"
+
+
+def set_output_tag(tag: str) -> None:
+    """Redirect PROCESSED_PATH to data/processed_<tag> so a re-derivation never touches the
+    arrays an existing data_dic was built from."""
+    global PROCESSED_PATH
+    PROCESSED_PATH = DATA_PATH / (f"processed_{tag}" if tag else "processed")
+
+
+def session_kind(metadata_row: pd.Series) -> str:
+    """'ABCD' | 'ABCDE' | 'object' | 'openfield' | raw string, from the sheet row."""
+    raw = str(metadata_row.get("Structure_abstract", "")).strip()
+    return rr._SESSION_TYPES.get(raw.lower(), raw)
 PINSTATE_PATH = RAW_PATH / "pinstate"
 PYCONTROL_PATH = RAW_PATH / "pycontrol"
 
@@ -48,7 +74,218 @@ PINSTATE_HIGH_DEFAULT = 805306368  # Sync pulse ON value
 PINSTATE_LOW_DEFAULT = 536870912  # Sync pulse OFF value
 
 # List of mice to process
-MICE = ["ah08", "ah10", "ly05", "ly06", "ly07"]
+MICE = list(rr.EPHYS_MICE)
+
+#: How video frames are put on the pyControl clock.
+#:   'first_edge' (LEC, default): first pinstate rising edge = first pyControl rsync, then
+#:                nominal VIDEO_FPS. Reproduces every LEC array on disk.
+#:   'matched'   : fit frame = a * t_ms + b to the WHOLE pinstate train against the pyControl
+#:                rsync list (`fit_frame_clock`), then sample each 25 ms bin at its fitted
+#:                frame. Needed for mEC: the maze-2 camera runs at 59.948 fps (measured on
+#:                13 sessions of bp02/bp04), which under 60 fps drifts ~1 s over a 20 min
+#:                session; the maze-1 camera runs at 59.995 fps. The pinstate line also
+#:                carries the paired box's pulses, so the first edge can be the partner's.
+SYNC_METHOD = "first_edge"
+SYNC_QC: List[Dict] = []          # one row per matched session, written by main_metadata
+MAX_JUMP_FRAMES = 600             # 10 s of dropped frames is the most a fit is allowed to bridge
+
+
+def rising_edges(pinstate: np.ndarray) -> np.ndarray:
+    """Frame indices of pinstate rising edges (low -> high)."""
+    high, _ = detect_pinstate_levels(pinstate)
+    if high is None:
+        return np.array([], dtype=int)
+    is_high = pinstate == high
+    return np.where(is_high[1:] & ~is_high[:-1])[0] + 1
+
+
+def all_rsync_timestamps(pycontrol_data: Dict) -> np.ndarray:
+    """Every rsync event time (ms) in a parsed pyControl file, in order."""
+    code = pycontrol_data['events'].get('rsync')
+    if code is None:
+        return np.array([], dtype=float)
+    return np.array([t for t, c in pycontrol_data['data'] if c == code], dtype=float)
+
+
+def fit_frame_clock_globalline(rising_frames: np.ndarray, rsync_ms: np.ndarray,
+                    fps_range: Tuple[float, float] = (58.5, 61.5), tol_frames: float = 1.5,
+                    max_passes: int = 30) -> Dict:
+    """SUPERSEDED 2026-09-18 by `frame_clock.fit_frame_clock` (kept for the survey): this
+    global-line fitter lost 30-70 % of the pulses in sessions with bursts of dropped frames
+    (ah08/ly07 2025-06-16 s3, bp04 2024-03-25 s4, 2024-03-27 s0) and drifted rate (ah10
+    2025-06-13 s3), producing clocks worse than a plain 60 fps line.
+
+    Piecewise-linear frame clock from pinstate edges and this mouse's pyControl rsyncs.
+
+    The pinstate may hold two boxes' trains, so this is a search rather than interval
+    matching: (1) the frame rate is the one at which the histogram of all edge-minus-rsync
+    differences has the tallest 3-bin peak (a wrong rate smears the peak; the partner's
+    pulses only add a flat floor); (2) at that rate the peak gives the offset and every
+    rsync is paired to its nearest edge within `tol_frames`; (3) the prediction is then
+    re-drawn as the piecewise-linear interpolation through the matched (t_ms, frame) anchors
+    and the pairing repeated, and whenever no new pulses pair, the still-unmatched pulses
+    are searched for a common shift -- a dropped-frame segment -- and shifted before the
+    next pass. Videos do drop frames: bp04 2024-03-24 s4 loses 16 frames at 14.6 min and
+    a single line pairs only 95/225 of its rsyncs; anchored interpolation follows it.
+
+    Returns the anchors plus summary numbers (fps from the global line, residual of the
+    anchors about that line, number and size of jumps). Use `frames_at(clock, t_ms)` to
+    map pyControl times to frames. Raises ValueError when fewer than half the rsyncs pair.
+    """
+    up = np.asarray(rising_frames, dtype=float)
+    rs = np.asarray(rsync_ms, dtype=float)
+    if len(up) < 5 or len(rs) < 5:
+        raise ValueError(f"too few pulses (edges {len(up)}, rsyncs {len(rs)})")
+
+    def peak(fps: float, bin_ms: float = 20.0):
+        d = (up[None, :] / fps * 1000.0 - rs[:, None]).ravel()
+        edges = np.arange(d.min(), d.max() + bin_ms, bin_ms)
+        h, _ = np.histogram(d, edges)
+        k = int(h.argmax())
+        return int(h[max(k - 1, 0):k + 2].sum()), (edges[k] + edges[k + 1]) / 2
+
+    grid = np.arange(fps_range[0], fps_range[1], 0.005)
+    coarse = grid[int(np.argmax([peak(f)[0] for f in grid]))]
+    fine = np.arange(coarse - 0.01, coarse + 0.01, 0.0002)
+    fps0 = fine[int(np.argmax([peak(f)[0] for f in fine]))]
+    _, offset_ms = peak(fps0)
+    slope0 = fps0 / 1000.0                                  # frames per ms
+
+    pred = (rs + offset_ms) * slope0
+    matched = np.zeros(len(rs), dtype=bool)
+    frame_of = np.full(len(rs), np.nan)
+    used = np.zeros(len(up), dtype=bool)
+
+    def nearest_free(pred_sub):
+        free_idx = np.where(~used)[0]
+        if len(free_idx) == 0:
+            return None, None
+        free = up[free_idx]
+        idx = np.clip(np.searchsorted(free, pred_sub), 1, len(free) - 1) if len(free) > 1 else np.zeros(len(pred_sub), int)
+        left = np.maximum(idx - 1, 0)
+        cand = np.where(np.abs(free[left] - pred_sub) < np.abs(free[idx] - pred_sub), left, idx)
+        return free_idx[cand], np.abs(free[cand] - pred_sub)
+
+    for _ in range(max_passes):
+        um = np.where(~matched)[0]
+        if len(um) == 0:
+            break
+        cand, dist = nearest_free(pred[um])
+        if cand is None:
+            break
+        ok = dist <= tol_frames
+        # one edge may only anchor one rsync: keep the closer claimant
+        order = np.argsort(dist)
+        taken = set()
+        for j in order:
+            if not ok[j] or cand[j] in taken:
+                ok[j] = False
+                continue
+            taken.add(cand[j])
+        if ok.any():
+            matched[um[ok]] = True
+            frame_of[um[ok]] = up[cand[ok]]
+            used[cand[ok]] = True
+            m_t, m_f = rs[matched], frame_of[matched]
+            pred = np.interp(rs, m_t, m_f)
+            pred[rs < m_t[0]] = m_f[0] + (rs[rs < m_t[0]] - m_t[0]) * slope0
+            pred[rs > m_t[-1]] = m_f[-1] + (rs[rs > m_t[-1]] - m_t[-1]) * slope0
+            continue
+        # nothing new within tolerance: look for a common shift among the unmatched pulses.
+        # After a dropped-frame segment the shift is one value plus the segment's own drift
+        # (bp04 s4: -15 frames drifting to -23), so judge the 3-bin neighbourhood of 2-frame
+        # bins and accept a fifth of the unmatched; each pass then anchors the central part
+        # and the interpolation carries the rest.
+        if len(um) < 5:
+            break
+        free = up[~used]
+        if len(free) == 0:
+            break
+        d = (free[None, :] - pred[um][:, None]).ravel()
+        edges = np.arange(d.min() - 1.0, d.max() + 3.0, 2.0)
+        h, _ = np.histogram(d, edges)
+        k = int(h.argmax())
+        lo, hi = max(k - 1, 0), min(k + 2, len(h))
+        if h[lo:hi].sum() < max(5, 0.2 * len(um)):
+            break
+        centres = (edges[lo:hi] + edges[lo + 1:hi + 1]) / 2
+        pred[um] += float(np.average(centres, weights=h[lo:hi]))
+
+    if matched.sum() < max(5, len(rs) // 2):
+        raise ValueError(f"only {int(matched.sum())}/{len(rs)} rsyncs pair at {fps0:.3f} fps")
+    m_t, m_f = rs[matched], frame_of[matched]
+    keep = np.concatenate([[True], np.diff(m_f) > 0])       # anchors must be strictly increasing
+    m_t, m_f = m_t[keep], m_f[keep]
+    a, b = np.polyfit(m_t, m_f, 1)
+    resid = m_f - (a * m_t + b)
+    steps = np.diff(resid)
+    jumps = steps[np.abs(steps) > 2.0]
+    # A truncated pinstate (ah08 2025-06-20/23 s3: edges stop mid-session) lets the search pair
+    # the remaining pulses to whatever edges exist and fit 55 fps with a 50k-frame jump. Refuse
+    # anything a real camera and a few dropped frames cannot produce.
+    fps = a * 1000.0
+    if not 58.5 <= fps <= 61.5 or (len(jumps) and np.abs(jumps).max() > MAX_JUMP_FRAMES):
+        raise ValueError(f"implausible frame clock: {fps:.2f} fps, largest jump "
+                         f"{np.abs(jumps).max() if len(jumps) else 0:.0f} frames (pinstate truncated?)")
+    return dict(anchors_ms=m_t, anchors_frames=m_f, a=float(a), b=float(b), fps=float(a * 1000.0),
+                n_rsync=int(len(rs)), n_matched=int(len(m_t)), n_edges=int(len(up)),
+                n_edges_unmatched=int(len(up) - len(m_t)),
+                resid_rms_frames=float(np.sqrt(np.mean(resid ** 2))),
+                n_jumps=int(len(jumps)), max_jump_frames=float(np.abs(jumps).max()) if len(jumps) else 0.0,
+                first_rsync_frame=float(m_f[0] if matched[0] else a * rs[0] + b))
+
+
+def frames_at(clock: Dict, t_ms) -> np.ndarray:
+    """pyControl time (ms) -> fractional video frame through the fitted anchors, with
+    linear extrapolation at the global slope beyond the first/last anchor."""
+    t = np.asarray(t_ms, dtype=float)
+    m_t, m_f, a = clock['anchors_ms'], clock['anchors_frames'], clock['a']
+    f = np.interp(t, m_t, m_f)
+    lo, hi = t < m_t[0], t > m_t[-1]
+    f[lo] = m_f[0] + (t[lo] - m_t[0]) * a
+    f[hi] = m_f[-1] + (t[hi] - m_t[-1]) * a
+    return f
+
+
+def ms_at_frame(clock: Dict, frame: float) -> float:
+    """Inverse of `frames_at` for one frame index."""
+    m_t, m_f, a = clock['anchors_ms'], clock['anchors_frames'], clock['a']
+    if frame <= m_f[0]:
+        return float(m_t[0] + (frame - m_f[0]) / a)
+    if frame >= m_f[-1]:
+        return float(m_t[-1] + (frame - m_f[-1]) / a)
+    return float(np.interp(frame, m_f, m_t))
+
+
+# The frame clock in use: the monotone-alignment fitter (frame_clock.py, 2026-09-18). It
+# returns the same anchors/a/b dict, so frames_at / ms_at_frame above apply unchanged.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import frame_clock as _frame_clock                                     # noqa: E402
+fit_frame_clock = _frame_clock.fit_frame_clock
+MIN_MATCHED_FRACTION = 0.9        # a session whose clock anchors fewer pulses is not written
+
+
+def sample_at_frames(data: np.ndarray, frames: np.ndarray, kind: str) -> np.ndarray:
+    """Sample per-frame data at fractional frame positions.
+
+    kind 'linear': NaN-aware linear interpolation per column (as `resample_data` does);
+    kind 'nearest': the nearest frame's value (labels, angles).
+    """
+    from scipy import interpolate
+    if kind == 'nearest':
+        return data[np.clip(np.rint(frames).astype(int), 0, len(data) - 1)]
+    data = np.asarray(data, dtype=float)
+    if data.ndim == 1:
+        data = data[:, None]
+    out = np.full((len(frames), data.shape[1]), np.nan)
+    old = np.arange(len(data))
+    for j in range(data.shape[1]):
+        valid = ~np.isnan(data[:, j])
+        if valid.sum() >= 2:
+            f = interpolate.interp1d(old[valid], data[valid, j], kind='linear',
+                                     bounds_error=False, fill_value='extrapolate')
+            out[:, j] = f(frames)
+    return out
 
 
 def load_metadata(mouse_id: str) -> pd.DataFrame:
@@ -76,10 +313,15 @@ def load_ephys_metadata(ephys_folder: Path) -> pd.DataFrame:
 
 
 def parse_ephys_folder_dates(folder_name: str) -> Tuple[str, str]:
-    """Extract date range from ephys folder name like '2025-06-13_2025-06-15_preprocessed'."""
-    match = re.match(r"(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})_preprocessed", folder_name)
+    """Extract date range from an ephys folder name like '2025-06-13_2025-06-15_preprocessed'.
+
+    A single-day block ('2024-03-21_preprocessed', mEC only) returns the same date twice, so
+    the date-range filter below still works; `create_output_filename` collapses the pair
+    back to one date in the recday name.
+    """
+    match = re.match(r"(\d{4}-\d{2}-\d{2})(?:_(\d{4}-\d{2}-\d{2}))?_preprocessed", folder_name)
     if match:
-        return match.group(1), match.group(2)
+        return match.group(1), match.group(2) or match.group(1)
     return None, None
 
 
@@ -217,7 +459,8 @@ def get_available_pycontrol_files(mouse_id: str) -> List[Tuple[datetime, Path]]:
     Returns list of (datetime, path) tuples sorted by datetime.
     """
     available = []
-    for pycontrol_file in PYCONTROL_PATH.glob(f"{mouse_id}-*.txt"):
+    # .txt = pyControl 1 (ABCD task); .tsv = pyControl 2 (mEC open field, rsync only)
+    for pycontrol_file in list(PYCONTROL_PATH.glob(f"{mouse_id}-*.txt")) + list(PYCONTROL_PATH.glob(f"{mouse_id}-*.tsv")):
         # Parse datetime from filename: ah08-2025-06-24-114301.txt
         name = pycontrol_file.stem
         parts = name.split('-', 1)
@@ -373,6 +616,15 @@ def parse_pycontrol_file(pycontrol_file: Path) -> Dict:
     states = {}
     events = {}
     data = []
+    if Path(pycontrol_file).suffix == ".tsv":
+        # pyControl 2 (mEC open field): events by name, seconds -> ms; presented in the same
+        # {states, events, data} shape with synthetic codes so the rsync/A_on lookups work.
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from extract_pokes import parse_pycontrol_v2
+        times, _ = parse_pycontrol_v2(Path(pycontrol_file))
+        events = {name: i + 1 for i, name in enumerate(sorted(times))}
+        data = sorted((int(t), events[name]) for name, ts in times.items() for t in ts)
+        return {'states': {}, 'events': events, 'data': data}
     
     with open(pycontrol_file, 'r') as f:
         for line in f:
@@ -451,13 +703,13 @@ def calculate_frame_from_pycontrol_time(
     return first_rsync_frame + frame_diff
 
 
-def get_available_sleap_datetimes(mouse_id: str) -> List[Tuple[datetime, str]]:
+def get_available_sleap_datetimes(mouse_id: str, root: Optional[Path] = None) -> List[Tuple[datetime, str]]:
     """
     Get all available SLEAP tracking datetimes for a mouse.
-    
+
     Returns list of (datetime, datetime_str) tuples sorted by datetime.
     """
-    sleap_mouse_path = SLEAP_PATH / mouse_id
+    sleap_mouse_path = (root or SLEAP_PATH) / mouse_id
     if not sleap_mouse_path.exists():
         return []
     
@@ -477,8 +729,8 @@ def get_available_sleap_datetimes(mouse_id: str) -> List[Tuple[datetime, str]]:
     return sorted(available, key=lambda x: x[0])
 
 
-def find_closest_sleap_datetime(mouse_id: str, target_datetime_str: str, 
-                                 max_diff_minutes: int = 2) -> Optional[str]:
+def find_closest_sleap_datetime(mouse_id: str, target_datetime_str: str,
+                                 max_diff_minutes: int = 2, root: Optional[Path] = None) -> Optional[str]:
     """
     Find the closest SLEAP tracking datetime to the target datetime.
     
@@ -495,10 +747,10 @@ def find_closest_sleap_datetime(mouse_id: str, target_datetime_str: str,
     except ValueError:
         return None
     
-    available = get_available_sleap_datetimes(mouse_id)
+    available = get_available_sleap_datetimes(mouse_id, root)
     if not available:
         return None
-    
+
     best_match = None
     best_diff = timedelta(days=999)
     
@@ -515,9 +767,10 @@ def find_closest_sleap_datetime(mouse_id: str, target_datetime_str: str,
 
 
 def load_sleap_files(mouse_id: str, tracking_datetime: str, 
-                     use_fuzzy_match: bool = True, 
+                     use_fuzzy_match: bool = True,
                      max_diff_minutes: int = 2,
-                     verbose: bool = False) -> Tuple[Dict[str, pd.DataFrame], Optional[str]]:
+                     verbose: bool = False,
+                     root: Optional[Path] = None) -> Tuple[Dict[str, pd.DataFrame], Optional[str]]:
     """
     Load SLEAP coordinate, head direction, and ROI files.
     
@@ -531,15 +784,15 @@ def load_sleap_files(mouse_id: str, tracking_datetime: str,
     Returns:
         Tuple of (dict of DataFrames, actual_datetime_used)
     """
-    sleap_mouse_path = SLEAP_PATH / mouse_id
-    
+    sleap_mouse_path = (root or SLEAP_PATH) / mouse_id
+
     # First try exact match
     actual_datetime = tracking_datetime
     coords_file = sleap_mouse_path / f"{mouse_id}_{tracking_datetime}.analysis_cleaned_coordinates.csv"
-    
+
     if not coords_file.exists() and use_fuzzy_match:
         # Try fuzzy match
-        matched_datetime = find_closest_sleap_datetime(mouse_id, tracking_datetime, max_diff_minutes)
+        matched_datetime = find_closest_sleap_datetime(mouse_id, tracking_datetime, max_diff_minutes, root)
         if matched_datetime:
             actual_datetime = matched_datetime
             if verbose:
@@ -633,6 +886,27 @@ def resample_data(data: np.ndarray, original_fps: int, target_fps: int) -> np.nd
     return resampled
 
 
+def save_new(path: Path, array: np.ndarray, verbose: bool = True) -> str:
+    """Write unless an identical array is there already; a differing one is written beside.
+
+    Nothing is ever overwritten (user's rule). Returns 'written', 'identical' or the
+    conflict filename.
+    """
+    if path.exists():
+        existing = np.load(path, allow_pickle=True)
+        if existing.shape == array.shape and np.array_equal(existing, array):
+            return "identical"
+        n = 1
+        while (alt := path.with_name(f"{path.stem}.conflict{n}.npy")).exists():
+            n += 1
+        np.save(alt, array)
+        if verbose:
+            print(f"    CONFLICT: {path.name} differs from the file on disk; wrote {alt.name}")
+        return alt.name
+    np.save(path, array)
+    return "written"
+
+
 def create_output_filename(data_type: str, mouse_id: str, date1: str, date2: str, session_idx: int) -> str:
     """
     Create output filename following the naming convention.
@@ -647,10 +921,12 @@ def create_output_filename(data_type: str, mouse_id: str, date1: str, date2: str
     Returns:
         Filename like 'XY_raw_ah08_20250613_20250615_0.npy'
     """
-    # Format dates without dashes
+    # Format dates without dashes; a single-day block carries the same date twice and is
+    # named with it once (recday 'bp01_20240321'), matching recday_registry.block_to_recday.
     date1_fmt = date1.replace("-", "")
     date2_fmt = date2.replace("-", "")
-    return f"{data_type}_raw_{mouse_id}_{date1_fmt}_{date2_fmt}_{session_idx}.npy"
+    dates = date1_fmt if date2_fmt == date1_fmt else f"{date1_fmt}_{date2_fmt}"
+    return f"{data_type}_raw_{mouse_id}_{dates}_{session_idx}.npy"
 
 
 def process_session(
@@ -1239,12 +1515,26 @@ def process_session_by_metadata(
         True if successful, False otherwise
     """
     date1, date2 = ephys_dates
-    
+
     # Extract info from metadata
     meta_date = str(metadata_row['Date'])
     tracking_time = str(metadata_row.get('Tracking', ''))
     behaviour_time = str(metadata_row.get('Behaviour', ''))
-    
+
+    # Object / open-field sessions have no A_on and their SLEAP CSVs live in a different
+    # folder; they are aligned only under --sessions openfield|all and --sync matched.
+    kind = session_kind(metadata_row)
+    is_openfield = kind in ("object", "openfield")
+    if is_openfield and SESSIONS == "task":
+        return False
+    if not is_openfield and SESSIONS == "openfield":
+        return False
+    if is_openfield and SYNC_METHOD != "matched":
+        if verbose:
+            print(f"    {kind} session needs --sync matched (anchored at rsync[0]); skipped")
+        return False
+    sleap_root = SLEAP_PATH_OPENFIELD if is_openfield else SLEAP_PATH
+
     if tracking_time == '-' or tracking_time == 'nan' or not tracking_time:
         if verbose:
             print(f"    No tracking time in metadata")
@@ -1265,7 +1555,7 @@ def process_session_by_metadata(
         print(f"  Processing metadata session: {meta_date} tracking={tracking_str}")
     
     # Find SLEAP files by tracking time (should match exactly or very close)
-    sleap_datetime = find_closest_sleap_datetime(mouse_id, tracking_datetime_str, max_diff_minutes)
+    sleap_datetime = find_closest_sleap_datetime(mouse_id, tracking_datetime_str, max_diff_minutes, sleap_root)
     if sleap_datetime is None:
         if verbose:
             print(f"    No SLEAP files found for tracking time {tracking_datetime_str}")
@@ -1320,22 +1610,51 @@ def process_session_by_metadata(
             print(f"    No sync pulses found in pinstate")
         return False
     
-    # Find closest pycontrol file (use behaviour time if available)
-    pycontrol_file = find_closest_pycontrol_file(mouse_id, tracking_dt, max_diff_minutes=5)
+    # pyControl file. Under --sync matched: the sheet's Behaviour stamp through the registry
+    # (the same mapping trialtimes and the spikes use; 60 s rule), because the nearest file to
+    # the tracking time can be an aborted start -- ah10 2025-06-24 13:58:58 holds one rsync
+    # and sits 25 s from the tracking stamp, the session's file is 13:59:48. Legacy path
+    # unchanged: nearest file within 5 min.
+    pycontrol_file = None
+    if SYNC_METHOD == 'matched':
+        import recday_registry as _rr
+        recday = create_output_filename('X', mouse_id, date1, date2, 0)[6:-6]
+        try:
+            pycontrol_file = _rr.pycontrol_file(recday, session_idx)
+        except Exception as exc:                                   # noqa: BLE001
+            if verbose:
+                print(f"    registry has no pyControl file for {recday} s{session_idx} ({exc}); using nearest")
+            pycontrol_file = None
+        if pycontrol_file is not None and not Path(pycontrol_file).exists():
+            pycontrol_file = None
+    if pycontrol_file is None:
+        pycontrol_file = find_closest_pycontrol_file(mouse_id, tracking_dt, max_diff_minutes=5)
     if pycontrol_file is None:
         if verbose:
             print(f"    No pycontrol file found")
         return False
-    
+    if verbose:
+        print(f"    pyControl: {Path(pycontrol_file).name}")
+
     # Parse pycontrol to get first A_on
     pycontrol_data = parse_pycontrol_file(pycontrol_file)
     first_rsync = find_first_rsync_timestamp(pycontrol_data)
     first_A_on = find_first_A_on_timestamp(pycontrol_data)
     
     if first_A_on is None:
-        if verbose:
-            print(f"    No A_on event in pycontrol")
-        return False
+        if (is_openfield or SYNC_METHOD == 'matched') and first_rsync is not None:
+            # No task: bin 0 is pyControl rsync[0], exactly where extract_neuron_raw's
+            # no-trials branch puts the spikes' origin. Under --sync matched this also
+            # covers sheet-ABCD sessions in which no trial was started (mEC: bp01 03-24
+            # 14:18, 03-25 13:36, 04-03 14:39, bp02 03-26 11:53 -- 10-20 min of free running
+            # on the maze with spikes but, until now, no tracking). Legacy path unchanged.
+            first_A_on = first_rsync
+            if verbose and not is_openfield:
+                print(f"    No A_on event in pycontrol: no trials; bin 0 = rsync[0] as for the spikes")
+        else:
+            if verbose:
+                print(f"    No A_on event in pycontrol")
+            return False
     
     if first_rsync is None:
         first_rsync = 0
@@ -1344,20 +1663,25 @@ def process_session_by_metadata(
     time_to_A_on_ms = first_A_on - first_rsync
     frames_at_video_fps = int(time_to_A_on_ms * VIDEO_FPS / 1000)
     first_A_on_frame = first_up_frame + frames_at_video_fps
-    
+
     if verbose:
         print(f"    First A_on frame: {first_A_on_frame} (rsync_offset={first_up_frame}, A_on_ms={time_to_A_on_ms})")
-    
+
     # Load SLEAP files using the matched datetime (returns tuple: dict, actual_datetime)
-    sleap_data, _ = load_sleap_files(mouse_id, sleap_datetime)
+    sleap_data, _ = load_sleap_files(mouse_id, sleap_datetime, root=sleap_root)
     if not sleap_data:
         if verbose:
             print(f"    Failed to load SLEAP files for {sleap_datetime}")
         return False
-    
+
     # Process and save each data type
     output_dir.mkdir(parents=True, exist_ok=True)
-    
+
+    if SYNC_METHOD == 'matched':
+        return _save_matched(mouse_id, date1, date2, session_idx, output_dir, sleap_data,
+                             pinstate, pycontrol_data, first_A_on, used_fallback_mouse,
+                             pinstate_file.name, verbose)
+
     # Process coordinates (XY) - extract only head_back
     if 'coordinates' in sleap_data:
         coords_df = sleap_data['coordinates']
@@ -1366,15 +1690,15 @@ def process_session_by_metadata(
             coords = coords_df[head_back_cols].values
         else:
             coords = coords_df.values[:, 4:6]
-        
+
         if first_A_on_frame >= 0 and first_A_on_frame < len(coords):
             coords_trimmed = coords[first_A_on_frame:]
             coords_resampled = resample_data(coords_trimmed, VIDEO_FPS, TARGET_FPS)
             filename = create_output_filename('XY', mouse_id, date1, date2, session_idx)
-            np.save(output_dir / filename, coords_resampled)
+            status = save_new(output_dir / filename, coords_resampled, verbose)
             if verbose:
-                print(f"    Saved XY: {filename} (shape: {coords_resampled.shape})")
-    
+                print(f"    Saved XY: {filename} (shape: {coords_resampled.shape}) [{status}]")
+
     # Process head direction (HD)
     if 'head_direction' in sleap_data:
         hd = sleap_data['head_direction'].values
@@ -1382,10 +1706,10 @@ def process_session_by_metadata(
             hd_trimmed = hd[first_A_on_frame:]
             hd_resampled = resample_data(hd_trimmed, VIDEO_FPS, TARGET_FPS)
             filename = create_output_filename('HD', mouse_id, date1, date2, session_idx)
-            np.save(output_dir / filename, hd_resampled)
+            status = save_new(output_dir / filename, hd_resampled, verbose)
             if verbose:
-                print(f"    Saved HD: {filename} (shape: {hd_resampled.shape})")
-    
+                print(f"    Saved HD: {filename} (shape: {hd_resampled.shape}) [{status}]")
+
     # Process ROIs (Locs) - extract only head_back
     if 'rois' in sleap_data:
         rois_df = sleap_data['rois']
@@ -1393,7 +1717,7 @@ def process_session_by_metadata(
             rois = rois_df['head_back'].values
         else:
             rois = rois_df.values[:, 2]
-        
+
         if first_A_on_frame >= 0 and first_A_on_frame < len(rois):
             rois_trimmed = rois[first_A_on_frame:]
             original_samples = len(rois_trimmed)
@@ -1401,16 +1725,96 @@ def process_session_by_metadata(
             indices = np.linspace(0, original_samples - 1, target_samples).astype(int)
             rois_resampled = rois_trimmed[indices]
             filename = create_output_filename('Locs', mouse_id, date1, date2, session_idx)
-            np.save(output_dir / filename, rois_resampled)
+            status = save_new(output_dir / filename, rois_resampled, verbose)
             if verbose:
-                print(f"    Saved Locs: {filename} (shape: {rois_resampled.shape})")
-    
+                print(f"    Saved Locs: {filename} (shape: {rois_resampled.shape}) [{status}]")
+
+    return True
+
+
+def _save_matched(mouse_id, date1, date2, session_idx, output_dir, sleap_data, pinstate,
+                  pycontrol_data, first_A_on, used_fallback_mouse, pinstate_name, verbose) -> bool:
+    """`SYNC_METHOD == 'matched'`: sample XY / HD / Locs at the fitted frame of every 25 ms bin.
+
+    Bin k starts at pyControl time `first_A_on + 25 k` ms and is read at frame
+    `a * t + b` -- XY by linear interpolation, HD and Locs at the nearest frame. Bins run
+    until the last video frame. Fitting fails loudly rather than falling back to the
+    first-edge method, so a session is either on the fitted clock or absent.
+    """
+    if used_fallback_mouse is not None:
+        if verbose:
+            print(f"    matched sync refuses a fallback pinstate ({used_fallback_mouse}): "
+                  "another box's camera line is not this mouse's clock")
+        return False
+    try:
+        clock = fit_frame_clock(rising_edges(pinstate), all_rsync_timestamps(pycontrol_data))
+    except ValueError as exc:
+        if verbose:
+            print(f"    matched sync failed: {exc}")
+        return False
+    if clock['n_matched'] < MIN_MATCHED_FRACTION * clock['n_rsync']:
+        if verbose:
+            print(f"    matched sync refused: only {clock['n_matched']}/{clock['n_rsync']} rsyncs anchored")
+        return False
+    n_frames = min(len(v) for v in sleap_data.values())
+    bin_ms = 1000.0 / TARGET_FPS
+    f_start = float(frames_at(clock, [first_A_on])[0])
+    t_last = ms_at_frame(clock, n_frames - 1)              # pyControl time of the last video frame
+    n_bins = int(np.floor((t_last - first_A_on) / bin_ms))
+    if f_start < 0 or n_bins <= 0:
+        if verbose:
+            print(f"    first A_on maps to frame {f_start:.1f} of {n_frames}; nothing to save")
+        return False
+    t_bins = first_A_on + np.arange(n_bins) * bin_ms
+    frames = frames_at(clock, t_bins)
+    # Bins inside an anchor gap that hides dropped frames (frame_clock.uncertain_gaps) have no
+    # frame index better than +-step, so they are written untracked (XY/HD NaN, Locs 0).
+    uncertain = _frame_clock.uncertain_mask(clock, t_bins)
+    SYNC_QC.append(dict(mouse=mouse_id, recday=create_output_filename('X', mouse_id, date1, date2, 0)[6:-6],
+                        session=session_idx, pinstate=pinstate_name, first_A_on_frame=f_start,
+                        n_bins=n_bins, n_frames=n_frames, n_bins_uncertain=int(uncertain.sum()),
+                        **{k: v for k, v in clock.items() if not k.startswith('anchors')}))
+    if verbose:
+        print(f"    matched clock: {clock['fps']:.4f} fps, {clock['n_matched']}/{clock['n_rsync']} rsyncs "
+              f"anchored ({clock['n_jumps']} jumps, max {clock['max_jump_frames']:.0f} fr, "
+              f"{clock['total_drop_frames']:.0f} fr dropped, {int(uncertain.sum())} uncertain bins), "
+              f"first A_on at frame {f_start:.1f}, {n_bins} bins")
+
+    if 'coordinates' in sleap_data:
+        df = sleap_data['coordinates']
+        cols = ['head_back.x', 'head_back.y']
+        coords = df[cols].values if all(c in df.columns for c in cols) else df.values[:, 4:6]
+        arr = sample_at_frames(coords, frames, 'linear')
+        arr[uncertain] = np.nan
+        name = create_output_filename('XY', mouse_id, date1, date2, session_idx)
+        status = save_new(output_dir / name, arr, verbose)
+        if verbose:
+            print(f"    Saved XY: {name} (shape: {arr.shape}) [{status}]")
+    if 'head_direction' in sleap_data:
+        arr = sample_at_frames(sleap_data['head_direction'].values, frames, 'nearest')
+        arr = arr.astype(float)
+        arr[uncertain] = np.nan
+        name = create_output_filename('HD', mouse_id, date1, date2, session_idx)
+        status = save_new(output_dir / name, arr, verbose)
+        if verbose:
+            print(f"    Saved HD: {name} (shape: {arr.shape}) [{status}]")
+    if 'rois' in sleap_data:
+        df = sleap_data['rois']
+        rois = df['head_back'].values if 'head_back' in df.columns else df.values[:, 2]
+        arr = sample_at_frames(rois, frames, 'nearest')
+        if uncertain.any():
+            arr = arr.astype(object) if arr.dtype.kind in 'OU' else arr
+            arr[uncertain] = 0
+        name = create_output_filename('Locs', mouse_id, date1, date2, session_idx)
+        status = save_new(output_dir / name, arr, verbose)
+        if verbose:
+            print(f"    Saved Locs: {name} (shape: {arr.shape}) [{status}]")
     return True
 
 
 def process_mouse_ephys_folder_by_metadata(
-    mouse_id: str, 
-    ephys_folder: Path, 
+    mouse_id: str,
+    ephys_folder: Path,
     metadata_df: pd.DataFrame,
     verbose: bool = True
 ) -> int:
@@ -1438,11 +1842,12 @@ def process_mouse_ephys_folder_by_metadata(
     start_date = datetime.strptime(date1, "%Y-%m-%d")
     end_date = datetime.strptime(date2, "%Y-%m-%d")
     
-    # Create output directory
+    # Create output directory (one date for a single-day block, as in the recday name)
     date1_fmt = date1.replace("-", "")
     date2_fmt = date2.replace("-", "")
-    output_dir = PROCESSED_PATH / mouse_id / f"{date1_fmt}_{date2_fmt}"
-    
+    output_dir = PROCESSED_PATH / mouse_id / (date1_fmt if date2_fmt == date1_fmt
+                                              else f"{date1_fmt}_{date2_fmt}")
+
     # Find awake sessions in metadata within date range
     awake_sessions = []
     for idx, row in metadata_df.iterrows():
@@ -1562,6 +1967,20 @@ def main_metadata(animals: List[str] = None, ephys_folder_filter: str = None):
     print(f"\n{'='*60}")
     print(f"Pipeline complete! Processed {total_sessions} sessions total.")
     print(f"Output saved to: {PROCESSED_PATH}")
+
+    if SYNC_QC:
+        qc = pd.DataFrame(SYNC_QC)
+        path = PROCESSED_PATH / f"sync_qc_{rr.DATASET}.csv"
+        n = 1
+        while path.exists():
+            path = PROCESSED_PATH / f"sync_qc_{rr.DATASET}.v{n}.csv"
+            n += 1
+        qc.to_csv(path, index=False)
+        print(f"matched-clock QC: {len(qc)} sessions, fps median {qc['fps'].median():.4f} "
+              f"(min {qc['fps'].min():.4f}, max {qc['fps'].max():.4f}), rsyncs anchored median "
+              f"{(qc['n_matched'] / qc['n_rsync']).median():.3f} (min {(qc['n_matched'] / qc['n_rsync']).min():.3f}), "
+              f"sessions with dropped-frame jumps {int((qc['n_jumps'] > 0).sum())}, max jump "
+              f"{qc['max_jump_frames'].max():.0f} frames -> {path}")
 
 
 def validate_alignment(
@@ -1949,18 +2368,35 @@ def run_validation_only(save_json: bool = True) -> Dict:
 if __name__ == "__main__":
     import sys
     import argparse
-    
-    if len(sys.argv) > 1 and sys.argv[1] == '--validate-only':
+
+    # Mode flags are looked for anywhere in argv, not only at argv[1]: with `--dataset mec`
+    # in front, `--metadata` used to be missed and the legacy ephys-time path ran instead
+    # (2026-09-18, mEC; its output was quarantined as data/processed_LEGACY_*).
+    if '--validate-only' in sys.argv:
         run_validation_only()
-    elif len(sys.argv) > 1 and sys.argv[1] == '--metadata':
+    elif '--metadata' in sys.argv:
         # Use metadata-driven processing (recommended for proper session ordering)
         parser = argparse.ArgumentParser(description='SLEAP alignment preprocessing (metadata-driven)')
+        parser.add_argument('--dataset', default=rr.DATASET, choices=sorted(rr.DATASETS),
+                            help='which tree to work on (read before import; default lec)')
         parser.add_argument('--metadata', action='store_true', help='Use metadata-driven processing')
         parser.add_argument('--animals', nargs='+', help='Specific animals to process')
         parser.add_argument('--ephys_folder', type=str, help='Filter by ephys folder name (partial match)')
+        parser.add_argument('--sync', choices=('first_edge', 'matched'), default=SYNC_METHOD,
+                            help="frame clock: first pinstate edge + nominal fps (LEC default) or a "
+                                 "per-session fit of the whole pinstate train (mEC)")
+        parser.add_argument('--sessions', choices=('task', 'openfield', 'all'), default=SESSIONS,
+                            help="which sheet sessions to align (default task, as before)")
+        parser.add_argument('--out-tag', default='',
+                            help="write to data/processed_<tag>/ instead of data/processed/")
         parser.add_argument('--verbose', '-v', action='store_true', help='Verbose output')
         args = parser.parse_args()
-        
+        SYNC_METHOD = args.sync
+        SESSIONS = args.sessions
+        set_output_tag(args.out_tag)
+
         main_metadata(animals=args.animals, ephys_folder_filter=args.ephys_folder)
+    elif '--dataset' in sys.argv:
+        sys.exit("refusing to run the legacy ephys-time path with --dataset; pass --metadata")
     else:
         main()

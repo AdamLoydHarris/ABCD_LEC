@@ -33,6 +33,10 @@ import sys
 from pathlib import Path
 from typing import Dict, List
 
+# `--dataset` must reach recday_registry before it is imported (default: lec, unchanged).
+if "--dataset" in sys.argv:
+    os.environ["TSA_DATASET"] = sys.argv[sys.argv.index("--dataset") + 1]
+
 import numpy as np
 import scipy.stats as st
 from scipy.ndimage import gaussian_filter1d
@@ -42,9 +46,21 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import recday_registry as rr                                          # noqa: E402
 
 PROCESSED_DATA = rr.REPO_ROOT / "data" / "processed_data"
-NEURON_PATH = PROCESSED_DATA / "neuron_raw_mingyutest"
+# Sources. `--neural v2` / `--tracking v2` select the fitted-clock re-derivations (Stage F),
+# `--tag v2` names the output pickles apart; the defaults rebuild exactly what exists.
+_NEURAL = sys.argv[sys.argv.index("--neural") + 1] if "--neural" in sys.argv else "mingyutest"
+_TRACKING = sys.argv[sys.argv.index("--tracking") + 1] if "--tracking" in sys.argv else "processed"
+_TAG = sys.argv[sys.argv.index("--tag") + 1] if "--tag" in sys.argv else ""
+NEURON_PATH = PROCESSED_DATA / ("neuron_raw_mingyutest" if _NEURAL == "mingyutest" else f"neuron_raw_{_NEURAL}")
 TRIALTIMES_PATH = PROCESSED_DATA / "trialtimes_raw_mingyutest"
-TRACKING_PATH = rr.REPO_ROOT / "data" / "processed"
+TRACKING_PATH = rr.REPO_ROOT / "data" / ("processed" if _TRACKING == "processed" else f"processed_{_TRACKING}")
+
+#: Output pickle names. LEC keeps the names every analysis already loads; other datasets
+#: get a suffix so the two can never be confused in the same directory; `--tag` appends.
+_SUFFIX = ("" if rr.DATASET == "lec" else f"_{rr.DATASET}") + (f"_{_TAG}" if _TAG else "")
+OUTPUT_NAMES = {"data_dic": f"data_dic_{rr.DATASET}" + (f"_{_TAG}" if _TAG else ""),
+                "norm_neurons_dic": f"norm_neurons_dic{_SUFFIX}",
+                "session_inds_dic": f"session_inds_dic{_SUFFIX}", "tasks_dic": f"tasks_dic{_SUFFIX}"}
 
 MAX_SESSIONS = 12          # highest plausible number of task sessions in a recday
 NUM_BINS = 90              # normalised bins per state
@@ -139,8 +155,8 @@ def build(recdays: List[str] = None, verbose: bool = True):
     data_dic, norm_neurons_dic, session_inds_dic, tasks_dic = {}, {}, {}, {}
 
     for recday in recdays:
-        mouse, date1, date2 = rr.split_recday(recday)
-        tracking_dir = TRACKING_PATH / mouse / f"{date1}_{date2}"
+        mouse, dates = rr.recday_dates(recday)
+        tracking_dir = TRACKING_PATH / mouse / "_".join(dates)
         data_dic[recday], tasks_dic[recday] = {}, {}
         norm_list, session_inds = [], []
 
@@ -189,12 +205,21 @@ def build(recdays: List[str] = None, verbose: bool = True):
                 elif verbose:
                     print(f"  {recday} s{session}: no {key}")
 
+            # Session type, arena and objects (open-field / object sessions only carry the
+            # last two). Added 2026-09-18; absent from `data_dic_lec.pkl` v1, hence `--tag v2`.
+            if _TAG or rr.DATASET != "lec":
+                kind = _session_type(recday, session)
+                entry["session_type"] = kind
+                if kind in ("object", "openfield"):
+                    entry["arena"] = _arena_info(mouse, recday, session)
+                    entry["objects"] = _objects_for(recday, session) if kind == "object" else []
+
             # Key order the pickle has always had, so a diff against the previous build
             # compares content rather than ordering.
             order = ["Neuron_raw", "Task", "Trial_times", "num_trials", "num_neurons",
                      "Neurons_norm", "Neurons_mean", "Mean_norm", "Smoothed_norm",
                      "Std_err_smooth", "HD_raw", "XY_raw", "Locs_raw",
-                     "location_mapping", "reverse_mapping"]
+                     "location_mapping", "reverse_mapping", "session_type", "arena", "objects"]
             data_dic[recday][session] = {k: entry[k] for k in order if k in entry}
 
         norm_neurons_dic[recday] = norm_list
@@ -206,13 +231,84 @@ def build(recdays: List[str] = None, verbose: bool = True):
     return data_dic, norm_neurons_dic, session_inds_dic, tasks_dic
 
 
-def diff_against_disk(data_dic, verbose: bool = True) -> List[str]:
-    """Recdays whose rebuilt content differs from the `data_dic_lec.pkl` on disk.
+def _session_type(recday: str, session: int) -> str:
+    try:
+        return rr.session_type(recday, session)
+    except (IndexError, KeyError):
+        return "unknown"
+
+
+_ARENA_CACHE: Dict[str, dict] = {}
+
+
+def _arena_info(mouse: str, recday: str = None, session: int = None) -> dict:
+    """`{'name', 'corners_cm', 'side_cm', 'plane_factor', 'units', 'corner_order'}`.
+
+    mEC: from the latest arena calibration (the big field does not move; XY_raw is in its
+    frame, corners at (0,0)-(120,120)). LEC: the box shifts between sessions and the maze
+    affine shows it as a 4 % trapezoid (user + measurement, 2026-09-18), so XY_raw and objects
+    of a session are in that session's own box frame (homography from its clicked corners to
+    the 50 cm square; origin image-top-left, x right, y down), and `corners_maze_cm` gives the
+    same corners in the maze frame of the task sessions. `corners_cm` is None when that
+    session has not been clicked (then XY_raw, if any, is in the maze frame).
+    """
+    import arena_calibration as ac
+    name = "bigfield" if rr.DATASET == "mec" else ("openfield_box2" if mouse in ("ah08", "ly06") else "openfield_box1")
+    if rr.DATASET == "lec":
+        if "lec_corners" not in _ARENA_CACHE:
+            import pandas as pd
+            cands = sorted(PROCESSED_DATA.glob("arena_corners_lec_cm*.csv"))
+            t = pd.read_csv(cands[-1]) if cands else None
+            _ARENA_CACHE["lec_corners"] = t if (t is not None and "x_maze_cm" in t.columns) else None
+        t = _ARENA_CACHE["lec_corners"]
+        sel = t[(t["recday"] == recday) & (t["session"] == session)].sort_values("corner") if t is not None else None
+        if sel is not None and len(sel) == 4:
+            return dict(name=name, corners_cm=sel[["x_cm", "y_cm"]].to_numpy(float).round(3).tolist(),
+                        corners_maze_cm=sel[["x_maze_cm", "y_maze_cm"]].to_numpy(float).round(2).tolist(),
+                        side_cm=float(sel["side_cm"].iloc[0]), plane_factor=None, units="cm",
+                        frame="box (per-session homography from the clicked corners; origin TL, x right, y down)",
+                        corner_order=["TL", "TR", "BR", "BL"])
+        return dict(name=name, corners_cm=None, corners_maze_cm=None, side_cm=None, plane_factor=None, units="cm",
+                    frame="maze (no corners clicked for this session)", corner_order=["TL", "TR", "BR", "BL"])
+    if name not in _ARENA_CACHE:
+        try:
+            cal = ac.latest_calibration(rr.REPO_ROOT, rr.DATASET, name)
+            _ARENA_CACHE[name] = dict(name=name, corners_cm=cal.corners_cm, side_cm=cal.arena_side_cm,
+                                      plane_factor=cal.plane_factor, units="cm", frame="arena",
+                                      corner_order=["TL", "TR", "BR", "BL"])
+        except FileNotFoundError:
+            _ARENA_CACHE[name] = dict(name=name, corners_cm=None, side_cm=None, plane_factor=None, units="cm",
+                                      frame="arena", corner_order=["TL", "TR", "BR", "BL"])
+    return _ARENA_CACHE[name]
+
+
+_OBJECTS_CACHE: Dict[str, "object"] = {}
+
+
+def _objects_for(recday: str, session: int) -> list:
+    """Clicked objects in cm (`object_checks.py` output), or None when not marked yet."""
+    if "table" not in _OBJECTS_CACHE:
+        cands = sorted(PROCESSED_DATA.glob(f"object_positions_{rr.DATASET}_cm*.csv"))
+        import pandas as pd
+        _OBJECTS_CACHE["table"] = pd.read_csv(cands[-1]) if cands else None
+    t = _OBJECTS_CACHE["table"]
+    if t is None:
+        return None
+    sel = t[(t["recday"] == recday) & (t["session"] == session)]
+    if not len(sel):
+        return None
+    return [dict(label=str(r["object_label"]), xy_cm=[float(r["x_cm"]), float(r["y_cm"])],
+                 radius_cm=float(r["radius_cm"])) for _, r in sel.iterrows()]
+
+
+def diff_against_disk(data_dic, verbose: bool = True, against: str = None) -> List[str]:
+    """Recdays whose rebuilt content differs from the pickle on disk (default: this build's own
+    output name; `against` names another, e.g. `data_dic_lec.pkl` for the v1 -> v2 report).
 
     Run before overwriting: every recday that was not meant to change should come back
     identical, which is what makes a change to the remaining ones interpretable.
     """
-    path = PROCESSED_DATA / "data_dic_lec.pkl"
+    path = PROCESSED_DATA / (against if against else f"{OUTPUT_NAMES['data_dic']}.pkl")
     if not path.exists():
         return []
     with open(path, "rb") as f:
@@ -268,32 +364,53 @@ def _same(a, b) -> bool:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--dataset", default=rr.DATASET, choices=sorted(rr.DATASETS),
+                        help="which tree to build (read before import; default lec)")
     parser.add_argument("--recdays", nargs="*", default=None)
+    parser.add_argument("--kind", choices=("merged", "single", "all"), default="all",
+                        help="restrict discovered recdays by kind (mEC has both; LEC merged only)")
+    parser.add_argument("--neural", default=_NEURAL, help="neuron_raw source: mingyutest (default) or v2")
+    parser.add_argument("--tracking", default=_TRACKING, help="tracking source: processed (default) or v2")
+    parser.add_argument("--tag", default=_TAG, help="output name tag, e.g. v2 -> data_dic_lec_v2.pkl")
     parser.add_argument("--check", action="store_true",
                         help="build and diff against the pickles on disk; write nothing")
+    parser.add_argument("--diff-against", default=None,
+                        help="pickle name to diff the build against instead of its own output")
     parser.add_argument("--no-validate", action="store_true",
                         help="skip the registry guards (for debugging a known-bad build)")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
     verbose = not args.quiet
 
-    data_dic, norm_dic, session_dic, tasks_dic = build(args.recdays, verbose=verbose)
-    print(f"\nbuilt {len(data_dic)} recdays")
+    recdays = args.recdays or discover_recdays()
+    if args.kind != "all":
+        recdays = [r for r in recdays if rr.recday_kind(r) == args.kind]
+    data_dic, norm_dic, session_dic, tasks_dic = build(recdays, verbose=verbose)
+    print(f"\nbuilt {len(data_dic)} recdays [{rr.DATASET}; neural={NEURON_PATH.name}, "
+          f"tracking={TRACKING_PATH.name}, out={OUTPUT_NAMES['data_dic']}]")
 
     if not args.no_validate:
         rr.validate_data_dic(data_dic, strict=True, verbose=verbose)
         rr.validate_tasks_against_pycontrol(data_dic, strict=True, verbose=verbose)
 
     if args.check:
-        diff_against_disk(data_dic, verbose=verbose)
+        diff_against_disk(data_dic, verbose=verbose, against=args.diff_against)
         print("\n--check: nothing written")
         return
+    if args.diff_against:
+        diff_against_disk(data_dic, verbose=verbose, against=args.diff_against)
 
-    for name, obj in (("data_dic_lec", data_dic), ("norm_neurons_dic", norm_dic),
-                      ("session_inds_dic", session_dic), ("tasks_dic", tasks_dic)):
-        with open(PROCESSED_DATA / f"{name}.pkl", "wb") as f:
+    # Never overwrite an existing pickle: a rebuild goes beside it with a .vN suffix.
+    for key, obj in (("data_dic", data_dic), ("norm_neurons_dic", norm_dic),
+                     ("session_inds_dic", session_dic), ("tasks_dic", tasks_dic)):
+        path = PROCESSED_DATA / f"{OUTPUT_NAMES[key]}.pkl"
+        n = 1
+        while path.exists():
+            path = PROCESSED_DATA / f"{OUTPUT_NAMES[key]}.v{n}.pkl"
+            n += 1
+        with open(path, "wb") as f:
             pickle.dump(obj, f)
-        print(f"wrote {name}.pkl")
+        print(f"wrote {path.name}")
 
 
 if __name__ == "__main__":
