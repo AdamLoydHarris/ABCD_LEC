@@ -188,3 +188,11 @@ recdays 15–16. The cross-dataset comparison
 Specs 14–17 of `code/slurm_v5/run_queue_v5.py` (lasso α = 0.01 / 0.003 / 0.001, elastic net 0.5 @
 0.003; jobs 3595313–3595316) write `mFC_data/data/figures/alpha<a>_poisson_{l1,en0.5}_v5_past_*`.
 Method, conventions and controls 16–18: see the LEC write-up, section "2026-09-14".
+
+## 2026-09-18 — the sweep landed (PFC past)
+
+Four points completed; table and figure at `mFC_data/data/figures/poisson_sweep/`. The L1 range
+α = 0.003-0.001 brackets the paper on the `all state-tuned` (550-563 vs 489) and 30° (206-231,
+t 4.2-5.4 vs 346, t 4.74) panels, so the L2 α=1 reference arm was over-shrunk; α=0.01 is
+uninterpretable (61 % all-zero fits); the 90° panel fails at every point. Full reading in the LEC
+write-up, section "2026-09-14 ... Results".

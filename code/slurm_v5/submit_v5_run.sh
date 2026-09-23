@@ -20,6 +20,8 @@
 #       12 LEC Poisson past       13 LEC Poisson future
 #      PFC Poisson past regularisation sweep (spec 2's config; glum lasso / elastic net):
 #       14 lasso a=0.01   15 lasso a=0.003   16 lasso a=0.001   17 elastic net l1=0.5 a=0.003
+#      LEC companions, same grid on spec 12's config:
+#       18 lasso a=0.01   19 lasso a=0.003   20 lasso a=0.001   21 elastic net l1=0.5 a=0.003
 # $2 = n_jobs for joblib (defaults to $SLURM_CPUS_PER_TASK)
 #SBATCH --partition=cpu
 #SBATCH --nodes=1

@@ -203,3 +203,16 @@ target** — those came from a 24-lag `_beyond` run. Expect the V5 reimplementat
 **447-481 / 246-287 / 79-92** (`../code/ELASTICNET_V5.md`). The paper's 489 / 329 / 224 is
 not a pass criterion; its 90 degrees panel is not reproduced by any definition readable
 from the deposited code.
+
+> **2026-09-15.** `Figure7` ran on 2026-09-11 under `--allow-errors` and the executed notebook
+> holds 18 error outputs in 23 cells: cell 11 wants an 18-column `MetaData.xlsx - <mouse>.csv`,
+> the deposit ships 12 (+ a 6-column `_sleep` sheet), so the whole sleep chain never ran and
+> Figure7 wrote no figure. See `REPRODUCTION.md` §Figure7. Needs an F7 unblocking edit before
+> the sleep TODO can start.
+
+> **2026-09-15, Figure7 unblocked.** `_preflight/12_make_figure7_inputs.py` builds Figure7's own
+> Input_folder (`replication_run/data/Intermediate_objects_f7/`: symlink overlay + 18-column
+> sheets + a 21-recday day list); edits F7-03/F7-04 added; variant `f7_elgaby_state`. Run order:
+> `12_make_figure7_inputs.py` -> `20_apply_edits.py` -> `90_audit_diff.py` ->
+> `20_apply_edits.py --variant f7_elgaby_state` -> `50_sbatch_notebook.sh "Figure7.ipynb"` (no
+> `--allow-errors`). Jobs 3633602 / 3633603. See `REPRODUCTION.md` §Figure7.

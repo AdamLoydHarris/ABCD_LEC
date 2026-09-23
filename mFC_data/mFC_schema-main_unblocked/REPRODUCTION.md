@@ -493,7 +493,7 @@ Panel statistics are extracted to `../replication_run/logs/figure5_stats.{json,c
 `_preflight/96_extract_figure5_stats.py`, which recomputes them from the saved per-neuron
 arrays (cell 38 only prints them). It reproduces cell 38's printed values exactly.
 
-### `Figure7` — queued
+### `Figure7` — ran 2026-09-11, **not reproduced** (18 of 23 cells errored; verified 2026-09-15)
 
 Needs one real code edit (`F7-02`): cell 76 iterates
 `np.arange(num_phase_place_diffs_)`, a name undefined anywhere in the repo, at module
@@ -513,7 +513,138 @@ where the counts agree (8 == 8) but `All` = 20 against `binned_FR` = 19, i.e. be
 without neural data. **That last one is the dangerous case**: it looks fine and would have
 shifted silently.
 
-*Results to follow.*
+**Outcome (job chained `afterok` Figure5_Figure6, 2026-09-11 01:18, `--allow-errors`, 121 s).**
+The runner printed `0 failed`; the executed notebook has **18 error outputs in 23 code cells**.
+Only cells 1/3/6/39 (imports) and 76 (a loop over an empty dict) ran clean. Figure7 wrote
+**no figure**: the twelve `Rate_changedpolicy*.svg` / `Neuron_Behaviour_regression*.svg`
+stamped 01:15-01:16 come from Figure5_Figure6 cells 93-105, which finished two minutes
+earlier.
+
+Where it breaks, in order:
+
+1. **Cell 11** reads `MetaData.xlsx - <mouse>.csv` with `usecols=np.arange(0,18)`; the
+   deposited per-mouse sheets have **12 columns** (`Date, Maze, Structure_abstract,
+   Structure_no, Structure, Structure_session, Session_time, Reward_time, Entry, Behaviour,
+   Tracking, Ephys`) and the `<mouse>_sleep` sheets 6 (`Date, Sleep_box, Stage, Session_time,
+   Tracking, Ephys`), so `genfromtxt` raises and `MetaData` is never defined. The code
+   executed for the paper read an 18-column sheet that is not in the deposit -- the same
+   class of gap as `Phases_raw2` (deposited code != executed code). Everything downstream
+   (cells 14-35, 61-89: `unhashable type: defaultdict`, `int() ... defaultdict`, `list index
+   out of range`) is this one failure propagating through `rec_dd()` lookups.
+2. **Cell 52** additionally needs `Neuron_ah07_27082023_28082023_7.npy` (a session index the
+   deposit has no neural file for) and cell 59 the `..._Angles_*` files only Figure3 cell 45
+   writes (documented above).
+
+So the sleep / replay results of Figure 7 have **not** been reproduced for PFC, and the
+21-of-25-recday sleep-chain validity above was never exercised. Unblocking needs a declared
+edit that rebuilds the 18-column table from the 12-column task sheet plus the 6-column
+`_sleep` sheet (or rewrites cell 11 to read both), then a re-run. This is the entry point for
+the TODO item "sleep analysis: rerun PFC and run LEC"; LEC has no Figure7 run at all.
+
+#### Unblocked 2026-09-15 — what was fabricated, and on what evidence
+
+Figure7 now reads its own `Input_folder`, `replication_run/data/Intermediate_objects_f7/`
+(`UNBLOCK-F7-01`), built by `_preflight/12_make_figure7_inputs.py`: relative symlinks to every
+mirror file, with the following real files on top. The mirror is untouched.
+
+1. **18-column `MetaData.xlsx - <mouse>.csv` and `- <mouse>_sleep.csv`** (23 sheets). Columns are
+   mapped by header name into the schema `Date, Maze, Structure_abstract, Structure_no, Structure,
+   Structure_session, Session_time, Reward_time, Entry, Behaviour, Tracking, Ephys, Probe, Include,
+   Performance, Notes1, Notes2, Notes3` -- the executed schema, recovered from this lab's own
+   sheets (`data/metadata/MetaData-*.csv`), so the deposited 12 columns sit at indices 0-11 and the
+   six the deposit dropped are filled with `-`. `Include` is `'1'` on every row (his exclusion rule
+   is not recoverable). `Date` is rewritten `DD/MM/YYYY` -> `YYYY-MM-DD`, which cells 14/20 compare
+   against. `Ephys` is de-mangled with the same `repair_ephys` the bookkeeping used, so the tokens
+   equal the `All_session_` entries. Every blank becomes `-` so `remove_empty` cannot shift one
+   column against another (me08 had 7 blank dates against 25 blank `Ephys`). The `_sleep` sheets
+   keep their six real columns plus `Include` and eleven fillers; `ah03_sleep`'s 19 trailing empty
+   columns are dropped. Every sheet is re-parsed exactly as cell 11 does (`genfromtxt`,
+   `usecols=0..17`, `Include` header) before it is accepted.
+2. **`combined_ABCDonly_days.npy` with 21 recdays.** Cell 14 has no `try/except` around
+   `np.where(awake_sessions==first_day2_ses_timestamp)[0][0]`, so the four recdays on synthetic
+   tokens (`ab03_29082023_30082023`, `me08_10092021_11092021`, `me10_14122021_15122021`,
+   `me10_20122021_21122021`; reasons above) abort the notebook there. Figure7's day list therefore
+   drops them; everything else Figure7 loops over derives from it.
+3. **Gates**, all passed: for each of the 21 recdays the sheet's first day-2 task row is in
+   `awake_session_`, its first day-2 sleep row is in `sleep_session_` (the lookups of cells 14/20),
+   `awake ∪ sleep == All_session_` and the shard count equals `len(All_session_)`. Manifest:
+   `logs/figure7_inputs_manifest.json`.
+
+Notebook edits added: **`F7-03`** guards cell 52's `Neuron_` load (his own stored notebook dies
+there on `ah07_27082023_28082023` session 7); **`F7-04`** fixes the leaked name in cell 28's
+`except` branch. `90_audit_diff.py` passes with 22 IDs. Because F7-03 changes which recdays feed
+cell 59 relative to his executed state (12 recdays), the variant `Figure7_elgaby_state.ipynb`
+(`VARIANT-F7S-01`: skip recdays after `ah07_27082023_28082023` in cell 52) reproduces his state and
+both are reported.
+
+Stage labels, replicated from cells 14/20 on the overlay before the run: every recday gets `preX`
+(day-1 morning sleep), `post0..post2` after the day-1 tasks (a repeated task maps to its first
+index), `preX2` for the day-2 morning sleep(s), `post3..post5/6` after the day-2 tasks -- the
+vocabulary of his stored outputs. 21 recdays, 262 sleep sessions (22 `preX`, 24 `preX2`).
+
+Smoke run of cells 0-20 (`executed/Figure7_smoke.ipynb`): 6 cells, 0 errors.
+
+#### Results, 2026-09-15 (jobs 3633602 full / 3633603 variant; 23 cells, 0 error outputs each; 42 min / 5 min)
+
+Cell 89, the headline (close = pairs with 0-180° forward distance, far = 180-360°; one r per sleep
+session from cell 87, sessions with > 10 pairs only):
+
+| | his stored notebook (12 recdays) | ours, his state (`f7_elgaby_state`, 12) | ours, all 21 recdays | paper Fig. 7e (n = 59) |
+|---|---|---|---|---|
+| sleep sessions | 36 | 30 | 37 | 59 |
+| close vs far, paired t (p) | -5.16 (1e-5) | -2.60 (0.015) | -2.81 (0.008) | -5.55 (7e-7) |
+| close r vs 0, t (p) | -3.59 (0.001) | -0.70 (0.49) | -1.15 (0.26) | -5.16 (1e-4) |
+| far r vs 0, t (p) | +3.00 (0.005) | +4.29 (2e-4) | +3.70 (7e-4) | +4.16 (1e-4) |
+| Wilcoxon p | 1.5e-5 | 0.026 | 0.012 | -- |
+| recdays dropped by cell 87 (< 10 pairs) | 13 / 25 | 10 / 21 | 1 / 21 | -- |
+| cell 69 betas t (circular, forward) | -0.85, +1.02 | -1.96, -0.42 | -1.32, -1.34 | -- |
+
+Per-stage Pearson r of forward angle with 250 ms sleep co-activity (cell 82; close arm / far arm):
+
+| stage | his stored | ours, his state | ours, all recdays |
+|---|---|---|---|
+| preX | -0.08 / +0.05 | +0.10 / +0.16 | +0.11 / +0.15 |
+| post0 | -0.08 / +0.07 | +0.06 / +0.14 | +0.12 / +0.13 |
+| post1 | -0.07 / +0.14 | -0.16 / +0.13 | -0.20 / +0.08 |
+| post2 | -0.17 / -0.04 | -0.05 / +0.02 | -0.01 / +0.03 |
+| preX2 | -0.09 / +0.02 | +0.03 / +0.14 | -0.08 / +0.18 |
+| post3 | -0.14 / +0.01 | -0.02 / +0.13 | -0.14 / +0.10 |
+| post4 | -0.18 / +0.14 | -0.10 / +0.21 | -0.12 / +0.20 |
+| post5 | -0.36 / -0.04 | -0.26 / +0.18 | -0.08 / -0.03 |
+
+**The V-shape (Fig. 7d) is not reproduced.** His stored cell 86 (embedded PNG in the deposited
+notebook) is a clean V: 0.040 at 0-45°, 0.014 at 90-180°, rising to 0.032 at 315-360°. Ours, in
+both runs, is a sawtooth (0.049, 0.023, 0.033, 0.050, 0.016, 0.037, 0.027, 0.038 for the eight
+45° bins). The **far arm reproduces** (180-360° r > 0: t +3.7 / +4.3 against his +3.0 and the
+paper's +4.16); the **close arm does not** (0-180° r < 0: t -1.15 / -0.70 against his -3.59 and
+the paper's -5.16). In his run the close-arm r is negative in all eight sleep stages; in ours it
+flips positive in `preX` / `post0` and is weaker elsewhere. Figures written:
+`Forward_distance_vs_corr_Allsleep.svg`, `circular angle_closevsfar_correlation_{bar,scatter}_sessions.svg`,
+`Pair_*_Coregression_bar_preplay*.svg`, `preX*_Pair_distance_vs_coactivity_regression_bar.svg`.
+
+**Where the difference must enter.** The sleep co-activity is computed from his deposited
+`binned_FR_dic` shards, identically. Everything that defines the *pairs* and their *axis* comes
+from our runs of his upstream notebooks, because he deposited none of it: the forward angles
+(`Xneuron_correlations_combined_ABCDonly_Angles_*`, Figure3 cell 45, 10° resolution by his
+design), the anchor assignment and gate (`Spatial_anchoring_Best_anchor_all_*`, `Anchored_bool_*`,
+Figure5_Figure6 cell 76) and the per-neuron anchor lags (`Anchor_trial_Best_shift_time_*`) that
+orient each pair's angle (cell 59: `angle[lag_i - lag_j < 0] = 360 - angle`). Measured on our
+intermediates over the 21 recdays: 3024 co-anchored pairs, anchor-lag ties 1.6 %, flips 49 %, so
+the orientation step is not degenerate; anchored fraction median 0.50 per recday (0.31-0.70);
+forward-angle mass 27 % in the first 45° bin. The pool sizes differ from his: he drops 13 of 25
+recdays in cell 87 for having fewer than 10 co-anchored pairs, we drop 1 of 21 -- our anchoring
+labels more neurons as co-anchored, or assigns anchors differently. The Figure5_Figure6 anchoring
+reproduction was never checked against his stored outputs at the level of anchored fractions or
+lags (nothing in this document does so), and the deposit's `Phases_raw2` 5-bin vs executed 3-bin
+gap already showed that his executed upstream differs from the deposit. That is where the left
+arm went; it cannot be isolated further without his intermediates. The paper reports n = 59
+sessions for Fig. 7d/e against the notebook's stored 36, so the published panel came from a
+different state of the same code (the caption's Gil Costa credit is for the schematics only).
+
+Secondary numbers: cell 61/67 circular- and forward-angle betas are small and not significant in
+his stored run either (t -0.85 / +1.02); ours are -1.3 / -1.3. Cell 74 within-vs-between: not
+reproduced in either of our runs at the paper's level (paper t = -1.80, P = 0.036 one-sided).
+
 
 ### `Figure2_UMAP` — queued, partial by construction
 

@@ -30,7 +30,13 @@ from probeinterface.plotting import plot_probe
 from pathlib import Path
 import sys
 
-
+# NumPy 2 changed the scalar repr: repr(np.int64(0)) is now "np.int64(0)", not "0".
+# probeinterface's write_prb formats channel ids and geometry with repr, and kilosort's
+# io.load_probe reads that file back with exec(contents, {}, metadata) -- empty globals, so
+# "np" is undefined and every sort dies with NameError: name 'np' is not defined. The June
+# 2025 sorts predate the numpy 2.0.2 in this env; they would fail today too.
+# legacy="1.25" restores the old repr. It affects formatting only, never arithmetic.
+np.set_printoptions(legacy="1.25")
 
 
 def get_subject_ephys_metadata(subject_id, dates):

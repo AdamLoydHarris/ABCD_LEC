@@ -30,6 +30,9 @@ UNBLOCKED = os.path.join(ROOT, 'mFC_schema-main_unblocked')
 LOGDIR = os.path.join(ROOT, 'replication_run', 'logs')
 
 IN_MIRROR = os.path.join(ROOT, 'replication_run', 'data', 'Intermediate_objects') + '/'
+# Figure7 reads a symlink overlay of the mirror plus the 18-column sheets the deposit lacks
+# (built by 12_make_figure7_inputs.py); the mirror itself stays as the other notebooks ran on it.
+IN_F7 = os.path.join(ROOT, 'replication_run', 'data', 'Intermediate_objects_f7') + '/'
 OUT_EPHYS = os.path.join(ROOT, 'replication_run', 'Output_folder', 'ephys') + '/'
 OUT_BEHAV = os.path.join(ROOT, 'replication_run', 'Output_folder', 'behaviour') + '/'
 
@@ -74,11 +77,11 @@ def newcell(eid, cls, before, source, reason):
                 reason=reason)
 
 
-def paths(eid, cell, li, lo, out, nb):
+def paths(eid, cell, li, lo, out, nb, inp=None):
     """The standard Input_folder/Output_folder repoint. Two ops, same ID."""
     return [
         rep(eid, 'PATH', cell, li, 'Input_folder',
-            [f"Input_folder = '{IN_MIRROR}'   # UNBLOCK-{eid}"],
+            [f"Input_folder = '{inp or IN_MIRROR}'   # UNBLOCK-{eid}"],
             f'repoint at the writable mirror so the deposit is never written to ({nb})'),
         rep(eid, 'PATH', cell, lo, 'Output_folder',
             [f"Output_folder = '{out}'   # UNBLOCK-{eid}"],
@@ -302,7 +305,10 @@ EDITS: dict[str, list] = {
     ],
 
     'Figure7.ipynb': [
-        *paths('F7-01', 1, 2, 3, OUT_EPHYS, 'Figure7 -- was a Windows path'),
+        *paths('F7-01', 1, 2, 3, OUT_EPHYS,
+               'Figure7 -- was a Windows path. Input_folder is the Figure7 overlay '
+               '(12_make_figure7_inputs.py): symlinks to the mirror plus the 18-column MetaData '
+               'sheets cell 11 needs', inp=IN_F7),
 
         ins_before('F7-02', 'NAMEDEF', 76, 26,
                    'for phase_place_diff in np.arange(num_phase_place_diffs_):',
@@ -314,6 +320,29 @@ EDITS: dict[str, list] = {
                     "    # the value 5 is recovered from HIS OWN stored cell-76 output, which",
                     "    # prints phase_place_diff = 0,1,2,3,4."],
                    'define the undefined loop bound in cell 76'),
+
+        rep('F7-03', 'COVERAGE', 52, 9,
+            "ephys_=np.load(Input_folder+'Neuron_'+mouse_recday+'_'+str(awake_session_ind)+'.npy')",
+            ["        try:   # UNBLOCK-F7-03",
+             "            ephys_=np.load(Input_folder+'Neuron_'+mouse_recday+'_'+\\",
+             "                           str(awake_session_ind)+'.npy')   # UNBLOCK-F7-03",
+             "        except FileNotFoundError:   # UNBLOCK-F7-03",
+             "            print('Not analyzed')   # UNBLOCK-F7-03",
+             "            continue   # UNBLOCK-F7-03"],
+            "guard the only unguarded Neuron_ load in this notebook. Cell 52 iterates every entry "
+            "of awake_session_behaviour_, but Neuron_<rd>_<s>.npy exists only for sessions with "
+            "trialtimes: ah07_27082023_28082023 has 8 entries and 7 files, and on LEC the Object "
+            "and zero-trial sessions have none. HIS OWN stored notebook dies here with the same "
+            "FileNotFoundError, so his Phase_diff_dic covered only the first 12 recdays and cell 59 "
+            "skipped the rest. This edit lets every recday with files contribute; the "
+            "f7_elgaby_state VARIANT reproduces his truncated state for comparison"),
+
+        rep('F7-04', 'BUG', 28, 19,
+            "print('File not found for session: '+str(All_session_ind))",
+            ["            print('File not found for session: '+str(ephys_indx))   # UNBLOCK-F7-04"],
+            "the except branch prints All_session_ind, a name that leaks from cell 24; this "
+            "cell's loop variable is ephys_indx. Reachable whenever a shard is missing, where the "
+            "handler itself would raise NameError instead of skipping the session"),
     ],
 }
 
@@ -455,6 +484,24 @@ VARIANTS['figure3_fast'] = dict(
          '_fast_pearson_r(smoothed_mean_neuronX,smoothed_mean_neuronY_rotated)'),
     ],
     ops=[],
+)
+
+# f7_elgaby_state (2026-09-15): his stored Figure7 died in cell 52 at ah07_27082023_28082023
+# session 7, so Phase_diff_dic held the first 12 recdays only and cell 59 skipped the rest. This
+# reproduces that state under the F7-03 guard by skipping the recdays after it.
+VARIANTS['f7_elgaby_state'] = dict(
+    src='Figure7.ipynb',
+    dst='Figure7_elgaby_state.ipynb',
+    skip_cells=[],
+    ops=[],
+    subs=[
+        ('F7S-01', 52,
+         "    awake_sessions=np.load(Input_folder+'awake_session_behaviour_'+mouse_recday+'.npy')",
+         "    _days=list(np.load(Input_folder+'combined_ABCDonly_days.npy'))\n"
+         "    if _days.index(mouse_recday) > _days.index('ah07_27082023_28082023'):\n"
+         "        continue\n"
+         "    awake_sessions=np.load(Input_folder+'awake_session_behaviour_'+mouse_recday+'.npy')"),
+    ],
 )
 
 # ---------------------------------------------------------------------- application

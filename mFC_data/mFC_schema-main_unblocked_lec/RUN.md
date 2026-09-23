@@ -1,9 +1,15 @@
 # Running `mFC_schema-main_unblocked_lec` -- El-Gaby's notebooks on the LEC data
 
-> **Resume here (2026-09-14).** Everything is done except `Figure5_Figure6`, which is
-> running as job 3591114 (96 h walltime, `--timeout 300000`, ~30 h expected). When it lands,
-> read `logs/run_Figure5_Figure6.log` and fill in the last *pending* row of
-> `LEC_REPRODUCTION.md`; nothing else depends on it.
+> **Resume here (2026-09-16 09:00).** Attempt 2c is **complete**: Figure2 (7.4 h), bridge,
+> Figure3_fast (4.7 h, 0 error cells) and the checks all clean, coherence now over 45 of 50
+> single days (`LEC_REPRODUCTION.md` 6b). Still running / queued, in dependency order
+> (IDs in `logs/JOBS.txt`): **Figure5_Figure6 part1** (3633857, cells 0-17, ~30 h, writes the
+> cell-17 checkpoint) -> **resume** (3633858, `--skip 9,17`, ~2 h) -> **Figure7** (3633768,
+> the other session's sleep port). Attempt 3 of Figure5_Figure6 completed cell 17 (29.9 h) and
+> then died in cell 44 (`UNBLOCK-LEC-07`); see "Figure5_Figure6 in two parts" below for the
+> checkpoint that makes a repeat of that cheap. When the resume lands, read
+> `logs/run_Figure5_Figure6_resume.log` and fill in the *pending* Figure5_Figure6 rows of
+> `LEC_REPRODUCTION.md`.
 >
 > Complete: **attempt 1** (combined recdays; Figure2, bridge, Figure3_fast, both
 > Figure5_Regression models, checks) and **attempt 2b** (the 50-day `3_task_all` cohort;
@@ -109,6 +115,27 @@ Figure5_Figure6 was killed that way with 72 h of walltime still available. Pass 
 bash $P/50_sbatch_notebook.sh "Figure5_Figure6.ipynb" --skip 9 --time 96:00:00 --timeout 300000
 ```
 
+### Figure5_Figure6 in two parts: the cell-17 checkpoint
+
+Cell 17 is ~30 h on LEC and nothing persists it until cell 76; attempt 3 lost it to an
+`IndexError` in cell 44 (now `UNBLOCK-LEC-07`). `40_run_notebook.py` therefore carries two
+Figure5_Figure6 gates (runner-side, no notebook edit, invisible to the audit): after cell 13
+it records the kernel namespace and restores `logs/checkpoints/Figure5_Figure6_after_cell17.pkl`
+if present; after cell 17 it pickles every picklable name cell 17 created. Cell 17's own
+`skip_analysed=True` cannot be used for this because its line 4 re-initialises
+`Spatial_anchoring_dic`, so the resume run must **skip cell 17**:
+
+```bash
+JA=$(bash $P/50_sbatch_notebook.sh "Figure5_Figure6.ipynb" --tag part1 --time 72:00:00 \
+        --skip 9 --only 0-17 --timeout 300000 --out Figure5_Figure6_part1_cells0-17.ipynb | tail -1)
+bash $P/50_sbatch_notebook.sh "Figure5_Figure6.ipynb" --tag resume --dependency afterok:$JA \
+        --skip 9,17 --timeout 300000            # ~1-2 h; re-runnable after any later-cell fix
+```
+
+`--tag` suffixes the job name, sbatch script and `run_*.log` so the two parts do not overwrite
+each other. If a cell after 17 fails, fix it, regenerate, and resubmit only the `resume` job.
+Delete the checkpoint before a part1 run whose inputs (Figure2 outputs) have changed.
+
 ### Figure5_Figure6 on LEC: needs `UNBLOCK-LEC-03` and >24 h
 
 The first submission died in cell 17 after 6.1 h (`NameError: ephys_ses_9_`; see
@@ -153,3 +180,17 @@ undeposited inputs even on PFC.
 > Figure5_Figure6 (3591114).
 > Figure-name collision fixed the same morning (VARIANT-PRO-10; see `LEC_REPRODUCTION.md`).
 > `20_apply_edits.py` variants now support `line_subs` for statements that continue with a backslash.
+
+> **2026-09-15, Figure7.** Now in scope (see `LEC_REPRODUCTION.md` §Figure7). Order:
+> `sbatch ... 12_make_figure7_inputs.py --sleep` (job 3633597, ~27 GB of shards into
+> `Intermediate_objects_f7/`) -> re-run the builder without `--sleep` for the gates and day list ->
+> `20_apply_edits.py` -> `90_audit_diff.py` -> `40_run_notebook.py Figure7.ipynb --only 0-20`
+> (smoke) -> `50_sbatch_notebook.sh "Figure7.ipynb" --dependency afterok:3591213`.
+> **2026-09-18.** Figure5_Figure6 completed via the checkpoint split (part1 3633857, 29.9 h for
+> cell 17; resume 3633858, 2.1 h, 35 cells, EXIT=0) and cell 76 wrote the anchoring files.
+> Figure7's first attempt (3633768) then died at cell 59 on
+> `FileNotFoundError: Anchor_trial_Best_shift_time_<rd>.npy` -- the overlay is a SNAPSHOT of
+> symlinks, and those files did not exist when it was built. **Always re-run
+> `12_make_figure7_inputs.py` after any upstream notebook writes new files, immediately before
+> submitting Figure7**; it is idempotent and only adds missing links (1125 added here).
+> Resubmitted as 3644540.

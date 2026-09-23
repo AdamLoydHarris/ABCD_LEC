@@ -30,6 +30,10 @@ UNBLOCKED = os.path.join(ROOT, 'mFC_schema-main_unblocked_lec')
 LOGDIR = os.path.join(ROOT, 'lec_replication_run', 'logs')
 
 IN_MIRROR = os.path.join(ROOT, 'lec_replication_run', 'data', 'Intermediate_objects') + '/'
+# Figure7 reads a symlink overlay of the mirror plus the sheets, sleep shards and real session
+# arrays the mirror lacks (12_make_figure7_inputs.py --sleep); the mirror keeps its synthetic
+# tokens for the Figure2/3/5 runs.
+IN_F7 = os.path.join(ROOT, 'lec_replication_run', 'data', 'Intermediate_objects_f7') + '/'
 OUT_EPHYS = os.path.join(ROOT, 'lec_replication_run', 'Output_folder', 'ephys') + '/'
 OUT_BEHAV = os.path.join(ROOT, 'lec_replication_run', 'Output_folder', 'behaviour') + '/'
 
@@ -74,11 +78,11 @@ def newcell(eid, cls, before, source, reason):
                 reason=reason)
 
 
-def paths(eid, cell, li, lo, out, nb):
+def paths(eid, cell, li, lo, out, nb, inp=None):
     """The standard Input_folder/Output_folder repoint. Two ops, same ID."""
     return [
         rep(eid, 'PATH', cell, li, 'Input_folder',
-            [f"Input_folder = '{IN_MIRROR}'   # UNBLOCK-{eid}"],
+            [f"Input_folder = '{inp or IN_MIRROR}'   # UNBLOCK-{eid}"],
             f'repoint at the writable mirror so the deposit is never written to ({nb})'),
         rep(eid, 'PATH', cell, lo, 'Output_folder',
             [f"Output_folder = '{out}'   # UNBLOCK-{eid}"],
@@ -340,6 +344,20 @@ EDITS: dict[str, list] = {
                    "lines later fails and continues, so PFC results are unaffected. This guard "
                    "makes the second loop skip exactly the sessions the first loop skips; it "
                    "changes no computed quantity"),
+        ins_before('LEC-07', 'COVERAGE', 44, 61,
+                   'pref_phase=np.where(min_value==overall_min_dist_value)[0][0]',
+                   ["        if np.isnan(overall_min_dist_value):   # UNBLOCK-LEC-07",
+                    "            continue   # UNBLOCK-LEC-07"],
+                   "cell 44 requires an anchor to be supported by >= num_ses_thr = 3 session "
+                   "comparisons (apply_minimum_sesnumber=True). On ly05_20250620_20250623 only "
+                   "three sessions have > 2 trials, so for some neurons every (phase, location) "
+                   "cell of min_value is NaN, np.nanmin returns NaN and the deposited "
+                   "np.where(...)[0][0] indexes an empty array -- IndexError, 30 h after cell 17 "
+                   "finished (attempt 3, 2026-09-15). best_anchor / best_anchor_refses / "
+                   "best_anchor_mindist are pre-filled with NaN at lines 21-23, so skipping the "
+                   "neuron records exactly the 'no supported anchor' outcome the cell already "
+                   "encodes for it; neurons and recdays with data are computed as deposited. PFC "
+                   "never hit this because every PFC recday has >= 4 sessions with > 2 trials"),
     ],
 
     'Figure5_Regression.ipynb': [
@@ -356,7 +374,11 @@ EDITS: dict[str, list] = {
     ],
 
     'Figure7.ipynb': [
-        *paths('F7-01', 1, 2, 3, OUT_EPHYS, 'Figure7 -- was a Windows path'),
+        *paths('F7-01', 1, 2, 3, OUT_EPHYS,
+               'Figure7 -- was a Windows path. Input_folder is the Figure7 overlay '
+               '(12_make_figure7_inputs.py --sleep): symlinks to the mirror plus the 18-column '
+               'MetaData sheets, the binned_FR_dic shards and the real HH-MM-SS session arrays',
+               inp=IN_F7),
 
         ins_before('F7-02', 'NAMEDEF', 76, 26,
                    'for phase_place_diff in np.arange(num_phase_place_diffs_):',
@@ -368,6 +390,62 @@ EDITS: dict[str, list] = {
                     "    # the value 5 is recovered from HIS OWN stored cell-76 output, which",
                     "    # prints phase_place_diff = 0,1,2,3,4."],
                    'define the undefined loop bound in cell 76'),
+
+        rep('F7-03', 'COVERAGE', 52, 9,
+            "ephys_=np.load(Input_folder+'Neuron_'+mouse_recday+'_'+str(awake_session_ind)+'.npy')",
+            ["        try:   # UNBLOCK-F7-03",
+             "            ephys_=np.load(Input_folder+'Neuron_'+mouse_recday+'_'+\\",
+             "                           str(awake_session_ind)+'.npy')   # UNBLOCK-F7-03",
+             "        except FileNotFoundError:   # UNBLOCK-F7-03",
+             "            print('Not analyzed')   # UNBLOCK-F7-03",
+             "            continue   # UNBLOCK-F7-03"],
+            "guard the only unguarded Neuron_ load in this notebook. Cell 52 iterates every entry "
+            "of awake_session_behaviour_, but Neuron_<rd>_<s>.npy exists only for sessions with "
+            "trialtimes: on LEC the Object and zero-trial sessions have none (182 files for 208 "
+            "task sessions), and on PFC ah07_27082023_28082023 has 8 entries and 7 files, where "
+            "HIS OWN stored notebook dies with the same FileNotFoundError"),
+
+        rep('F7-04', 'BUG', 28, 19,
+            "print('File not found for session: '+str(All_session_ind))",
+            ["            print('File not found for session: '+str(ephys_indx))   # UNBLOCK-F7-04"],
+            "the except branch prints All_session_ind, a name that leaks from cell 24; this "
+            "cell's loop variable is ephys_indx. Reachable whenever a shard is missing, where the "
+            "handler itself would raise NameError instead of skipping the session"),
+
+        # ---- LEC port (this copy only)
+        ins('LEC-05', 'COVERAGE', 11, 2, "'ab03':6,'ah07':6}",
+            ["Mice_cohort_dic={'ah08':7,'ah10':7,'ly05':7,'ly06':7,'ly07':7}   # UNBLOCK-LEC-05"],
+            "cell 11 opens MetaData.xlsx - <mouse>.csv for every key of this hardcoded PFC table "
+            "and <mouse>_sleep.csv for every ephys mouse; the LEC Input_folder has sheets for the "
+            "five LEC mice only, so the table is REPLACED rather than extended as in LEC-01/04. "
+            "Mice, Ephys_mice and Mice_withsleep derive from it; cohort is assigned and never read"),
+
+        rep('LEC-08', 'COVERAGE', 61, 18, 'stages=sleep_stages_unique',
+            ["    _days_=np.load(Input_folder+'combined_ABCDonly_days.npy')   # UNBLOCK-LEC-08",
+             "    _groups_=[int(g) if g!='Non_coanchored' else g for g in groups_]   # UNBLOCK-LEC-08",
+             "    sleep_stages_unique=np.asarray([s for s in sleep_stages_unique   # UNBLOCK-LEC-08",
+             "        if all(any(len(Sleepcorr_pairs_dic[g]['Anchored_pairs_sleepcorrs_rebinned']"
+             "[s][rd])>0   # UNBLOCK-LEC-08",
+             "                   for rd in _days_) for g in _groups_)])   # UNBLOCK-LEC-08",
+             "    stages=sleep_stages_unique   # UNBLOCK-LEC-08"],
+            "drop sleep stages for which NO recday yielded a co-anchored pair. The four "
+            "np.hstack calls 45 lines below are unguarded, so an empty stage raises "
+            "'need at least one array to concatenate' -- LEC stage post6 (6 sleep sessions, "
+            "only on the 06-24/25 recdays, which have 7 unique tasks) has zero pairs in all 25 "
+            "recdays and killed the run there. Same class as LEC-02, which guards the other "
+            "unguarded concatenation over an empty LEC cohort. sleep_stages_unique is rebound "
+            "rather than a local filter because cells 72/76/82/87 iterate it and index the "
+            "per-stage arrays built here positionally; filtering only the local name would "
+            "silently misalign them. A stage is kept only if it has pairs for EVERY entry of "
+            "groups_, since the stage loop runs inside the groups_ loop"),
+
+        *[rep('LEC-06', 'COVERAGE', cell, line, f'Date{k}=rec_day{k}[-4:]',
+              [f"    Date{k}=rec_day{k}[:4]+'-'+rec_day{k}[4:6]+'-'+rec_day{k}[6:]   # UNBLOCK-LEC-06"],
+              "PFC recday names carry ddmmyyyy and this slice turns them into the ISO date the "
+              "sheets' Date column holds; LEC recday names are yyyymmdd (ah08_20250613_20250615), "
+              "so the same slice gives '0615-25-20' and the Date lookups of cells 14/20 could never "
+              "match. Four identical lines, one edit")
+          for cell, line, k in ((14, 6, 1), (14, 7, 2), (20, 8, 1), (20, 9, 2))],
     ],
 }
 

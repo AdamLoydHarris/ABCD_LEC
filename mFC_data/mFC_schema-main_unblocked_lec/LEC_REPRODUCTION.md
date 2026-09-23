@@ -58,10 +58,11 @@ required two, so his fold set is a superset of V5's by exactly these four.
 
 ---
 
-## 3. The four LEC-only edits (all `COVERAGE`; none `SCIENCE`)
+## 3. The LEC-only edits (all `COVERAGE`; none `SCIENCE`)
 
-The handoff predicted no notebook changes. Four were needed, all because the deposit
-hardcodes the cohort and session layout it was written against:
+The handoff predicted no notebook changes. Five were needed for Figure2/3/5 (LEC-01 to 04,
+07), all because the deposit hardcodes the cohort, session layout and session counts it was
+written against; LEC-05/06 belong to the Figure7 port and are described in that section.
 
 * **`UNBLOCK-LEC-01`, Figure2 cell 7.** `Mice_maze_dic` lists PFC mice only. Cell 16 does
   `Mice_maze_dic[mouse]` inside a bare `try`, so on LEC every session printed
@@ -93,6 +94,20 @@ hardcodes the cohort and session layout it was written against:
   after 4.9 h (attempt 2a). Adds the LEC mice under an inert cohort number; nothing derived
   from the dict is consumed anywhere.
 
+* **`UNBLOCK-LEC-07`, Figure5_Figure6 cell 44.** The simple-anchor analysis accepts an
+  anchor only if >= 3 session comparisons support it (`num_ses_thr = 3`,
+  `apply_minimum_sesnumber = True`). `ly05_20250620_20250623` has only three sessions with
+  more than two trials, so for some neurons every (phase, location) entry of `min_value` is
+  NaN, `np.nanmin` returns NaN and the deposited `np.where(...)[0][0]` indexes an empty
+  array. Attempt 3 died there **after cell 17 had run for 29.9 h** and before cell 76, the
+  only cell that saves anything. The guard skips the neuron, leaving the NaN the cell
+  pre-fills for exactly this "no supported anchor" case. PFC never reached it: every PFC
+  recday has at least four sessions with more than two trials.
+
+Runner-side, not an edit: because of that loss, `40_run_notebook.py` now checkpoints the
+post-cell-17 kernel state and can restore it with `--skip 17` (see `RUN.md`), so a failure
+in cells 22-104 costs about an hour rather than thirty. Attempt 4 runs as two jobs.
+
 Run-time skips: Figure3_fast `--skip 20` (example cell hardcoding `ah04_01122021`) with
 `--allow-errors` (cells 86-89 cannot produce output on any dataset, see `EDITS.md`);
 Figure5_Figure6 `--skip 9` as on PFC.
@@ -118,9 +133,10 @@ session's `Neuron_raw` bin count, the trialtimes conversion verified end to end)
 | cell 18 residual rounding | fires (ms not multiples of 25) | never fires (bin-index origin) |
 | `Num_trials_` basis | his `Num_trials_dic2` (19 recdays) or `len(trialtimes_)` | the pickle's `num_trials` (== `len(Trial_times)` in 182/182) |
 | one-trial folds | none noted | 4 (section 2) |
-| Figure3 single-day cells (54/59/63/66/68/80/86/87) | ran (55 days) | attempt 1: 6 cells errored under `--allow-errors` because the cohort was empty (cell 68's coherence violin was drawn from an empty array); attempt 2: *pending* |
-| Figure5_Figure6 cell 17 | 53879 s | killed twice before finishing: at 21947 s on `ephys_ses_9_` (fixed by LEC-03), then at exactly 86400 s by **`40_run_notebook.py`'s own `--timeout` default**, not the SLURM walltime (which was 72 h). The third submission passes `--timeout 300000` with a 96 h walltime. Cell 17 scales with neurons x sessions^2: LEC has 2851 neurons (PFC 2182) and up to 11 sessions per recday (PFC 9), so >24 h is expected |
-| Figure7, Figure2_UMAP, Basic/Behavioural | run / partial / run | out of scope (no sleep source; undeposited inputs; PFC raw `Data_folder`) |
+| Figure3 single-day cells (54/59/63/66/68/80/86/87) | ran (55 days) | attempt 1: 6 cells errored under `--allow-errors` because the cohort was empty (cell 68's coherence violin was drawn from an empty array); attempt 2b: all ran, coherence over 35 of 50 days, cell 23 errored on the five days whose first session had no trials (it feeds nothing, `use_peak=False`); **attempt 2c: 0 error cells, coherence over 45 of 50 days**, the 5 exclusions all named by his own "<3 sessions" rule (section 6b) |
+| Figure7 | ran | no longer out of scope: a sleep-box source exists and a separate session built the inputs (`12_make_figure7_inputs.py --sleep`, edits LEC-05/06); queued `afterok` the attempt-2c checks job. See the 2026-09-15 Figure7 section |
+| Figure5_Figure6 | 57091 s total, cell 17 53879 s | three failed attempts: 21947 s into cell 17 on `ephys_ses_9_` (LEC-03); at exactly 86400 s by **`40_run_notebook.py`'s own `--timeout` default**, not the SLURM walltime; then **cell 17 completed in 107489 s (29.9 h)** and cell 44 raised `IndexError` on a 3-session recday (LEC-07) before anything was saved. Attempt 4 runs cells 0-17 and the rest as separate jobs around a runner-side checkpoint. Cell 17 scales with neurons x sessions^2: 2851 neurons (PFC 2182), up to 11 sessions per recday (PFC 9) |
+| Figure2_UMAP, Basic/Behavioural | partial / run | out of scope (undeposited inputs; PFC raw `Data_folder`) |
 | checkpoints vs his stored outputs (`95_checkpoints.py`) | the yardstick | not applicable -- no stored LEC outputs; the yardsticks are section 5 and the PFC / V5 numbers in section 6 |
 
 A reporting caveat found in attempt 1: under `--allow-errors` the runner's summary line says
@@ -206,17 +222,30 @@ single-day work.
 
 With `3_task_all` populated, Figure3's coherence chain runs and
 `Coherence_tuning_violin.svg` has data (31 KB, against 8 KB of empty axes in attempt 1).
-Cell 66, over **35 of the 50 single days**:
+**Attempt 2c (single days = trial-bearing sessions only) is the result to quote**, over
+**45 of the 50 single days**; attempt 2b's 35-day column is kept to show what the layout
+change did.
 
-| quantity | LEC |
-|---|---|
-| mean coherent-tuning proportion | **0.1109** |
-| chance (`1/4**2`) | 0.0625 |
-| per-condition t vs chance | **10.36, 4.93, 4.60, 4.86** |
-| p (Holm-corrected, all 4 significant) | 1.9e-11, 6.3e-5, 6.3e-5, 6.3e-5 |
+| quantity | **2c (45 days)** | 2b (35 days) |
+|---|---|---|
+| mean coherent-tuning proportion | **0.1089** | 0.1109 |
+| chance (`1/4**2`) | 0.0625 | 0.0625 |
+| per-condition t vs chance | **11.45, 6.09, 5.40, 5.53** | 10.36, 4.93, 4.60, 4.86 |
+| p, Holm-corrected (all 4 significant) | **6.8e-14, 8.7e-7, 3.8e-6, 3.8e-6** | 1.9e-11, 6.3e-5, 6.3e-5, 6.3e-5 |
 
 So pairs of LEC neurons hold their relative tuning across tasks well above chance, on every
-task-distance condition.
+task-distance condition, and every t rises with the larger day set.
+
+**What the layout change actually did.** In 2b, 15 of the 50 days produced no coherence
+entry: 5 because cell 29 could not build them (no `Neuron_<day>_0.npy`) and 10 more dropped
+*silently* inside cell 59's bare `except` -- his explicit "Less than 3 sessions" rule fired
+zero times, so nothing in the output said days were missing. In 2c, cell 29 loses no day
+(its 'not found' count falls from 48 to 30, which is exactly the 30 trial-less sessions of
+the *combined* recdays), and the only exclusions are 5 days his own rule names and prints:
+`ah08_20250624`, `ly05_20250620`, `ly05_20250623`, `ly05_20250624`, `ly07_20250625`. Four of
+the five days that crashed in 2b are recovered; `ly07_20250625` has 2 non-repeat sessions and
+is excluded on his criterion, not ours. Trial-less rows were padding the per-session angle
+matrices with NaN and starving his 3-session test.
 
 **Which days are in the 35, and why not 50.** Ten are dropped by cell 59's own inclusion
 rules (`neurons_used_thr = 10`, and its "Less than 3 sessions" test). The other **five are
@@ -234,12 +263,21 @@ Measured, the fix is to build single days from trial-bearing sessions only:
 trial-bearing one on any day, and the only change is `X_all` on those five days -- from an
 empty set (because their session 0 is an Object session carrying my all-zeros `Task`
 placeholder) to a one-member set. It needs no notebook edit but costs another Figure2 and
-Figure3_fast run (~9 h). **User-approved 2026-09-14 and done as attempt 2c**: the exporter's
-`--single-days-only` mode rebuilt the 50 days (touching no combined-name file, so it ran
-while Figure5_Figure6 was executing), and Figure2 -> bridge -> Figure3_fast -> checks were
-queued behind Figure5_Figure6. The 35-day numbers above are attempt 2b's, archived under
-`logs/attempt2b_singleday_allrows/`; attempt 2c's replace them here when they land:
-*pending*.
+Figure3_fast run (~9 h). **User-approved 2026-09-14, run as attempt 2c and complete
+2026-09-16**: the exporter's `--single-days-only` mode rebuilt the 50 days (touching no
+combined-name file, so it ran while Figure5_Figure6 was executing), then Figure2 (7.4 h,
+29 cells, 0 failed), the bridge, Figure3_fast (4.7 h, 27 cells, **0 error cells** -- cell 23
+no longer raises) and the checks. Attempt 2b is archived under
+`logs/attempt2b_singleday_allrows/` and `executed/attempt2b_singleday_allrows/`.
+
+Checks after the attempt-2c re-run, all PASS: 324 regressor columns on 25/25; phase arrays
+correct on 182/182 sessions; mod-3 stripe purity 100 % on both models (Poisson non-zero
+fraction 0.3333, ElasticNet 0.0113); `State_99` within `State_95` on all **75** recdays
+(25 combined + 50 single; 4278 tuned at p<0.05, 2793 at p<0.01, of 8553 neuron-entries);
+`speed_` files 370 = `XY_raw_` files 370; and the pipeline's 360-bin arrays still equal ours
+at r = 1.0000 on all 20,809 neuron-sessions. `92_snapshot_inputs.py` again reports every
+Figure 5 input byte-identical (2151 files) apart from the 25 `State_zmax_strict_` arrays no
+notebook reads, so the section 6 table is unaffected by this re-run too.
 
 ---
 
@@ -275,10 +313,14 @@ LEC-specific ones are also in `EDITS.md` under "Deliberately NOT edited".
 8. **Figure5_Figure6 cell 17's second session loop lacks the `ses_not_found` guard** its
    first loop has (LEC-03). On PFC the `exec`-built name silently held a *different recday's*
    neurons for a missing session; harmless only because the next load fails and continues.
+9. **Figure5_Figure6 cell 44 assumes every neuron has at least one anchor supported by three
+   session comparisons** (LEC-07); a recday with three usable sessions breaks it. More
+   generally the notebook holds 30 h of results in memory until its 76th cell with no
+   intermediate persistence, so any late defect costs the whole run.
 
 **Properties of the deposit, already documented for PFC and equally present here**
 
-9. Figure5_Regression cell 21 reads the preferred phase from the **held-out** session
+10. Figure5_Regression cell 21 reads the preferred phase from the **held-out** session
    (leakage); cell 26 scores a Poisson fit through `np.sum(regressors*coeffs)` -- linear, no
    `exp`, no intercept -- which inflated PFC's panel-2 t about 2.4x versus ElasticNet; hence
    both models are run. On LEC the two models agree on panels 1-2 and disagree on panel 3.
@@ -342,3 +384,44 @@ the intact retrospective correlation files by re-running cells 32/38 of the depo
 (`executed/Figure5_Regression_figs_only.ipynb`), and the prospective ones by the same cells of
 the rebuilt variant (`executed/Figure5_Regression_prospective_figs_only.ipynb`). The full-run
 executed notebooks are unchanged records.
+
+## 2026-09-15 — Figure7 (sleep / offline reactivation) on LEC
+
+"Out of scope (no sleep source)" is stale: the sleep-box arrays exist
+(`data/processed_data/neuron_raw_mingyutest/Neuron_raw_<recday>_sb_<j>.npy`, 289 files, 25 ms
+bins, same QC-unit rows as wake, from `code/preprocessing/extract_neuron_raw.py` with byte-exact
+boundaries from `recording_sessions_in_concat.csv`), and `data/metadata/MetaData-<mouse>.csv`
+already lists every Sleepbox recording with its `Ephys` start time in the 18-column schema his
+cell 11 expects. Each recday is one 30-40 min morning sleep, then a 20 min sleep after every task
+session -- his `preX` / `post<k>` staging.
+
+What `_preflight/12_make_figure7_inputs.py --sleep` writes into Figure7's own Input_folder
+(`lec_replication_run/data/Intermediate_objects_f7/`, a symlink overlay of the mirror, so the
+mirror keeps the synthetic session tokens the Figure2/3/5 runs used):
+
+- `binned_FR_dic_<rd>_<i>` joblib shards (float64, his format) for **every** recording of the
+  25 recdays, `i` = position in chronological concat order over task + sleep, each binned fresh
+  from `spike_times.npy` with origin 0 over the whole recording (his awake shards start at the
+  first ephys sample, not the first A_on). Sleep shards are asserted equal to the existing
+  `_sb_` arrays; task shards' mean rates are reported against the trial-anchored `Neuron_raw_`.
+- `All_session_<rd>` (chronological `HH-MM-SS`, 18-24 entries), `awake_session_<rd>` /
+  `awake_session_behaviour_<rd>` (the task recordings, in session-index order -- asserted equal
+  to `len(Task_data_<rd>)` and increasing), `sleep_session_<rd>`.
+- `MetaData.xlsx - <mouse>.csv` (the lab sheet, ISO-padded dates, `Include = 1`, commas in
+  Notes -> `;`) and `MetaData.xlsx - <mouse>_sleep.csv` (the Sleepbox rows). Sleep recordings
+  annotated in `Notes1` (`error sess`, `chewed through cable`, `additional sb session`; 4-6 per
+  mouse) are **kept**, as his pipeline has no such exclusion (user decision 2026-09-15); they are
+  listed in `logs/figure7_inputs_manifest.json`.
+
+Notebook edits (this copy): `F7-01` (Input_folder = overlay), `F7-03`, `F7-04` as in the PFC copy;
+**`LEC-05`** replaces cell 11's hardcoded PFC mouse table with the five LEC mice; **`LEC-06`**
+rewrites the four `Date1=`/`Date2=` lines of cells 14/20, which slice `ddmmyyyy` recday names into
+ISO dates -- on `yyyymmdd` LEC names the deposited slice gives `0615-25-20`. Audit passes with 28
+IDs.
+
+Figure7 needs `Spatial_anchoring_*` (Figure5_Figure6 cell 76, job 3591114 still in cell 17) and
+the `_Angles_` files (rewritten by the queued Figure3_fast), so the LEC run is chained
+`afterok` the attempt-2c checks job (3591213). Export job 3633597. **Results: pending.**
+*(2026-09-15 15:19: re-pointed to `afterok` the Figure5_Figure6 resume job 3633858, because
+attempt 3 of Figure5_Figure6 failed in cell 44 and its `Spatial_anchoring_*` outputs do not yet
+exist; see section 3, LEC-07.)*

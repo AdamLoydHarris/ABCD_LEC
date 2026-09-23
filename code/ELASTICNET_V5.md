@@ -329,7 +329,40 @@ lasso α ∈ {0.01, 0.003, 0.001}, elastic net l1 = 0.5 at α = 0.003; jobs 3595
 **both** stored readouts (linear `Xβ`, his code; `exp(Xβ + b)`, the paper's LNP) — at α = 0.001 on
 the synthetic they already correlate only 0.988 — and the **all-zero-fit fraction per α**: under an
 L1 penalty a fixed α is a firing-rate filter (control 13's algebra), so n changes with α.
-Results: pending.
+
+### Results — 2026-09-18 (PFC past only; LEC not swept)
+
+All four completed (jobs 3595313–16; 8.9 / 17.3 / 22.8 / 21.4 h), 25/25 recdays each, his
+semantics, linear readout. Table and figure:
+`mFC_data/data/figures/poisson_sweep/poisson_sweep_summary.{csv,svg}`, built by
+`code/poisson_sweep_summary.py` from the per-run directories.
+
+| penalty | all state-tuned n (t) | 30° n (t) | 90° n (t) | all-zero fits | median non-zero betas of 324 |
+|---|---|---|---|---|---|
+| L2 α=1 (spec 2, reference) | 140 (12.09) | 86 (3.34) | 19 (1.24) | 0.1 % | 108 |
+| L1 α=0.01 | 357 (11.94) | 158 (2.44) | 39 (0.85) | 61.0 % | 0 |
+| **L1 α=0.003** | **550 (17.15)** | **231 (4.15)** | 48 (−0.96) | 23.8 % | 11 |
+| L1 α=0.001 | 563 (15.58) | 206 (**5.36**) | 42 (0.78) | 6.0 % | 37 |
+| EN α=0.003, l1=0.5 | 562 (16.56) | 217 (5.15) | 45 (**1.83**) | 11.0 % | 28 |
+| paper ED 8d | 489 (10.7) | 346 (4.74) | 229 (2.81) | — | — |
+
+Reading:
+- **The sweep brackets the paper on the two panels that ever reproduced.** `all state-tuned` runs
+  140 at the L2 reference to 550–563 under L1, straddling the paper's 489; the 30° panel 86 → 206–231
+  against 346, with t 3.34 → 5.36 against 4.74. The reference arm's small n was a shrinkage artefact
+  of α = 1 on raw counts, not a property of the data — the same conclusion the ElasticNet
+  target-scaling ladder reached.
+- **α = 0.01 is too strong to interpret.** 61 % of fits have no non-zero coefficient and the median
+  fit has none, so its larger n comes from the positive-mean gate passing empty fits, not recovered
+  anchoring; its t falls rather than rises. Exclude it.
+- **α = 0.003–0.001 is the usable range**: 6–24 % all-zero, 11–37 non-zero betas of 324 against 108
+  for L2. The elastic net at the same α sits between the two lassos on every panel.
+- **The 90° panel fails at every point**, t −0.96 to 1.83 against 2.81. That now holds across two
+  estimators, two semantics, two target scalings and five penalties — the strongest statement yet
+  that ED 8a/8d's 90° panel is not reproducible from the deposit.
+
+Not established: which α is *right*. The sweep shows only that α = 1 was over-shrunk and that the
+30° gap closes under milder L1. Linear and exp readouts agree to 3–4 decimals at every point.
 
 ## 2026-09-15 — spec 13 landed: the V5 2×2×2 is complete
 
@@ -346,3 +379,13 @@ his semantics, linear readout (the exp readout agrees to 3 decimals):
 Same ordering as his own code run both ways (`LEC_REPRODUCTION.md` 2026-09-15: 541 → 367 at
 30°, 153 → 98 at 90°): retrospective anchoring carries the non-zero-lag effect in LEC;
 prospective matches or beats it only at lag 0.
+
+### LEC companion sweep — queued 2026-09-22
+
+Specs 18-21 in `run_queue_v5.py` mirror 14-17 on spec 12's configuration (LEC, Poisson, past,
+his criterion + positive-mean gate, `repro_` prefix), same grid: lasso α ∈ {0.01, 0.003, 0.001}
+and elastic net l1 = 0.5 at α = 0.003. Jobs 3652265-68. Walltimes are sized per point rather than
+uniformly — LEC runs ≈ 2.1× PFC on this fit (spec 12 5.9 h vs spec 2 2.8 h), so the PFC sweep's
+8.9-22.8 h becomes ≈ 19-48 h and a blanket 36 h would have killed the two smallest α.
+Summarise with `python code/poisson_sweep_summary.py --region lec`, which discovers the run
+directories by name and writes `data/figures/poisson_sweep/poisson_sweep_summary.{csv,svg}`.

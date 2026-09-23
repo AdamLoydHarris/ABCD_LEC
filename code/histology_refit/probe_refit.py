@@ -66,8 +66,10 @@ import pandas as pd
 
 CODE_DIR = Path(__file__).resolve().parents[1]
 REPO_ROOT = Path(__file__).resolve().parents[2]
-BRAINREG_DIR = REPO_ROOT / "data" / "preprocessed_data" / "brainreg"
-FIGURE_DIR = REPO_ROOT / "data" / "figures" / "probe_refit"
+# Dataset switch (2026-09-19): TSA_BRAINREG_DIR points these modules at another tree's
+# brainreg folder (the mEC brains live in Taskspace_abstraction_mEC). Unset = LEC, unchanged.
+BRAINREG_DIR = Path(os.environ.get("TSA_BRAINREG_DIR", REPO_ROOT / "data" / "preprocessed_data" / "brainreg"))
+FIGURE_DIR = BRAINREG_DIR.parents[1] / "figures" / "probe_refit"
 ATLAS_NAME = "allen_mouse_10um"
 
 

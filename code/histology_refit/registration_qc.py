@@ -49,6 +49,7 @@ Runs in the ``histology`` conda env, from ``code/histology_refit/``.
 from __future__ import annotations
 
 import json
+import os
 import hashlib
 from pathlib import Path
 from datetime import datetime
@@ -71,9 +72,14 @@ from brainreg_probe import plot_util_func as puf
 # constants and paths
 # --------------------------------------------------------------------------
 
-FIGURE_DIR = pr.REPO_ROOT / "data" / "figures" / "registration_qc"
 BRAINREG_DIR = pr.BRAINREG_DIR
+FIGURE_DIR = BRAINREG_DIR.parents[1] / "figures" / "registration_qc"      # == REPO_ROOT/data/figures/... for LEC
 ATLAS_NAME = pr.ATLAS_NAME
+#: Dataset (2026-09-19): 'lec' keeps every number and figure as before; 'mec' (the cohort-7 brains,
+#: TSA_HIST_DATASET=mec, set by run_registration_qc --dataset) adds the medial-entorhinal region
+#: groups and lets the global checks run without a probe fit (registration-only).
+DATASET = os.environ.get("TSA_HIST_DATASET", "lec")
+TARGET_GROUP = {"lec": "ENTl", "mec": "ENTm"}[DATASET]
 ATLAS_25_DIR = Path.home() / ".brainglobe" / "allen_mouse_25um_v1.2"
 
 VOX_MM = 0.01
@@ -293,6 +299,9 @@ def layer_id_sets() -> dict[str, np.ndarray]:
             groups["CA_HPF"].append(i)
         elif a.startswith("VIS"):
             groups["VIS"].append(i)
+        if DATASET == "mec" and (a in ("PAR", "PRE", "POST") or a[:3] in ("PAR", "PRE") and a[3:4].isdigit()
+                                 or a.startswith("POST") and a[4:5].isdigit()):
+            groups.setdefault("PaS_PrS_POST", []).append(i)     # para-, pre-, postsubiculum and their layers
         if FIBRE_TRACTS_ID in tree["id2anc"][i] and i != FIBRE_TRACTS_ID:
             groups["fibre"].append(i)
     groups["fibre"].append(FIBRE_TRACTS_ID)
@@ -304,6 +313,17 @@ GROUP_COLOURS = {
     "ENTl_sup": "#7fb8e0", "ENTl_deep": "#1f4e9a", "ENTm": "#ff7f0e",
     "SUB_ProS": "#9467bd", "CA_HPF": "#2ca02c", "fibre": "#f0e442", "VIS": "#8c8c8c",
 }
+if DATASET == "mec":
+    GROUP_COLOURS["PaS_PrS_POST"] = "#d62728"
+
+#: Region groups for the L/R asymmetry and volume-ratio tables; the mEC set adds the
+#: parahippocampal neighbours of the medial entorhinal target.
+_ASYM_GROUPS_EXTRA = {"PAR": lambda a: a == "PAR" or (a.startswith("PAR") and a[3:4].isdigit()),
+                      "PRE": lambda a: a == "PRE" or (a.startswith("PRE") and a[3:4].isdigit()),
+                      "POST": lambda a: a == "POST" or (a.startswith("POST") and a[4:5].isdigit()),
+                      "RSP": lambda a: a.startswith("RSP")} if DATASET == "mec" else {}
+_ASYM_JUDGED = {"lec": ["ENTl", "ENTm", "SUB", "ProS", "CA1", "DG"],
+                "mec": ["ENTm", "ENTl", "PAR", "PRE", "POST", "SUB", "ProS", "CA1", "DG"]}[DATASET]
 
 
 def atlas25() -> dict:
@@ -503,8 +523,49 @@ def contact_coords(subject: str) -> pd.DataFrame:
     return out.reset_index(drop=True)
 
 
+def has_fit(subject: str) -> bool:
+    return (pr.subject_dir(subject) / "ProbeA_fit_params.json").exists()
+
+
+def _registration_only_geometry(subject: str) -> dict:
+    """Pseudo-geometry when no probe fit exists (registration-only, 2026-09-19).
+
+    The global checks and the overview figures need a page and a slab to look at; without a
+    fit they take the centroid of the TARGET_GROUP labels (ENTm for mEC) on the implant side
+    (hemisphere value 1), read from every 10th atlas page. bank_min/max span +-500 um around
+    it. Never used for labels; `fit_method` says so in every figure title.
+    """
+    p = subject_paths(subject)
+    shape = volume_shape(p["atlas"])
+    ids = layer_id_sets()[TARGET_GROUP]
+    acc, n = np.zeros(3), 0
+    for i in range(0, shape[0], 10):
+        a = read_page(p["atlas"], i)
+        m = np.isin(a, ids)
+        if not m.any():
+            continue
+        h = read_page(p["hemispheres"], i)
+        m &= h == 1
+        if not m.any():
+            continue
+        jj, kk = np.nonzero(m)
+        acc += np.array([i * len(jj), jj.sum(), kk.sum()]); n += len(jj)
+    centre = acc / max(n, 1) if n else np.asarray(shape) / 2.0
+    half = 50
+    lo = int(max(np.floor(centre[0]) - half - SLAB_MARGIN_VOX, 0))
+    hi = int(min(np.ceil(centre[0]) + half + SLAB_MARGIN_VOX + 1, shape[0]))
+    return {"entry": None, "tip": None, "shape": shape,
+            "bank_min": centre - half, "bank_max": centre + half, "bank_centre": centre, "slab": (lo, hi),
+            "fit_method": f"none (registration only; pseudo-bank at the {TARGET_GROUP} centroid, {n} vox)"}
+
+
 def track_geometry(subject: str) -> dict:
     """Entry, tip, bank bounding box and the AP slab used by every local check."""
+    if not has_fit(subject):
+        key = (subject, "pseudo_geometry")
+        if key not in _PAGE_CACHE:
+            _PAGE_CACHE[key] = _registration_only_geometry(subject)
+        return _PAGE_CACHE[key]
     fit = pr.load_fit(subject)
     plane, params = pr.split_fit(fit)
     entry, tip = pt.fit_to_track(plane, params)
@@ -696,7 +757,7 @@ def lr_asymmetry(subject: str) -> pd.DataFrame:
     groups = {"ENTl": lambda a: a.startswith("ENTl"), "ENTm": lambda a: a.startswith("ENTm"),
               "SUB": lambda a: a == "SUB", "ProS": lambda a: a == "ProS", "CA1": lambda a: a == "CA1",
               "CA3": lambda a: a == "CA3", "DG": lambda a: a.startswith("DG"),
-              "VIS": lambda a: a.startswith("VIS"), "TH": lambda a: a == "TH"}
+              "VIS": lambda a: a.startswith("VIS"), "TH": lambda a: a == "TH", **_ASYM_GROUPS_EXTRA}
     rows = []
     for g, fn in groups.items():
         sel = vol[vol["acronym"].map(fn)]
@@ -716,6 +777,10 @@ def hemisphere_check(subject: str) -> dict:
     a = read_page(p["atlas"], page) > 0
     k1 = np.nonzero(a & (h == 1))[1].mean() if (a & (h == 1)).any() else np.nan
     k2 = np.nonzero(a & (h == 2))[1].mean() if (a & (h == 2)).any() else np.nan
+    if not has_fit(subject):
+        # registration only: the label convention can be checked, the bank cannot
+        return {"mean_k_value1": float(k1), "mean_k_value2": float(k2), "width_k": int(h.shape[1]),
+                "value1_is_high_k": bool(k1 > k2), "bank_frac_in_value1": np.nan, "ok": bool(k1 > k2)}
     df = contacts(subject)
     b = df[df["bank"]]
     c = np.clip(b[[f"downsample_coords.{x}" for x in "ijk"]].values.astype(int), 0, np.asarray(geo["shape"]) - 1)
@@ -750,7 +815,8 @@ def region_volume_ratios(subject: str) -> pd.DataFrame:
               "CA1": lambda a: a == "CA1", "SUB": lambda a: a == "SUB", "ProS": lambda a: a == "ProS",
               "DG": lambda a: a.startswith("DG-") or a == "DG", "TH": lambda a: a == "TH",
               "VIS": lambda a: a.startswith("VIS"), "SC": lambda a: a.startswith("SC"),
-              "CB": lambda a: a in ("VERM", "HEM", "CBN") or a.startswith("CUL") or a.startswith("SIM")}
+              "CB": lambda a: a in ("VERM", "HEM", "CBN") or a.startswith("CUL") or a.startswith("SIM"),
+              **_ASYM_GROUPS_EXTRA}
     rows = []
     for g, fn in groups.items():
         acros = [a for a in vol["acronym"] if isinstance(a, str) and fn(a) and a in atlas.index]
@@ -797,6 +863,10 @@ def lr_profile(subject: str, *, stride: int = PROFILE_STRIDE) -> pd.DataFrame:
         L = int((M & (h[q] == 1)).sum()); R = int((M & (h[q] == 2)).sum())
         aL = int((Aq & (h[q] == 1)).sum()); aR = int((Aq & (h[q] == 2)).sum())
         rows_t = np.where(M.sum(axis=1) > 150)[0]
+        if not len(rows_t):
+            # no row of the tissue mask is 1.5 mm wide on this page (bp02/bp04 2026-09-20: a page
+            # at the block face); nothing to measure, skip rather than divide by nothing
+            continue
         rows_t = rows_t[: max(len(rows_t) // 2, 1)]
         res = []
         for j in rows_t:
@@ -1924,6 +1994,155 @@ def _update_global(subject: str, arrays: dict, **scalars) -> None:
     np.savez(p, **cur)
 
 
+def void_report(profile: pd.DataFrame, *, excess: float = 0.10) -> dict:
+    """Where the warped-label footprint claims tissue that is not there (2026-09-19, for bp01).
+
+    From `lr_profile`: pages where the label L/R asymmetry exceeds the image L/R asymmetry by
+    more than `excess` are the void on the LEFT (labels present, tissue missing); the opposite
+    sign is a void on the right. Returns the AP extent (mm) and page count per side and the
+    largest excess. Empty for an intact brain (BP2/BP3 expected).
+    """
+    d = profile.dropna(subset=["img_asym", "lab_asym"])
+    diff = (d["lab_asym"] - d["img_asym"]).to_numpy()
+    out = {}
+    for side, sel in (("left", diff > excess), ("right", diff < -excess)):
+        pages = d["i"].to_numpy()[sel]
+        out[f"{side}_n_pages"] = int(sel.sum())
+        out[f"{side}_ap_mm"] = [float(pages.min() * VOX_MM), float(pages.max() * VOX_MM)] if sel.any() else None
+    out["max_excess"] = float(np.abs(diff).max()) if len(diff) else np.nan
+    out["side"] = "left" if out["left_n_pages"] > out["right_n_pages"] else ("right" if out["right_n_pages"] else "-")
+    return out
+
+
+def region_tissue_coverage(subject: str, *, stride: int = 5, save: bool = True) -> pd.DataFrame:
+    """Fraction of each registered region's voxels that lie on tissue, per hemisphere (2026-09-19).
+
+    Reads every `stride`-th page (50 um): tissue mask from the green channel (module threshold),
+    labels from the registered atlas, hemisphere from the hemisphere map. A region whose left
+    coverage is far below its right coverage is one the registration placed into missing tissue
+    -- the direct answer to "did bp01's left mEC survive". Written to
+    `<brainreg>/<subject>/region_tissue_coverage.csv` (versioned).
+    """
+    p = subject_paths(subject)
+    groups = layer_id_sets()
+    names = [g for g in ("ENTm", "ENTl", "PaS_PrS_POST", "SUB_ProS", "CA_HPF", "VIS") if g in groups]
+    thr = tissue_threshold(subject)
+    n = n_pages(p["green"])
+    tot = {(g, h): 0 for g in names for h in (1, 2)}
+    cov = {(g, h): 0 for g in names for h in (1, 2)}
+    for i in range(0, n, stride):
+        a = read_page(p["atlas"], i)
+        if not (a > 0).any():
+            continue
+        m = tissue_mask(read_page(p["green"], i), thr, largest=False)
+        hp = read_page(p["hemispheres"], i)
+        for g in names:
+            lab = np.isin(a, groups[g])
+            if not lab.any():
+                continue
+            for h in (1, 2):
+                sel = lab & (hp == h)
+                tot[(g, h)] += int(sel.sum()); cov[(g, h)] += int((sel & m).sum())
+    rows = []
+    for g in names:
+        r = {"subject": subject, "group": g}
+        for h, side in ((1, "left"), (2, "right")):
+            r[f"{side}_label_mm3"] = tot[(g, h)] * stride * VOX_MM ** 3
+            r[f"{side}_coverage"] = cov[(g, h)] / tot[(g, h)] if tot[(g, h)] else np.nan
+        r["coverage_asym"] = (r["left_coverage"] - r["right_coverage"]) if np.isfinite(r["left_coverage"]) and np.isfinite(r["right_coverage"]) else np.nan
+        rows.append(r)
+    df = pd.DataFrame(rows)
+    if save:
+        out = pr.subject_dir(subject) / "region_tissue_coverage.csv"
+        k = 0
+        while (q := out.with_name(out.stem + (f".v{k}" if k else "") + ".csv")).exists():
+            k += 1
+        df.to_csv(q, index=False)
+    return df
+
+
+def global_jacobian(subject: str, *, chunk: int = 40) -> dict:
+    """det J statistics over the whole brain (2026-09-19), page chunks with one guard page each
+    side; `jacobian_check` covers only the slab around the bank."""
+    p = subject_paths(subject)
+    A, _ = load_affine(subject)
+    shape = volume_shape(p["atlas"])
+    hist = np.zeros(400); edges = np.linspace(-1, 3, 401)
+    n_total = n_neg = n_out = 0
+    neg_side = {1: 0, 2: 0}
+    neg_pages = []
+    for lo in range(0, shape[0], chunk):
+        hi = min(lo + chunk, shape[0])
+        lo2, hi2 = max(lo - 1, 0), min(hi + 1, shape[0])
+        atl = read_pages(p["atlas"], lo, hi) > 0
+        if not atl.any():
+            continue
+        dfield = def_slab(subject, lo2, hi2)
+        off = lo - lo2
+        detj = jacobian_det(dfield)[off: off + (hi - lo)]
+        n = min(detj.shape[0], atl.shape[0])
+        detj, atl = detj[:n], atl[:n]
+        vals = detj[atl]
+        hist += np.histogram(np.clip(vals, -1, 3), edges)[0]
+        n_total += len(vals); n_neg += int((vals < 0).sum())
+        n_out += int(((vals < QC_THRESHOLDS["detj_range"][0]) | (vals > QC_THRESHOLDS["detj_range"][1])).sum())
+        neg = (detj < 0) & atl
+        if neg.any():
+            # where the folds are: pages and hemisphere (1 = left = implant side)
+            hp = read_pages(p["hemispheres"], lo, lo + n)
+            for side in (1, 2):
+                neg_side[side] += int((neg & (hp == side)).sum())
+            neg_pages.extend((lo + np.nonzero(neg.any(axis=(1, 2)))[0]).tolist())
+        for k in [k for k in _SLAB_CACHE if k[0] == subject]:
+            del _SLAB_CACHE[k]
+    cdf = np.cumsum(hist) / max(hist.sum(), 1)
+    centres = (edges[:-1] + edges[1:]) / 2
+    q = lambda f: float(centres[np.searchsorted(cdf, f)])
+    return {"gdetj_median": q(0.5), "gdetj_p05": q(0.05), "gdetj_p95": q(0.95),
+            "gdetj_frac_outside": n_out / max(n_total, 1), "gdetj_n_negative": n_neg,
+            "gdetj_neg_left": neg_side[1], "gdetj_neg_right": neg_side[2],
+            "gdetj_neg_ap_mm": [float(min(neg_pages) * VOX_MM), float(max(neg_pages) * VOX_MM)] if neg_pages else None,
+            "gdetj_neg_n_pages": len(neg_pages),
+            "gdetj_n_voxels": n_total, "det_affine": float(np.linalg.det(A[:3, :3]))}
+
+
+def plot_mec_zoom(subject: str, *, half_um: float = 2500.0, save: bool = True):
+    """The mEC analogue of `plot_lec_zoom` without a fit: coronal pages through the medial
+    entorhinal centroid (implant side) and 0.6 mm either way, full width so both hemispheres are
+    seen, green + group contours; plus a sagittal through the centroid's k."""
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+    p = subject_paths(subject)
+    groups = layer_id_sets()
+    geo = track_geometry(subject)
+    c = np.round(geo["bank_centre"]).astype(int)
+    shape = geo["shape"]
+    levels = [int(np.clip(c[0] + d, 0, shape[0] - 1)) for d in (-60, 0, 60)]
+    fig, axes = plt.subplots(1, 4, figsize=(22, 6))
+    for ax, lv in zip(axes[:3], levels):
+        g = read_page(p["green"], lv); a = read_page(p["atlas"], lv)
+        ax.imshow(puf.adjust_contrast(g), cmap="gray", origin="upper")
+        _contours(ax, a, groups, lw=1.0)
+        H, W = g.shape
+        half = int(half_um / VOX_UM)
+        ax.set_xlim(max(c[2] - half, 0), min(c[2] + half, W - 1)); ax.set_ylim(min(c[1] + half, H - 1), max(c[1] - half, 0))
+        ax.set_xticks([]); ax.set_yticks([]); ax.set_title(f"coronal i={lv}", fontsize=9)
+    step = 4
+    g4 = read_pages(p["green"], 0, shape[0], step); a4 = read_pages(p["atlas"], 0, shape[0], step)
+    ax = axes[3]
+    ax.imshow(puf.adjust_contrast(g4[:, :, c[2]].T), cmap="gray", origin="upper", aspect=1 / step)
+    _contours(ax, a4[:, :, c[2]].T, groups, lw=0.9)
+    ax.set_xticks([]); ax.set_yticks([]); ax.set_title(f"sagittal k={c[2]} (every {step}th page)", fontsize=9)
+    axes[0].legend(handles=[Line2D([], [], color=col, label=g) for g, col in GROUP_COLOURS.items()], loc="lower left", fontsize=7, framealpha=0.6)
+    fig.suptitle(f"{subject} — medial entorhinal zoom, contours from the registered atlas ({geo['fit_method']}); "
+                 "image-left = RIGHT hemisphere", fontsize=11)
+    fig.tight_layout(rect=(0, 0, 1, 0.95))
+    if save:
+        FIGURE_DIR.mkdir(parents=True, exist_ok=True)
+        fig.savefig(FIGURE_DIR / f"{subject}_mec_zoom.png", dpi=130, bbox_inches="tight")
+    return fig
+
+
 def global_checks(subject: str, *, verbose: bool = True) -> dict:
     """Phase 0/B numbers for one mouse (no figures)."""
     A, _ = load_affine(subject)
@@ -1937,7 +2156,7 @@ def global_checks(subject: str, *, verbose: bool = True) -> dict:
     cont = section_continuity(subject)
     tile = tile_artefact(subject)
     ratios = region_volume_ratios(subject)
-    lec = asym[asym["group"].isin(["ENTl", "ENTm", "SUB", "ProS", "CA1", "DG"])]
+    lec = asym[asym["group"].isin(_ASYM_JUDGED)]
     out = {"subject": subject, **{f"affine_{k}": v for k, v in dec.items() if k != "translation_mm"},
            "convention_ok": conv["convention_ok"], "field_resid_mm": conv["median_resid_mm_A"],
            **{k: trunc[k] for k in ("tissue_ap_mm", "missing_anterior_mm", "missing_posterior_mm", "mode",
@@ -1949,6 +2168,9 @@ def global_checks(subject: str, *, verbose: bool = True) -> dict:
            "ratio_ENTl": float(ratios.set_index("group")["ratio"].get("ENTl", np.nan)),
            "ratio_CA1": float(ratios.set_index("group")["ratio"].get("CA1", np.nan)),
            "ratio_expected": float(ratios["expected_1_over_detA"].iloc[0]) if len(ratios) else np.nan}
+    if DATASET == "mec":
+        out["ratio_ENTm"] = float(ratios.set_index("group")["ratio"].get("ENTm", np.nan))
+        out.update({f"void_{k}": v for k, v in void_report(prof).items()})
     flags = []
     if not (QC_THRESHOLDS["affine_scale"][0] <= min(dec["scale_ap"], dec["scale_dv"], dec["scale_lr"]) and
             max(dec["scale_ap"], dec["scale_dv"], dec["scale_lr"]) <= QC_THRESHOLDS["affine_scale"][1]):

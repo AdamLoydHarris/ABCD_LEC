@@ -21,7 +21,7 @@ the diff and the IDs listed here.
   archived first, to `replication_run/logs/deposit_outputs/` -- they are the numeric
   reference for verification.
 
-## The 20 edits
+## The 22 edits
 
 | ID | Notebook | Where | Class | Why strictly necessary |
 |---|---|---|---|---|
@@ -43,8 +43,10 @@ the diff and the IDs listed here.
 | `UNBLOCK-F5-01` | Figure5_Regression.ipynb | cell 1 L4, cell 1 L5 | `PATH` | repoint at the writable mirror so the deposit is never written to (Figure5_Regression) **/** repoint + add the TRAILING SLASH: every save is string concatenation (Output_folder+'x.svg'), so without it figures land as a sibling file |
 | `UNBLOCK-F5-02` | Figure5_Regression.ipynb | cell 32 L6 | `FLAG` | cells 15/21/26 write the 12-lag no-suffix files but cells 32/38 read the 24-lag _beyond files, so as deposited the plotted histogram comes from a run the earlier cells never produce. 12 lags is what the Methods specify |
 | `UNBLOCK-F5-03` | Figure5_Regression.ipynb | cell 38 L6 | `FLAG` | same as F5-02, for the plotting cell |
-| `UNBLOCK-F7-01` | Figure7.ipynb | cell 1 L2, cell 1 L3 | `PATH` | repoint at the writable mirror so the deposit is never written to (Figure7 -- was a Windows path) **/** repoint + add the TRAILING SLASH: every save is string concatenation (Output_folder+'x.svg'), so without it figures land as a sibling file |
+| `UNBLOCK-F7-01` | Figure7.ipynb | cell 1 L2, cell 1 L3 | `PATH` | repoint at the writable mirror so the deposit is never written to (Figure7 -- was a Windows path. Input_folder is the Figure7 overlay (12_make_figure7_inputs.py): symlinks to the mirror plus the 18-column MetaData sheets cell 11 needs) **/** repoint + add the TRAILING SLASH: every save is string concatenation (Output_folder+'x.svg'), so without it figures land as a sibling file |
 | `UNBLOCK-F7-02` | Figure7.ipynb | cell 76 L26 | `NAMEDEF` | define the undefined loop bound in cell 76 |
+| `UNBLOCK-F7-03` | Figure7.ipynb | cell 52 L9 | `COVERAGE` | guard the only unguarded Neuron_ load in this notebook. Cell 52 iterates every entry of awake_session_behaviour_, but Neuron_<rd>_<s>.npy exists only for sessions with trialtimes: ah07_27082023_28082023 has 8 entries and 7 files, and on LEC the Object and zero-trial sessions have none. HIS OWN stored notebook dies here with the same FileNotFoundError, so his Phase_diff_dic covered only the first 12 recdays and cell 59 skipped the rest. This edit lets every recday with files contribute; the f7_elgaby_state VARIANT reproduces his truncated state for comparison |
+| `UNBLOCK-F7-04` | Figure7.ipynb | cell 28 L19 | `BUG` | the except branch prints All_session_ind, a name that leaks from cell 24; this cell's loop variable is ephys_indx. Reachable whenever a shard is missing, where the handler itself would raise NameError instead of skipping the session |
 
 **Exactly one edit changes a scientific quantity: `F2-03`.**
 

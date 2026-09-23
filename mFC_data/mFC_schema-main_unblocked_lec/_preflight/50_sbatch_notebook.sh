@@ -23,17 +23,22 @@ NB="${1:?usage: 50_sbatch_notebook.sh <Notebook.ipynb> [--dependency spec] [runn
 shift || true
 
 DEP=""
-WALL="24:00:00"   # --time <spec> overrides; LEC Figure5_Figure6 needs ~48:00:00 (cell 17 alone ~22 h)
+WALL="24:00:00"   # --time <spec> overrides; LEC Figure5_Figure6 cell 17 alone is ~30 h
+TAG=""            # --tag <name> suffixes the job name, sbatch script and run log, so two
+                  # submissions of the same notebook (e.g. a cells-0-17 run and its resume) do
+                  # not overwrite each other's run_<BASE>.log
 ARGS=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --dependency) DEP="$2"; shift 2 ;;
         --time) WALL="$2"; shift 2 ;;
+        --tag) TAG="$2"; shift 2 ;;
         *) ARGS+=("$1"); shift ;;
     esac
 done
 
 BASE="$(basename "$NB" .ipynb | tr ' ' '_')"
+[ -n "$TAG" ] && BASE="${BASE}_${TAG}"
 mkdir -p "$LOG"
 SCRIPT="$LOG/sbatch_${BASE}.sh"
 

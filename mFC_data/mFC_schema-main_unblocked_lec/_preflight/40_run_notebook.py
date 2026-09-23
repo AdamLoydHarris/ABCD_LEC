@@ -29,6 +29,20 @@ UNBLOCKED = os.path.join(ROOT, 'mFC_schema-main_unblocked_lec')
 LOGDIR = os.path.join(ROOT, 'lec_replication_run', 'logs')
 EXECUTED = os.path.join(ROOT, 'lec_replication_run', 'executed')
 
+# Figure5_Figure6 checkpoint (LEC). Cell 17 is a ~30 h computation whose only persistence
+# is cell 76, near the end; attempt 3 lost it to an IndexError in cell 44. Cell 17 has a
+# deposited resume path (skip_analysed=True skips recdays already in Spatial_anchoring_dic)
+# but re-initialises that dict on its own line 4, so a restore cannot survive the cell.
+# Runner-side instead, with NO notebook edit:
+#   * the gate after cell 13 records the kernel namespace and, if a checkpoint exists,
+#     restores it -- to be used together with `--skip 17`;
+#   * the gate after cell 17 pickles every picklable name cell 17 created (the dict, its
+#     module-level parameters such as num_lags, and leaked loop variables alike, so later
+#     cells see exactly the post-cell-17 kernel state).
+# Run cells 0-17 as one job (`--only 0-17`), then the rest as `--skip 9,17`; a failure in
+# cells 22-104 then costs about an hour, not thirty.
+_F5F6_CKPT = os.path.join(LOGDIR, 'checkpoints', 'Figure5_Figure6_after_cell17.pkl')
+
 # Gates run in the live kernel AFTER the cell whose source CONTAINS the given marker.
 #
 # Keyed by source text, not by index, on purpose: UNBLOCK-F2-06 inserts a cell at index
@@ -36,6 +50,59 @@ EXECUTED = os.path.join(ROOT, 'lec_replication_run', 'executed')
 # gate for "deposit cell 46" would fire after unblocked cell 46 -- the wrong cell, and
 # usually an empty spacer, so it would fail silently rather than loudly.
 GATES = {
+    ('Figure5_Figure6.ipynb', '##Defining Task grid'): (
+        "import os as _os, pickle as _pk\n"
+        f"_ckpt_path = {_F5F6_CKPT!r}\n"
+        "_pre17_names = set(globals().keys())\n"
+        "if _os.path.exists(_ckpt_path):\n"
+        "    with open(_ckpt_path, 'rb') as _f:\n"
+        "        _ckpt = _pk.load(_f)\n"
+        "    globals().update(_ckpt)\n"
+        "    assert 'Spatial_anchoring_dic' in _ckpt, 'checkpoint lacks Spatial_anchoring_dic'\n"
+        "    print(f'GATE ok: RESTORED {len(_ckpt)} names from cell-17 checkpoint '\n"
+        "          f'({len(Spatial_anchoring_dic[\"rotation_angle_mat\"])} recdays); '\n"
+        "          'cell 17 must be skipped in this run (--skip 17) or its line 4 re-initialises the dict')\n"
+        "else:\n"
+        "    print('GATE ok: no cell-17 checkpoint present; cell 17 computes from scratch')",
+        'record the pre-cell-17 namespace; restore the cell-17 checkpoint if one exists '
+        '(use with --skip 17)'),
+    ('Figure5_Figure6.ipynb', '###Is spatial anchoring conserved across tasks?'): (
+        # This gate must NEVER raise: a gate exception makes the runner return 2 and abort,
+        # which would throw away the 30 h of cell 17 this checkpoint exists to protect. Every
+        # failure path prints a WARNING and lets the notebook carry on to cell 76.
+        "import os as _os, pickle as _pk, types as _types\n"
+        f"_ckpt_path = {_F5F6_CKPT!r}\n"
+        "try:\n"
+        "    _os.makedirs(_os.path.dirname(_ckpt_path), exist_ok=True)\n"
+        "    _pre = globals().get('_pre17_names', set())\n"
+        "    _new, _unpicklable = {}, []\n"
+        "    for _n, _v in list(globals().items()):\n"
+        "        if _n in _pre or _n.startswith('_'):\n"
+        "            continue\n"
+        "        if isinstance(_v, (_types.ModuleType, _types.FunctionType, _types.BuiltinFunctionType, type)):\n"
+        "            continue\n"
+        "        try:\n"
+        "            _pk.dumps(_v, protocol=4)\n"
+        "            _new[_n] = _v\n"
+        "        except Exception:\n"
+        "            _unpicklable.append(_n)\n"
+        "    if 'Spatial_anchoring_dic' not in _new and 'Spatial_anchoring_dic' in globals():\n"
+        "        _new['Spatial_anchoring_dic'] = globals()['Spatial_anchoring_dic']   # in _pre if a stale checkpoint was restored\n"
+        "    _tmp = _ckpt_path + '.partial'\n"
+        "    with open(_tmp, 'wb') as _f:\n"
+        "        _pk.dump(_new, _f, protocol=4)\n"
+        "    _os.replace(_tmp, _ckpt_path)\n"
+        "    _nrd = len(Spatial_anchoring_dic['rotation_angle_mat']) if 'Spatial_anchoring_dic' in globals() else -1\n"
+        "    print(f'GATE ok: checkpointed {len(_new)} names, {_os.path.getsize(_ckpt_path)/1e9:.2f} GB -> {_ckpt_path}')\n"
+        "    print(f'       Spatial_anchoring_dic covers {_nrd} recdays' + ('' if _nrd == 25 else '  <-- WARNING: expected 25'))\n"
+        "    if _unpicklable:\n"
+        "        print(f'       not picklable (skipped): {_unpicklable}')\n"
+        "    if 'Spatial_anchoring_dic' not in _new:\n"
+        "        print('       WARNING: Spatial_anchoring_dic was NOT captured -- resume will not work')\n"
+        "except Exception as _e:\n"
+        "    print(f'GATE WARNING: checkpoint failed ({type(_e).__name__}: {_e}); the notebook continues')",
+        'checkpoint the post-cell-17 kernel state (Spatial_anchoring_dic and every other name '
+        'cell 17 created) so a later-cell failure does not cost the 30 h again; warn-only'),
     ('Figure2.ipynb', '###calculating speed'): (
         "assert len(speed_dic) > 0, 'speed_dic is EMPTY after cell 16'\n"
         "_n = sum(len(v) for v in speed_dic.values())\n"

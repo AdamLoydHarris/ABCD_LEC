@@ -17,7 +17,11 @@
  15. PFC  Poisson     past     lasso, alpha=0.003
  16. PFC  Poisson     past     lasso, alpha=0.001
  17. PFC  Poisson     past     elastic net (l1_ratio=0.5), alpha=0.003
-     (14-17 are explicit-only and need glum; `alpha<a>_` prefix + `_l1` / `_en0.5` tag)
+ 18. LEC  Poisson     past     spec 12 with a LASSO penalty, alpha=0.01      (`repro_` prefix)
+ 19. LEC  Poisson     past     lasso, alpha=0.003
+ 20. LEC  Poisson     past     lasso, alpha=0.001
+ 21. LEC  Poisson     past     elastic net (l1_ratio=0.5), alpha=0.003
+     (14-21 are explicit-only and need glum; `alpha<a>_` prefix + `_l1` / `_en0.5` tag)
 
 A Poisson run stores BOTH readouts (linear Xb, his code; exp(Xb+b), the paper's LNP) from one fit.
 
@@ -98,6 +102,8 @@ def run(v5, data_dic, mouse_recdays, data_root, kind, direction, min_trials, pre
 
 #: spec -> (poisson_alpha, poisson_l1_ratio); l1_ratio 1.0 = lasso, 0.5 = elastic net
 POISSON_SWEEP = {'14': (0.01, 1.0), '15': (0.003, 1.0), '16': (0.001, 1.0), '17': (0.003, 0.5)}
+#: the LEC companions, same grid on spec 12's config so the two regions are comparable point-for-point
+POISSON_SWEEP_LEC = {'18': (0.01, 1.0), '19': (0.003, 1.0), '20': (0.001, 1.0), '21': (0.003, 0.5)}
 
 
 def pfc_jobs():
@@ -175,10 +181,18 @@ def lec_jobs():
     if ONLY is None or '13' in ONLY:
         run(v5, dd, mrs, data_root, 'reproduction', 'future', 1, 'test', 'repro_', True, True,
             regions=regions)
+    # 18-21: spec 12 with a glum lasso / elastic-net penalty, the same grid as PFC's 14-17.
+    # Explicit-only, as for the PFC sweep.
+    for spec, (alpha, l1) in POISSON_SWEEP_LEC.items():
+        if ONLY is not None and spec in ONLY:
+            run(v5, dd, mrs, data_root, 'reproduction', 'past', 1, 'test', 'repro_', True, True,
+                regions=regions, poisson_alpha=alpha, poisson_l1_ratio=l1,
+                poisson_solver='glum')
 
 
 if ONLY is None or any(j in ONLY for j in ('1', '2', '5', '6', '7', *POISSON_SWEEP)):
     pfc_jobs()
-if ONLY is None or any(j in ONLY for j in ('3', '4', '8', '9', '10', '11', '12', '13')):
+if ONLY is None or any(j in ONLY for j in ('3', '4', '8', '9', '10', '11', '12', '13',
+                                           *POISSON_SWEEP_LEC)):
     lec_jobs()
 print(f'\nQUEUE DONE in {hrs()}')
