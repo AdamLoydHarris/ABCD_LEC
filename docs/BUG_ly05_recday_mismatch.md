@@ -279,3 +279,49 @@ q20 = len(np.load('data/preprocessed/ephys/ly05/'
 print(n, q18, q20)      # was 91 109 91  (named 18-19, contained 20-23)
                         # now 109 109 91
 ```
+
+## 11. Addendum, 2026-10-02: the rsync caches were shifted too, and never fixed
+
+The 2026-09-01 fix re-extracted the neural arrays by date. It did not regenerate the untracked
+legacy rsync caches in `data/processed_data/ephys_rsync_mingyutest/`, and those carry the same
+position-based pairing error. Every one of the 8 caches named for a ly05_20250620_20250623 task
+recording is the raw ProbeB TTL train of the 06-18/19 recording in the same session slot. Each
+matches all of its pulses at offset 0:
+
+| 06-20/23 session | cache file | is the TTL train of | pulses |
+|---|---|---|---|
+| s0 | 2025-06-20_11-00-38 | 2025-06-18_12-18-16 | 483/483 |
+| s1 | 2025-06-20_12-58-31 | 2025-06-18_13-34-06 | 488/488 |
+| s2 | 2025-06-20_14-33-00 | 2025-06-18_14-52-48 | 525/525 |
+| s3 | 2025-06-20_15-51-57 | 2025-06-18_16-12-49 | 481/481 |
+| s4 | 2025-06-23_12-38-01 | 2025-06-19_12-28-25 | 461/461 |
+| s5 | 2025-06-23_13-51-50 | 2025-06-19_13-46-13 | 494/494 |
+| s6 | 2025-06-23_15-31-55 | 2025-06-19_15-41-28 | 516/516 |
+| s7 | 2025-06-23_16-45-40 | 2025-06-19_16-57-48 | 507/507 |
+
+The pulses are ly05's and ly06's own 06-18/19 pyControl rsync: 240/241 and 243/246 pulses
+matched for s0, and so on. `extract_neuron_raw.py --sync legacy` anchors each session on the
+cache's first pulse. So in `data_dic_lec.pkl` the correct 06-20/23 spikes are placed using
+another day's first sync pulse, which makes them late by +5.33, +2.55, +10.37, +10.26, -9.98,
++38.58, +8.20 and +5.71 s for s0-s7. Every v1-based result includes this. The behaviour probes
+confirm it: the reward PSTH peaks at +5.5, +10.5 and -9.5 s where testable.
+
+The rest of the legacy caches were matched the same way. All 195 are raw **ProbeB** TTL trains,
+whatever probe the mouse was on, and all except these 8 come from their own recording. The
+script also took the first TTL pulse as pyControl's first rsync. Together that accounts for
+every smaller v1 offset:
+
+| mouse | probe | v1 error from the caches |
+|---|---|---|
+| ah10 | ProbeB | none |
+| ly07 | ProbeC | under 1 ms; ProbeB and ProbeC counters agree in its sessions |
+| ah08 | ProbeD | -121 to +38 ms: the ProbeD-ProbeB counter offset, plus the partner's first pulse |
+| ly06 | mostly ProbeC | +61 to +171 ms: the partner's first pulse, about 64 ms, plus the counter offset |
+| ly05 | ProbeA | 0.1-0.46 s: the ProbeA-ProbeB counter offset, 3,000-9,400 samples |
+
+Fixed in v4 (`docs/handoff/SPIKE_CLOCK_V4.md`). There, each mouse's own probe stream is paired
+with its own pyControl train by pairwise offset. v1 is left as is (user decision 2026-10-01).
+
+The cache check is reproducible: take each cache's pulse train and histogram its pairwise
+differences, at 1 ms, against every TTL stream of every June recording. A cache's source is the
+stream whose peak holds every pulse.

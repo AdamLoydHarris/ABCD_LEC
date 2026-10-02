@@ -637,6 +637,11 @@ def compute_distance_to_rewards(trial_times, speed_array):
 
     max_time = int(reward_times[-1])
     T = len(speed_array)
+    # Untracked bins (NaN speed: frame-clock gaps since 2026-09-18, tracking gaps > 2 s under
+    # cleaning v2) accrue no distance. Without this one NaN poisons the accumulator to the end
+    # of the session and both distance regressors with it (measured 2026-09-23). Same values
+    # and summation order for a NaN-free session.
+    speed_array = np.nan_to_num(np.asarray(speed_array, dtype=float))
     cumulative_distance = np.zeros(T + 1)
     for i in range(1, T + 1):
         cumulative_distance[i] = cumulative_distance[i - 1] + speed_array[i - 1]
@@ -661,12 +666,43 @@ def compute_distance_to_rewards(trial_times, speed_array):
 
 
 def smooth_and_calculate_scalar_derivatives(data_matrix, sigma=3, dt=1.0):
-    x_smoothed = gaussian_filter1d(data_matrix[:, 0], sigma=sigma)
-    y_smoothed = gaussian_filter1d(data_matrix[:, 1], sigma=sigma)
+    """Gaussian-smoothed x, y and their speed and acceleration (per bin).
+
+    NaN in XY_raw (untracked bins) would spread through the Gaussian kernel into 25 NaN speed
+    bins per sample and then be zeroed into the reference bin downstream (measured 2026-09-23).
+    When NaN is present the track is interpolated linearly for the smoothing only, and speed /
+    acceleration are set back to NaN inside every gap plus the kernel's reach (4 sigma, scipy's
+    truncate), positions inside the gap itself. A NaN-free session takes the original path
+    unchanged.
+    """
+    x, y = data_matrix[:, 0], data_matrix[:, 1]
+    nan = np.isnan(x) | np.isnan(y)
+    has_nan = bool(nan.any())
+    if has_nan:
+        idx = np.arange(len(x))
+        ok = ~nan
+        if ok.sum() >= 2:
+            x = np.interp(idx, idx[ok], x[ok])
+            y = np.interp(idx, idx[ok], y[ok])
+        else:
+            x, y = np.nan_to_num(x), np.nan_to_num(y)
+    x_smoothed = gaussian_filter1d(x, sigma=sigma)
+    y_smoothed = gaussian_filter1d(y, sigma=sigma)
     vx = np.gradient(x_smoothed, dt)
     vy = np.gradient(y_smoothed, dt)
     speed = np.sqrt(vx**2 + vy**2)
     acceleration = np.gradient(speed, dt)
+    if has_nan:
+        reach = int(np.ceil(4.0 * sigma)) + 1                 # kernel half-width + the gradient's stencil
+        spread = np.convolve(nan.astype(float), np.ones(2 * reach + 1), mode='same') > 0
+        speed = speed.copy()
+        acceleration = acceleration.copy()
+        speed[spread] = np.nan
+        acceleration[spread] = np.nan
+        x_smoothed = x_smoothed.copy()
+        y_smoothed = y_smoothed.copy()
+        x_smoothed[nan] = np.nan
+        y_smoothed[nan] = np.nan
     return np.column_stack((x_smoothed, y_smoothed, speed, acceleration))
 
 
@@ -1090,8 +1126,8 @@ _DOWNSAMPLE_AGG = {
     'FR':                      'sum',      # spike counts -- the whole point
     'Locs':                    'mode',     # node id 1..21 (>21 = edge); a mean is meaningless
     'HD':                      'circmean',
-    'Speed':                   'mean',
-    'Acc':                     'mean',
+    'Speed':                   'nanmean',  # NaN = untracked bin; identical to 'mean' without NaN
+    'Acc':                     'nanmean',
     'State':                   'mode',     # 0..3 categorical
     'GP_binned':               'mode',     # ordinal bin index, used as a one-hot index
     'GP_dist_continuous':      'nanmean',
@@ -1837,6 +1873,14 @@ def run_glm_analysis(mouse_recdays, data_dic,
                     padded = np.zeros(len(nf), dtype=bool)
                     padded[:len(vtm)] = vtm.astype(bool)
                     nf = nf & padded
+            # Untracked bins (NaN speed, see smooth_and_calculate_scalar_derivatives) leave the
+            # fit rather than being zero-coded as the reference decile (user, 2026-09-23). No-op
+            # for a NaN-free session.
+            _nan_speed = ~np.isfinite(np.asarray(prep['Speed'], dtype=float))
+            if _nan_speed.any():
+                print(f"  session {session}: {int((_nan_speed & nf).sum())} untracked bins "
+                      f"(NaN speed) dropped from the fit")
+                nf = nf & ~_nan_speed
             all_speed.append(prep['Speed'][nf])
             all_acc.append(prep['Acc'][nf])
             all_tf.append(prep['time_from_reward'][nf])

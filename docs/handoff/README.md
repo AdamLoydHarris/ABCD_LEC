@@ -3,6 +3,12 @@
 **Written 2026-09-02.** Self-contained: a fresh session should be able to pick up any work
 package from these documents without prior conversation.
 
+> **Start here for the TODO list:** [`TODO_HANDOFF.md`](TODO_HANDOFF.md) (2026-09-29) — state of every
+> item in `TODO.txt`, live cluster jobs, where results are, and next steps.
+>
+> **Event-locked ramps (Tsao 2018 / Kanter 2025) in LEC vs PFC:** [`EVENT_KERNELS_HANDOFF.md`](EVENT_KERNELS_HANDOFF.md)
+> (2026-10-02) — decisions, data facts, code map, status and the next steps of milestone M1.
+
 - `W0_foundation.md` — gates, HD fix, shared module. **Complete.**
 - `W1_production_glm.md` — the cross-validated GLM. **Complete; a refit is running.**
 - `W2_headline_rescores.md` — re-score cached headlines by region. **Not started.**
@@ -298,3 +304,36 @@ recipe (CPU partition, 220 GB); bp02 and bp04 clean, bp01's left hemisphere fold
 (a third of it is missing). The raw AP data give a brain surface per recording
 (`probe_surface_from_raw.py`): bp01 tip ~3.5 mm deep, bp04 ~3.7 mm, bp02 >= 4.0 mm. Probe track
 and unit labels not yet done.
+
+**2026-09-23, tracking QC and cleaning v2** (`code/preprocessing/TRACKING_QC.md`; snapshot tag
+`pre-tracking-qc-2026-09-23`): the mEC maze-2 affine was degenerate, so `XY_raw`/`HD_raw` in
+`data_dic_mec.pkl` are unusable for bp02 and bp04 (x pinned to a 1.3 cm band, HD at +-90);
+`data_dic_mec_v2.pkl` (geometry fixed, `data/processed_v2/` in the mEC tree) is the replacement.
+The v1 SLEAP cleaning deletes 12-62 % (median per mouse) of the moving frames on mEC maze sessions;
+the LEC maze CSVs never had it applied. A per-session QC over every SLEAP session of both datasets
+(`tracking_qc_{lec,mec}_{maze,arena}.csv`) found a skeleton-shift artefact (whole skeleton one
+segment back for 1-6 frames, 0.6 % of frames on the maze-2 model) and that 75-95 % of low-score
+frames sit on the trajectory. Cleaning v2 (`tracking_clean.py`: physical rules in cm, conditional
+confidence gate, 2 s straight bridging, per-frame provenance flags, ROI labels from the cleaned
+track) is gated by 29 synthetic controls and byte-identity of `--clean v1` on all 102 mEC sessions.
+Pickles: `data_dic_mec_v2.pkl` (geometry fix only) and `data_dic_mec_v3.pkl` (fix + cleaning v2) in
+the mEC tree, `data_dic_lec_v3.pkl` here (built 2026-09-23, rebuilt 2026-09-28 after the SLEAP h5 of
+ly06 2025-06-19 15:40 turned out to be a truncated copy of an intact file in the backup, and again
+the same day once the user had tracked ah10's 2025-06-25 15:18 object session, the last LEC session
+without SLEAP output; the earlier builds are kept as `*.missing_*.pkl`); `load_data_dic(version='v3')`. GLM V3 gained a
+NaN path (untracked bins leave the fit; the distance accumulator no longer poisons a session),
+pinned by control 12 (13/13 pass) and the v2 equivalence control. ah10's ABCDE week (incl. the
+18 July sessions tracked with `ah10_18July_ABCDE.slp`) has tracking through `maze_v2/` and
+`processed_v3/` (24 sessions, six-day block naming); no July recday is in a pickle until the July
+neural extraction is run.
+
+**2026-10-01, spike clock v4** (`docs/handoff/SPIKE_CLOCK_V4.md`). v2's fitted clock puts spikes
+0.94-29.2 s late in 42 of 211 LEC task sessions, and every mEC pickle has the same fault, because
+OpenEphys 0.6.6 restarts its sample count about 25 ms into some recordings and
+`extract_rsync_from_ttl` subtracted the stale first value. v4 takes the origin from the
+counter's final contiguous run: `ephys_rsync_v4/`, `neuron_raw_v4/`, `data_dic_lec_v4.pkl` and
+`data_dic_mec_v4.pkl`. The mEC pickle holds 34 of 36 recdays. Both bp02 2024-03-19 sorts read a
+nested duplicate recording inside `2024-03-19_11-58-14/`, which puts every later session 14.42 s
+late in every version. The repair is pending. `validate_alignment.py` now gates on speed, reward and wall-clock probes.
+v1 is not fixed: ly05_20250620_20250623 is off by 2.6-38.6 s in all 8 sessions in every existing
+result. That document's section 3 is the run order for new ephys, the July ABCDE week included.

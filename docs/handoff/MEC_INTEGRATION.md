@@ -419,6 +419,23 @@ ly07 0 bins** (extremes reach the +-40-bin search limit in low-rate sessions and
 `--sync legacy` reproduced every existing LEC array byte-for-byte
 (`neuron_raw_fitted_vs_legacy_lec.v2.csv`).
 
+**Correction, 2026-10-01 (`docs/handoff/SPIKE_CLOCK_V4.md`).** Those "extremes at the search
+limit" were real. v2's trains subtract the AP stream's stale first sample number, but OpenEphys
+0.6.6 restarts the count about 25 ms into some recordings and the TTL events carry the restarted
+count. v2 spikes are therefore 0.94-29.2 s late in 42 of 211 LEC task sessions and in the mEC
+recordings with a restart. The mEC lag of 0 above compared two arrays built from the same
+trains. v4 (`ephys_rsync_v4/`, `neuron_raw_v4/`) takes the origin from the counter's final
+contiguous run.
+
+The v4 gates also found a data-integrity fault unrelated to the clock. `data/raw/ephys/2024-03-19_11-58-14/`
+holds a nested `2024-03-19_10-44-12/` copy, and both bp02 03-19 sorts read it in place of 11-58-14.
+- Their binaries are 432,672 samples longer than the manifest.
+- 10-44-12's data appears twice, and every later recording is 14.42 s late.
+- `data_dic_mec_v4.pkl` leaves the two blocks out for now.
+- Repair, 2026-10-02: the copy, byte-identical, moved to `data/raw/duplicates/`; both blocks
+  re-sorted from the correct files with the original recipe (jobs 3674427, 3674428); both sorters
+  now raise on a nested folder or a loaded-length mismatch. See `SPIKE_CLOCK_V4.md` section 2.4.
+
 ### 7.4 Tracking on the fitted frame clock
 mEC (`--sync matched`, 180 sessions): fps bp01 59.995, bp02/bp04 59.949; 99.6 % of pulses anchored
 at the median; 110 sessions have dropped-frame jumps (median 2 frames; bp04 2024-03-25 s0 and
@@ -801,6 +818,7 @@ sweep now finds **0 metadata rows without a raw folder** for any mouse on any da
    nothing deleted -- before resubmitting. Check the target path is absent, not merely that the
    script "won't overwrite", before any re-run.
 
+**2026-10-01:** the run order below is superseded by `SPIKE_CLOCK_V4.md` section 3. It uses the v4 trains, `--rsync ephys_rsync_v4`, and the tag `v5`, since `v3` is now the tracking-v3 pickle.
 Still to do once the sorts land: rsync from TTL, `extract_pokes` (already 5-state capable --
 `STATE_NAMES` includes `E_on` at `:56-58` and the state-id map is read per file from the pyControl
 header at `:75-77`, which matters because `ABCDE_v1` and `METraining_Task_v1` assign different ids
@@ -813,6 +831,136 @@ no maze SLEAP exists past 2024-04-08 though video and pinstate do); the mEC 2024
 which pyControl calls `ME_mastertask` and is a **third task**, not ABCDE -- it carries `A2_on`,
 `A_on_first`, `prime_A_first`, `tone2`, `tone3` on top of A-E and needs its own trial parser; and
 LEC June 09-12 (4 dates, 5.23 TB, unsorted).
+
+### 8.6 The environment broke sorting entirely (2026-09-28)
+
+**No sort of any kind can run in `maze_ephys` as it stands, mEC or LEC, new block or old.**
+Numpy was upgraded to 2.0.2 some time after the August 2025 sorts, and it violates the declared
+constraint of the three packages that matter: `kilosort 4.0.18` wants `numpy<2.0.0,>=1.20.0`,
+`spikeinterface 0.101.2` wants `numpy<2.0,>=1.20`, `neo 0.13.3` wants `numpy<2.0.0,>=1.19.5`.
+Three separate breakages surfaced, each only at the stage that happens to touch it, which is why
+they cost a run each:
+
+| # | where | what | cost before it showed |
+|---|---|---|---|
+| 1 | `probeinterface.write_prb` -> `kilosort.io.load_probe` | numpy 2 reprs a scalar as `np.int64(0)`; `load_probe` does `exec(contents, {}, metadata)` with empty globals -> `NameError: name 'np' is not defined` | ~1.5 h x 5 (jobs 3654387-3654422) |
+| 2 | `kilosort/swarmsplitter.py:96` | `score = np.NaN`, removed in numpy 2; reached inside first clustering | **10-24 h x 5** (jobs 3660041-45) |
+| 3 | `spikeinterface/postprocessing/localization_tools.py:109` | `wf.ptp(axis=0)`; the `ndarray.ptp` **method** was removed in numpy 2, and unlike an alias it cannot be monkeypatched (`cannot set 'ptp' attribute of immutable type`) | the 20 min smoke test |
+
+Bug 3 is not fixable from our side: `grep -c "\.ptp("` finds **27 call sites across 13
+spikeinterface files**, at least four on the sorting path (`core/template_tools.py`,
+`postprocessing/localization_tools.py`, `postprocessing/template_metrics.py`,
+`qualitymetrics/misc_metrics.py`).
+
+`code/numpy2_compat.py` (mirrored into the mEC tree) restores the 19 removed module-level
+aliases and sets `np.set_printoptions(legacy="1.25")`, which covers bugs 1 and 2. Every entry is
+a documented 1:1 rename -- `np.NaN is np.nan` is True -- so nothing numerical changes. It is kept
+because it costs nothing, but **it is not sufficient**; the environment is the fix.
+
+**Resolution (user, 2026-09-28): clone the env and pin numpy 1.26.4** -> `maze_ephys_np126`,
+used by the sorting sbatch files only. This restores exactly what produced all 61 existing
+blocks (spikeinterface 0.101.2, kilosort 4.0.18), so the July blocks stay comparable with the
+June ones. 1.26.4 satisfies every other declared constraint in the env (scipy `<2.6,>=1.25.2`,
+numexpr `>=1.26.0`, numba `<2.3,>=1.24`, pandas `>=1.26.0` on py3.12). `maze_ephys` itself is
+left alone. The alternative, the existing `maze_ephys_si104` (spikeinterface 0.104.5, kilosort
+**4.1.7**, numpy 2.4.6, mutually consistent), was rejected because it would sort the July week
+with a different Kilosort than every other block in the dataset.
+
+**The 6-day concat itself is fine.** The smoke test
+(`resume_kilosort_from_binary.py --smoke-minutes 20`, 20 min of ah08's binary through the
+production path) ran Kilosort to completion: 1 798 845 spikes extracted, **809 clusters at first
+clustering, 586 units including mua**. It failed only afterwards, in `unit_locations` inside
+`get_quality_metrics`. Nothing about six days of concatenation is in question.
+
+**Resolved and resubmitted, 2026-09-28.** `maze_ephys_np126` built by `conda create --clone`
+plus `pip install --no-deps numpy==1.26.4`; `maze_ephys` left at 2.0.2. Checks: 18/18 compiled
+packages on the sorting path import (scipy 1.16.1, torch 2.4.1, numba, faiss, h5py, neo,
+spikeinterface, kilosort); `pip check` on the clone reports **no broken requirements** against
+three on the original; `repr(np.int64(0))` is `0`, `np.NaN` exists and `ndarray.ptp` works
+natively. One more failure first, and it was ours: `numpy2_compat` called
+`np.set_printoptions(legacy="1.25")` unconditionally, but `"1.25"` is a legacy mode only in
+numpy 2 -- on 1.26.4 it is stored as a raw string and the first float format, inside h5py's
+import, dies on `'1.25' <= 113` (smoke 3665856, 23 s). The env and the shim had been tested
+separately, never together. Now applied on numpy >= 2 only, and the resume script's exact import
+order was run in both envs before resubmitting.
+
+Smoke 3665858 in `maze_ephys_np126`, 20 min of ah08 on an A100, **passed end to end**:
+1 832 385 spikes -> 816 clusters at first clustering -> 2 589 407 spikes -> 650 final clusters
+-> 596 units -> **196 single units** through the QC gate, `QC_single_units.npy` written, 852 s of
+Kilosort. The 196 is not a yield prediction: a 20 min slice makes `presence_ratio > 0.9` trivial.
+The five failed `kilosort_output/` stubs (~70 KB, logs and tracebacks) were renamed
+`kilosort_output.failed_numpy2_2026-09-24`, the earlier smoke output
+`kilosort_output_SMOKE_20min.numpy2env_failedQC_2026-09-28`. Resubmitted as **3666091 ah08,
+3666092 ah10, 3666093 ly05, 3666094 ly06, 3666095 ly07**, each resuming from its intact 1.6 TB
+binary. Linear scaling of the smoke run gives ~14.5 h of Kilosort per block on an A100 and
+roughly three times that on the older nodes. Note for watching these: python block-buffers
+stdout into the `.out`, so it can stay at `Script started` for many minutes while the job is
+fine -- Kilosort's progress is in the `.err`, which is line-flushed.
+
+**GPU memory is the next limit, and the timing estimate above was wrong (2026-09-30).** ah10
+(3666092) died after 37 h 10 min with `torch.OutOfMemoryError` in **final clustering**
+(`cluster_spikes` -> `clustering_qr.run` -> `assign_iclust`), on `gpu-380-13`'s 19.57 GB A4500:
+14.93 GB in use, 5.47 GB requested, so a 6-day block needs ~20.4 GB of VRAM there at least.
+System RAM was never the problem -- Kilosort reported 62.97 of 755.75 GB. The 20 min smoke test
+could not show this, because VRAM scales with spike count. Every job sat at ~4.1 GB through first
+clustering; the demand arrives only at final clustering. So:
+
+| GPU | VRAM | clears ~20.4 GB? |
+|---|---|---|
+| l40s | 44.39 GB | yes, 2.2x |
+| a100 | 39.49 GB | yes, 1.9x |
+| a4500 | 19.57 GB | **no** (ah10 died) |
+| p5000 | 15.88 GB | **no** |
+| quadro_rtx_5000, rtx_2080 | ~16, 8 GB | no |
+
+The cluster exposes no node features, so `--gres gpu:1` lands on any of these; the type must be
+named. ah08 (3666091) was on a 15.88 GB P5000, a near-twin block of ah10's (53 recordings, 20.46
+vs 20.50 h), still in first clustering; it was cancelled rather than left to hit the same wall
+later. Both resubmitted with the type pinned and the RAM ask cut to 200G: **3668325 ah08 on
+`gpu:a100:1`, 3668326 ah10 on `gpu:l40s:1`**. The 200G is safe because the 471.8 GB MaxRSS
+reported for every resume job is the memmapped 1.6 TB binary filling the 450G cgroup ceiling
+exactly -- 450 GiB is 471 859 200 K and the four MaxRSS values are 471 821 444-471 826 420 K --
+i.e. evictable page cache, not demand. Failed outputs kept as
+`kilosort_output.failed_gpuOOM_a4500_2026-09-30` and `.cancelled_p5000_too_small_2026-09-30`.
+ly05 (L40S), ly06 and ly07 (A100) keep running.
+
+Measured stage times, ah10 (the furthest any 6-day block has got): drift correction 8.6 h;
+spike extraction with templates 7.2 h -> 107 755 784 spikes; first clustering 10.3 h -> 1226
+clusters; extraction with cluster waveforms 3.3 h -> 166 897 627 spikes; final clustering 24
+iterations at ~2075 s each, died at iteration ~13. So **a 6-day block needs ~45-60 h of
+Kilosort even on an A100 or L40S**, not the ~14.5 h that linear scaling of the smoke test gave --
+clustering is superlinear in spike count (1.8 M spikes in the smoke test, 100-117 M here).
+Per-iteration clustering time also varies 2-3x between nodes (first clustering: ly07 ~2138
+s/iteration, ly05 ~3061, ly06 ~6106). All of this fits the 5-day walltime. Open risk: ah10 died at
+iteration ~13 of 24, so the VRAM peak over iterations 14-24 is unmeasured; the ~2x headroom on
+A100 and L40S is an estimate, not a guarantee.
+
+**ly07 died silently, 2026-10-01 (found 2026-10-02).** Job 3666095 showed RUNNING at 62 h, but
+its `.err` had not been written for 33 h. The last lines: `BlockingIOError: [Errno 11] write
+could not complete without blocking`, raised by tqdm's progress bar inside
+`kilosort/template_matching.extract`, during the spike extraction before final clustering. stderr
+was non-blocking, a ceph write stalled, and the write raised EAGAIN instead of waiting. Kilosort
+died, the error path hung writing the traceback, and the job sat on an A100 doing nothing. The
+three concurrent sorts had 0 such errors, so it was a transient stall that hit one job. Fixed in
+`code/robust_stdio.py`, imported by the resume script: fds 1 and 2 forced blocking, and
+stdout/stderr wrapped to retry a write on EAGAIN for up to 5 min, then drop that one log line
+rather than kill the job. Tested against a stream that raises EAGAIN twice and then accepts, and
+with tqdm writing through it. ly07 cancelled, output kept as
+`kilosort_output.failed_BlockingIOError_tqdm_2026-10-01`, resubmitted as **3674384**
+(`gpu:a100:1`, 200G, 7-day walltime). The running sorts (ly05, ly06, ah08) don't have this fix and
+remain exposed to the same transient. **Lesson for watching:** RUNNING is not evidence of
+progress. The watcher now also flags a RUNNING job whose `.err` has been silent for > 6 h.
+
+Walltime: users cannot raise the limit of a *running* job (`scontrol update ... TimeLimit`
+returns "Access/permission denied"), but **can** for a *pending* one -- ah10 (3668326) went from
+5 to 7 days while queued. ah10 was also moved in place from `gpu:l40s:1` (one node in the
+cluster) to `gpu:a100:1` (four) via `scontrol update TresPerNode=gres/gpu:a100:1`, which kept its
+original submit time and so its queue position.
+
+**Practice worth keeping.** `--smoke-minutes N` sorts a slice of an existing `binary/` into
+`kilosort_output_SMOKE_Nmin` through the *same* function as production. Two full rounds were lost
+discovering bugs serially at 10-24 h each; the smoke test found the third in 50 minutes. Run it
+after any environment change, before committing five multi-day jobs.
 
 ## 9. Paths
 
@@ -828,3 +976,34 @@ LEC June 09-12 (4 dates, 5.23 TB, unsorted).
 | old preprocessing functions | `Taskspace_abstraction_mEC/mEC_local_upload/mEC_preprocessing/*.py` |
 | LEC stage scripts | `code/preprocessing/{extract_neuron_raw,extract_pokes,sleap_alignment_copilot,build_data_dic,validate_alignment}.py`, `code/recday_registry.py` |
 | LEC data facts | `docs/handoff/README.md`, `docs/BUG_ly05_recday_mismatch.md` |
+
+## 10. Tracking QC and the maze-2 affine (2026-09-23)
+
+Full write-up: `code/preprocessing/TRACKING_QC.md`. What changes the facts above:
+
+- **The maze-2 pixel-to-cm affine used for bp02 and bp04 was degenerate.** `MAZE2_MEC` listed the
+  corners in Z order against the cyclic `PHYSICAL_PTS` (det -7e-5, corner residual 23 cm). In every
+  bp02/bp04 maze CSV and in `data/processed/`, head_back.x sat in 22.8-24.2 cm and `HD_raw` within
+  10 deg of +-90 on 87-89 % of bins. `Locs_raw` (raw pixels + masks) was never affected, so every
+  gate in §6-7 passed. **`XY_raw` and `HD_raw` in `data_dic_mec.pkl` are unusable for bp02 and
+  bp04.** Fixed with `sleap_to_rois.py --geometry v2` -> `maze_geom2/` (bp01 byte-identical, all
+  ROI files byte-identical, bp02/bp04 span 47-50 cm, HD +-90 fraction 0.13-0.16) and
+  `sleap_alignment_copilot.py --tracking-clean geom2 --out-tag v2` -> `data/processed_v2/` in the mEC
+  tree (bp01 arrays and every Locs array byte-identical to `processed/`; 4768 uncertain bins as
+  before). `validate_alignment --neural v2 --tracking v2`: 216 rows, all checks pass, `loc_at_goal`
+  and `poke_loc` unchanged; speed-rate correlation median bp02 0.114 -> 0.167, bp04 0.075 -> 0.088,
+  bp01 unchanged. Pickles: `data_dic_mec_v2.pkl` (`build_data_dic.py --dataset mec --neural v2
+  --tracking v2 --tag v2`, job 3660377) and `data_dic_mec_v3.pkl` (cleaning v2 on top, `--tracking
+  v3 --tag v3`, job 3660499), both built 2026-09-23 in the mEC tree;
+  `load_data_dic(dataset='mec', version='v3', recday_kind=...)`. `data_dic_mec.pkl` stays as the
+  record of the defect.
+- **The v1 cleaning damage is real for mEC and universal:** 49 of 102 mEC maze sessions lose more
+  than 20 % of their moving frames to `drop_jumps` (bp02 median 62 %, bp04 12 %, bp01 1.7 %). The
+  LEC maze CSVs are the raw affine with no cleaning (460/460 sessions equal to 5.7e-14 cm; the ROI
+  files differ in 0.4 % of cells from any deterministic mask order).
+- **A skeleton-shift artefact** of the SLEAP models: 0.6 % of frames on the maze-2 model (0.04-0.16 %
+  elsewhere) have the whole skeleton displaced one segment backwards for 1-6 frames at full
+  confidence. Cleaning v2 removes them; body-length checks cannot see them.
+- The 2026-09-20 `TRACKING_QC_PLAN.md` is superseded in its ordering (hotfix first, QC before
+  freezing constants, conditional gate, Locs from the cleaned track) by the decisions recorded in
+  `TRACKING_QC.md`.

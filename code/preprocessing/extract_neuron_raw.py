@@ -68,10 +68,13 @@ TRIALTIMES_PATH = rr.REPO_ROOT / "data" / "processed_data" / "trialtimes_raw_min
 #:            grid. Removes the partner-pulse origin error (ah08/ly06: -64 ms) and the
 #:            3-25 ms drift. Sleep-box sessions have no pyControl clock and stay legacy.
 SYNC = sys.argv[sys.argv.index("--sync") + 1] if "--sync" in sys.argv else "legacy"
-# LEC's legacy rsync caches are the untracked `_mingyutest` set; the fitted clock always
-# comes from the TTL-derived `ephys_rsync/` (both datasets).
+# LEC's legacy rsync caches are the untracked `_mingyutest` set; the fitted clock comes from the
+# TTL-derived `ephys_rsync/` (both datasets) unless `--rsync` names another tree. v4 passes
+# `--rsync ephys_rsync_v4`: v2's trains put spikes 0.94-29.2 s late in 42 LEC task sessions
+# (docs/handoff/SPIKE_CLOCK_V4.md).
+_RSYNC = sys.argv[sys.argv.index("--rsync") + 1] if "--rsync" in sys.argv else None
 RSYNC_PATH = rr.REPO_ROOT / "data" / "processed_data" / (
-    "ephys_rsync_mingyutest" if (rr.DATASET == "lec" and SYNC == "legacy") else "ephys_rsync")
+    _RSYNC or ("ephys_rsync_mingyutest" if (rr.DATASET == "lec" and SYNC == "legacy") else "ephys_rsync"))
 
 # Constants
 BIN_MS = 25                      # bin width, matching trialtimes and the tracking arrays
@@ -490,6 +493,9 @@ def main():
                         help="spike clock (read before import; default legacy = byte-identical)")
     parser.add_argument("--out", default=_OUT_NAME,
                         help="output directory name under data/processed_data (read before import)")
+    parser.add_argument("--rsync", default=_RSYNC,
+                        help="rsync tree under data/processed_data (read before import; default "
+                             "ephys_rsync, or ephys_rsync_mingyutest for LEC legacy)")
     parser.add_argument("--write", action="store_true",
                         help="create arrays that do not exist yet; never overwrites")
     parser.add_argument("--validate-only", action="store_true",
@@ -502,7 +508,7 @@ def main():
                      verbose=not args.quiet)
 
     counts = report["status"].value_counts().to_dict()
-    print(f"\n{len(recdays)} recday(s): {counts}  [sync={SYNC}, out={NEURON_PATH.name}]")
+    print(f"\n{len(recdays)} recday(s): {counts}  [sync={SYNC}, rsync={RSYNC_PATH.name}, out={NEURON_PATH.name}]")
     if "lag_bins_new_minus_legacy" in report:
         cmp = report.dropna(subset=["lag_bins_new_minus_legacy"])
         cmp = cmp[~cmp["array"].str.contains("_sb_")]
@@ -512,7 +518,9 @@ def main():
             print(cmp.groupby("mouse")["lag_bins_new_minus_legacy"].describe()[["count", "min", "50%", "max"]].to_string())
             print("fraction of bins identical at that lag: median "
                   f"{cmp['frac_bins_identical_at_lag'].median():.3f}, min {cmp['frac_bins_identical_at_lag'].min():.3f}")
-            qc = NEURON_PATH.parent / f"neuron_raw_fitted_vs_legacy_{rr.DATASET}.csv"
+            # v2 kept the generic name; later trees name themselves so a .vN cannot be misread as v2
+            stem = "neuron_raw_fitted" if NEURON_PATH.name == "neuron_raw_v2" else NEURON_PATH.name
+            qc = NEURON_PATH.parent / f"{stem}_vs_legacy_{rr.DATASET}.csv"
             k = 0
             while (p := qc.with_name(qc.stem + (f".v{k}" if k else "") + ".csv")).exists():
                 k += 1

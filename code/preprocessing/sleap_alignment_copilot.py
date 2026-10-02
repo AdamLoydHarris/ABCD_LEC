@@ -45,6 +45,41 @@ SLEAP_PATH = PREPROCESSED_PATH / "sleap" / "maze"
 SLEAP_PATH_OPENFIELD = PREPROCESSED_PATH / "sleap" / "openfield"   # openfield_to_xy.py output
 EPHYS_PATH = PREPROCESSED_PATH / "ephys"
 
+#: Which cleaned-track tree is read (`--tracking-clean`). 'v1' is the tree every existing
+#: data_dic was built from. 'geom2' = `sleap_to_rois.py --geometry v2` (cyclic maze-2 corners;
+#: the Z-order set collapsed bp02/bp04 x to a 1.3 cm band, 2026-09-23), arenas unchanged.
+#: 'v2' = cleaning v2 (`tracking_clean.py`) for maze and arenas. Anything but 'v1' needs
+#: --out-tag so data/processed/ is never rewritten.
+TRACKING_CLEAN = "v1"
+TRACKING_ROOTS = {"v1": ("maze", "openfield"),
+                  "geom2": ("maze_geom2", "openfield"),
+                  "v2": ("maze_v2", "openfield_v2")}
+#: v2 CSVs carry NaN where the track is untracked for > 2 s (and at the video's ends). With this
+#: on, a 25 ms bin whose bracketing frames are NaN is written NaN in XY_raw instead of being
+#: bridged by `sample_at_frames`' interpolant (which fits valid frames only and extrapolates).
+#: HD ('nearest') carries the NaN by itself; Locs come as 'None' -> 0 from the v2 ROI file.
+PROPAGATE_TRACK_NAN = False
+
+
+def set_tracking_clean(mode: str) -> None:
+    """Rebind the two SLEAP roots to the tree of `mode` (see TRACKING_ROOTS); v2 propagates NaN."""
+    global TRACKING_CLEAN, SLEAP_PATH, SLEAP_PATH_OPENFIELD, PROPAGATE_TRACK_NAN
+    maze, arena = TRACKING_ROOTS[mode]
+    TRACKING_CLEAN = mode
+    SLEAP_PATH = PREPROCESSED_PATH / "sleap" / maze
+    SLEAP_PATH_OPENFIELD = PREPROCESSED_PATH / "sleap" / arena
+    PROPAGATE_TRACK_NAN = mode == "v2"
+    if mode != "v1" and not SLEAP_PATH.exists():
+        raise FileNotFoundError(f"--tracking-clean {mode}: {SLEAP_PATH} does not exist; run the stage script first")
+
+
+def untracked_bins(data: np.ndarray, frames: np.ndarray) -> np.ndarray:
+    """True for every bin whose lower or upper bracketing frame is NaN in `data` (T, k)."""
+    nan = np.isnan(data).any(axis=1) if data.ndim > 1 else np.isnan(data)
+    lo = np.clip(np.floor(frames).astype(int), 0, len(nan) - 1)
+    hi = np.clip(np.ceil(frames).astype(int), 0, len(nan) - 1)
+    return nan[lo] | nan[hi]
+
 #: Which sheet sessions to align: 'task' (ABCD-type, the LEC default), 'openfield' (object and
 #: open-field sessions, anchored at pyControl rsync[0] like extract_neuron_raw's no-trials
 #: branch; needs SYNC_METHOD 'matched') or 'all'.
@@ -319,10 +354,25 @@ def parse_ephys_folder_dates(folder_name: str) -> Tuple[str, str]:
     the date-range filter below still works; `create_output_filename` collapses the pair
     back to one date in the recday name.
     """
-    match = re.match(r"(\d{4}-\d{2}-\d{2})(?:_(\d{4}-\d{2}-\d{2}))?_preprocessed", folder_name)
-    if match:
-        return match.group(1), match.group(2) or match.group(1)
+    dates = parse_ephys_folder_all_dates(folder_name)
+    if dates:
+        return dates[0], dates[-1]
     return None, None
+
+
+def parse_ephys_folder_all_dates(folder_name: str) -> List[str]:
+    """Every date of a block folder: '2025-07-14_..._2025-07-19_preprocessed' -> six dates, the
+    July ABCDE blocks (2026-09-28). Anchored at the end, so a renamed copy such as
+    '*_preprocessed.failed_*' is not a block. Names come out through BLOCK_DATES below."""
+    m = re.match(r"^((?:\d{4}-\d{2}-\d{2})(?:_\d{4}-\d{2}-\d{2})*)_preprocessed$", folder_name)
+    return m.group(1).split("_") if m else []
+
+
+#: Dates of the block being processed (set per ephys folder). A block of more than two dates is
+#: named with all of them, `ah10_20250714_20250715_20250716_20250717_20250718_20250719`, the way
+#: recday_registry names it and build_data_dic / validate_alignment look it up; one- and
+#: two-date blocks keep the names every existing array has.
+BLOCK_DATES: List[str] = []
 
 
 def is_awake_session(metadata_row: pd.Series) -> bool:
@@ -886,6 +936,22 @@ def resample_data(data: np.ndarray, original_fps: int, target_fps: int) -> np.nd
     return resampled
 
 
+def _same_array(a: np.ndarray, b: np.ndarray) -> bool:
+    """Equality that treats NaN as equal to NaN. XY/HD carry NaN (frame-clock mask, v2 track
+    NaN) and Locs carry NaN objects (pandas reads the ROI files' 'None' as NaN), so plain
+    np.array_equal called identical re-runs 'conflicts' (ly06 2026-09-28, 7 spurious files)."""
+    if a.shape != b.shape:
+        return False
+    try:
+        if np.array_equal(a, b, equal_nan=True):
+            return True
+    except TypeError:                                    # object dtype
+        pass
+    if a.dtype == object or b.dtype == object:
+        return bool(np.array_equal(a.astype(str), b.astype(str)))
+    return False
+
+
 def save_new(path: Path, array: np.ndarray, verbose: bool = True) -> str:
     """Write unless an identical array is there already; a differing one is written beside.
 
@@ -894,7 +960,7 @@ def save_new(path: Path, array: np.ndarray, verbose: bool = True) -> str:
     """
     if path.exists():
         existing = np.load(path, allow_pickle=True)
-        if existing.shape == array.shape and np.array_equal(existing, array):
+        if _same_array(existing, array):
             return "identical"
         n = 1
         while (alt := path.with_name(f"{path.stem}.conflict{n}.npy")).exists():
@@ -926,6 +992,8 @@ def create_output_filename(data_type: str, mouse_id: str, date1: str, date2: str
     date1_fmt = date1.replace("-", "")
     date2_fmt = date2.replace("-", "")
     dates = date1_fmt if date2_fmt == date1_fmt else f"{date1_fmt}_{date2_fmt}"
+    if len(BLOCK_DATES) > 2:
+        dates = "_".join(d.replace("-", "") for d in BLOCK_DATES)
     return f"{data_type}_raw_{mouse_id}_{dates}_{session_idx}.npy"
 
 
@@ -1368,6 +1436,8 @@ def process_mouse_ephys_folder(
     """
     folder_name = ephys_folder.name
     date1, date2 = parse_ephys_folder_dates(folder_name)
+    global BLOCK_DATES
+    BLOCK_DATES = parse_ephys_folder_all_dates(folder_name)
     
     if date1 is None or date2 is None:
         if verbose:
@@ -1773,6 +1843,7 @@ def _save_matched(mouse_id, date1, date2, session_idx, output_dir, sleap_data, p
     SYNC_QC.append(dict(mouse=mouse_id, recday=create_output_filename('X', mouse_id, date1, date2, 0)[6:-6],
                         session=session_idx, pinstate=pinstate_name, first_A_on_frame=f_start,
                         n_bins=n_bins, n_frames=n_frames, n_bins_uncertain=int(uncertain.sum()),
+                        tracking_clean=TRACKING_CLEAN,
                         **{k: v for k, v in clock.items() if not k.startswith('anchors')}))
     if verbose:
         print(f"    matched clock: {clock['fps']:.4f} fps, {clock['n_matched']}/{clock['n_rsync']} rsyncs "
@@ -1786,6 +1857,10 @@ def _save_matched(mouse_id, date1, date2, session_idx, output_dir, sleap_data, p
         coords = df[cols].values if all(c in df.columns for c in cols) else df.values[:, 4:6]
         arr = sample_at_frames(coords, frames, 'linear')
         arr[uncertain] = np.nan
+        if PROPAGATE_TRACK_NAN:
+            untracked = untracked_bins(coords, frames)
+            arr[untracked] = np.nan
+            SYNC_QC[-1]['n_bins_track_nan'] = int(untracked.sum())
         name = create_output_filename('XY', mouse_id, date1, date2, session_idx)
         status = save_new(output_dir / name, arr, verbose)
         if verbose:
@@ -1828,6 +1903,8 @@ def process_mouse_ephys_folder_by_metadata(
     """
     folder_name = ephys_folder.name
     date1, date2 = parse_ephys_folder_dates(folder_name)
+    global BLOCK_DATES
+    BLOCK_DATES = parse_ephys_folder_all_dates(folder_name)
     
     if date1 is None or date2 is None:
         if verbose:
@@ -1847,6 +1924,8 @@ def process_mouse_ephys_folder_by_metadata(
     date2_fmt = date2.replace("-", "")
     output_dir = PROCESSED_PATH / mouse_id / (date1_fmt if date2_fmt == date1_fmt
                                               else f"{date1_fmt}_{date2_fmt}")
+    if len(BLOCK_DATES) > 2:
+        output_dir = PROCESSED_PATH / mouse_id / "_".join(d.replace("-", "") for d in BLOCK_DATES)
 
     # Find awake sessions in metadata within date range
     awake_sessions = []
@@ -2389,11 +2468,20 @@ if __name__ == "__main__":
                             help="which sheet sessions to align (default task, as before)")
         parser.add_argument('--out-tag', default='',
                             help="write to data/processed_<tag>/ instead of data/processed/")
+        parser.add_argument('--tracking-clean', choices=tuple(TRACKING_ROOTS), default=TRACKING_CLEAN,
+                            help="cleaned-track tree to read: v1 (default, maze/), geom2 (maze_geom2/, "
+                                 "cyclic maze-2 corners) or v2 (maze_v2/ + openfield_v2/); needs --out-tag")
         parser.add_argument('--verbose', '-v', action='store_true', help='Verbose output')
         args = parser.parse_args()
         SYNC_METHOD = args.sync
         SESSIONS = args.sessions
+        if args.tracking_clean != 'v1' and not args.out_tag:
+            sys.exit(f"--tracking-clean {args.tracking_clean} rewrites XY/HD/Locs; pass --out-tag so "
+                     "data/processed/ stays the tree the existing data_dic was built from")
+        if args.tracking_clean == 'v2' and args.sync != 'matched':
+            sys.exit("--tracking-clean v2 propagates track NaN in _save_matched only; pass --sync matched")
         set_output_tag(args.out_tag)
+        set_tracking_clean(args.tracking_clean)
 
         main_metadata(animals=args.animals, ephys_folder_filter=args.ephys_folder)
     elif '--dataset' in sys.argv:

@@ -27,6 +27,7 @@ controls compare THIS tree's v3 against THIS tree's v2.
 | 9 | `is_post_refit_section` is True for the six V3 names and both production names, and `_stale_or_excluded` drops nothing for them while still dropping `ly05_20250618_20250619` for a pre-refit name | the ly05 silent drop |
 | 10 | `--tfr-bins 6`: 53-column full-rank design, tfr occupies the last 5 columns, `compute_tuning_arrays` accepts the override | the `n_cols_override` plumbing is inconsistent |
 | 11 | gp-only design: the phase cell is gp-significant (the sanity arm works) AND the latency cell is gp-significant too, losing most of that gp variance once tfr is added -- the reading rule of GLM_V3.md caveat 9 | the gp-only arm would be read as evidence of phase-locking, which it cannot be |
+| 12 | planted 3 s NaN gap in one session's `XY_raw` (2026-09-23 NaN path): speed and acceleration NaN inside the gap plus the kernel's reach and finite everywhere else; both distance regressors finite everywhere; every prepared array bit-identical to the gap-free session before the gap and beyond its reach; the fit drops exactly the NaN-speed rows and nothing else (row count) | one NaN would still poison the distance accumulator to the end of the session, or untracked bins would still be zero-coded as the reference decile |
 
 Controls 1 and 1b must pin EVERY flag whose default has moved (none should) or they silently
 stop testing equivalence and start testing the new defaults.
@@ -68,6 +69,23 @@ def _repo_root():
 REPO = _repo_root()
 OUT_DIR = os.path.join(HERE, '..', 'data', 'processed_data')
 OUT = os.path.join(OUT_DIR, 'glm_v3_synthetics.pkl')
+
+
+def _out_versions():
+    """Existing result pickles, oldest first: the base name, then .v1, .v2, ..."""
+    found = [OUT] if os.path.exists(OUT) else []
+    n = 1
+    while os.path.exists(p := OUT.replace('.pkl', f'.v{n}.pkl')):
+        found.append(p)
+        n += 1
+    return found
+
+
+def _new_out():
+    """Next free result name; nothing is ever overwritten (repo rule, 2026-09-23: the full-suite
+    run of that day replaced the previous results pickle with a plain dump to OUT)."""
+    vs = _out_versions()
+    return OUT if not vs else OUT.replace('.pkl', f'.v{len(vs)}.pkl')
 
 BIN_MS = 25
 CORE5 = ['place', 'goal_progress', 'speed', 'acceleration', 'time_from_reward']
@@ -434,6 +452,79 @@ def control_11_gp_only(F_gp, F_u, rd):
                 'latency_cell_dr2_gp_with_tfr': d_lat_with_tfr}
 
 
+def control_12_planted_gap(data, rd):
+    """A 3 s (120-bin) NaN gap in one session's XY_raw, through `prepare_session_data` and a
+    cheap `run_glm_analysis`. Controls 1/1b cover the NaN-free path (v3 == v2 bit for bit);
+    this covers what the NaN branch does and that it does nothing elsewhere."""
+    sessions, _ = g3.get_sessions_for_glm(data[rd])
+    s = sessions[0]
+    sd = data[rd][s]
+    XY = np.asarray(sd['XY_raw'], dtype=float)
+    if np.isnan(XY).any():
+        return False, {'error': f'session {s} of {rd} already has NaN in XY_raw; pick a NaN-free recday'}
+    T = len(XY)
+    g0, g1 = T // 2, T // 2 + 120
+    sd_gap = dict(sd)
+    sd_gap['XY_raw'] = XY.copy()
+    sd_gap['XY_raw'][g0:g1] = np.nan
+    p0 = g3.prepare_session_data(sd)
+    p1 = g3.prepare_session_data(sd_gap)
+    reach = int(np.ceil(4.0 * 3)) + 1                      # smooth_and_calculate_scalar_derivatives, sigma 3
+    lo, hi = g0 - reach, g1 + reach
+    n = min(len(p0['Speed']), len(p1['Speed']))
+    info = {}
+    sp1, ac1 = np.asarray(p1['Speed'], float)[:n], np.asarray(p1['Acc'], float)[:n]
+    info['speed NaN inside gap+reach'] = bool(np.isnan(sp1[lo:hi]).all() and np.isnan(ac1[lo:hi]).all())
+    outside = np.r_[np.arange(0, lo - 1), np.arange(hi + 1, n)]
+    info['speed finite outside'] = bool(np.isfinite(sp1[outside]).all() and np.isfinite(ac1[outside]).all())
+    info['n NaN speed bins'] = int(np.isnan(sp1).sum())
+    # Speed, Acc and distance FROM the last reward depend only on the past: identical up to the
+    # gap's reach. Distance TO the next reward (and the distance-based goal progress built from
+    # it) looks forward, so it is identical only for bins whose next reward precedes the gap.
+    tt = np.asarray(sd['Trial_times']).astype(int).flatten()
+    rewards_before_gap = tt[(tt >= 0) & (tt < lo - 1)]
+    fwd_lim = int(rewards_before_gap.max()) if len(rewards_before_gap) else 0
+    same = {}
+    for k, lim in (('Speed', lo - 1), ('Acc', lo - 1), ('dist_from_reward', lo - 1),
+                   ('dist_to_reward', fwd_lim), ('GP_dist_continuous', fwd_lim)):
+        a, b = np.asarray(p0[k], float), np.asarray(p1[k], float)
+        a, b = a[:lim], b[:lim]
+        both_nan = np.isnan(a) & np.isnan(b)
+        same[k] = bool(np.array_equal(a[~both_nan], b[~both_nan]))
+    info['bit-identical before the gap (dist_to / GP_dist: up to the last reward before it)'] = same
+    df1, dt1 = np.asarray(p1['dist_from_reward'], float), np.asarray(p1['dist_to_reward'], float)
+    info['distances finite everywhere'] = bool(np.isfinite(df1).all() and np.isfinite(dt1).all())
+    df0 = np.asarray(p0['dist_from_reward'], float)
+    m = min(len(df0), len(df1))
+    info['distance never larger with the gap (max diff, should be <= 0)'] = float(np.max(df1[:m] - df0[:m]))
+    # speed far after the gap is identical too (the kernel is local)
+    sp0 = np.asarray(p0['Speed'], float)[:n]
+    info['speed bit-identical beyond the reach'] = bool(np.array_equal(sp0[hi + 1:], sp1[hi + 1:]))
+    # the fit drops exactly the NaN-speed rows: compare row counts, no permutations
+    data_gap = {rd: dict(data[rd])}
+    data_gap[rd][s] = sd_gap
+    F0 = fit(g3, data, rd, CORE5, cap_s=1e6, override=None, joint=None, n_perm=0, num_permutations=1)
+    F1 = fit(g3, data_gap, rd, CORE5, cap_s=1e6, override=None, joint=None, n_perm=0, num_permutations=1)
+
+    def _rows(F):
+        cv = _cv(F, rd)
+        if cv.get('n_rows') is not None:
+            return int(cv['n_rows'])
+        occ = cv.get('bin_occupancy') or {}
+        return next((int(v['n_rows']) for v in occ.values()), None)
+    rows0, rows1 = _rows(F0), _rows(F1)
+    d1 = g3.downsample_session_data(g3.truncate_all_arrays(p1), 10, mode='bin')
+    expected_drop = int((~np.isfinite(np.asarray(d1['Speed'], float)) & (np.asarray(d1['Locs']) <= 21)).sum())
+    info['rows without / with gap'] = (rows0, rows1)
+    info['expected dropped rows (NaN speed & Locs <= 21, downsampled)'] = expected_drop
+    rows_ok = rows0 is not None and rows1 is not None and abs((rows0 - rows1) - expected_drop) <= 2
+    info['row drop matches'] = rows_ok
+    ok = (info['speed NaN inside gap+reach'] and info['speed finite outside'] and all(same.values())
+          and info['distances finite everywhere'] and info['speed bit-identical beyond the reach']
+          and info['distance never larger with the gap (max diff, should be <= 0)'] <= 1e-9 and rows_ok)
+    return ok, info
+
+
 # ---------------------------------------------------------------------------
 
 def main(argv=None):
@@ -443,14 +534,16 @@ def main(argv=None):
     ap.add_argument('--skip-equivalence', action='store_true', help='skip controls 1 and 1b')
     ap.add_argument('--only-equivalence', action='store_true',
                     help='run only controls 1 and 1b (and the cheap 2 and 9); merge into the saved pickle')
+    ap.add_argument('--only-gap', action='store_true',
+                    help='run only control 12 (and the cheap 2 and 9); merge into the saved pickle')
     args = ap.parse_args(argv)
     n_perm = 30 if args.quick else 100
     n_noise = 30 if args.quick else 60
     cap = 30.0
 
     results = {}
-    if args.only_equivalence and os.path.exists(OUT):
-        with open(OUT, 'rb') as fh:
+    if (args.only_equivalence or args.only_gap) and _out_versions():
+        with open(_out_versions()[-1], 'rb') as fh:           # merge into the newest saved results
             results = pickle.load(fh).get('results', {})
     t0 = time.time()
 
@@ -472,20 +565,24 @@ def main(argv=None):
     rd, data = load_real_recday(args.recday)
     print(f'real recday: {rd}   ({time.time() - t0:.0f} s)')
 
-    if not args.quick and not args.skip_equivalence:
-        record('1  v3 defaults == v2 (matched-13, cap 60)', control_1_v2_equivalence, data, rd)
-    if not args.skip_equivalence:
-        record('1b v3 decile arm == v2 (core-5, cap 60)', control_1b_decile_arm_equivalence, data, rd)
+    if not args.only_gap:
+        if not args.quick and not args.skip_equivalence:
+            record('1  v3 defaults == v2 (matched-13, cap 60)', control_1_v2_equivalence, data, rd)
+        if not args.skip_equivalence:
+            record('1b v3 decile arm == v2 (core-5, cap 60)', control_1b_decile_arm_equivalence, data, rd)
+    if not args.only_equivalence:
+        record('12 planted 3 s NaN gap: local NaN, finite distances, exact row drop', control_12_planted_gap, data, rd)
 
-    if args.only_equivalence:
+    if args.only_equivalence or args.only_gap:
         n_fail = sum(not r['pass'] for r in results.values())
         print('=' * 78)
         print(f"{len(results) - n_fail}/{len(results)} controls passed  ({(time.time() - t0) / 60:.1f} min)")
         os.makedirs(OUT_DIR, exist_ok=True)
-        with open(OUT, 'wb') as fh:
+        out = _new_out()
+        with open(out, 'wb') as fh:
             pickle.dump({'dataset': DATASET, 'recday': rd, 'n_perm': n_perm, 'n_noise': n_noise,
                          'results': results}, fh)
-        print(f'saved {OUT}')
+        print(f'saved {out}')
         return 1 if n_fail else 0
 
     syn, node = synthetic_recday(data, rd, n_noise=n_noise)
@@ -509,10 +606,11 @@ def main(argv=None):
     print('=' * 78)
     print(f"{len(results) - n_fail}/{len(results)} controls passed  ({(time.time() - t0) / 60:.1f} min)")
     os.makedirs(OUT_DIR, exist_ok=True)
-    with open(OUT, 'wb') as fh:
+    out = _new_out()
+    with open(out, 'wb') as fh:
         pickle.dump({'dataset': DATASET, 'recday': rd, 'n_perm': n_perm, 'n_noise': n_noise,
                      'results': results}, fh)
-    print(f'saved {OUT}')
+    print(f'saved {out}')
     return 1 if n_fail else 0
 
 

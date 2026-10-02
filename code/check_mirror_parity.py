@@ -44,6 +44,12 @@ BYTE_PAIRS = [
     ('code/elasticnet_v5_synthetics.py', 'mFC_data/code/elasticnet_v5_synthetics.py'),
     ('code/lda_reward_goalprogress.py', 'mFC_data/code/lda_reward_goalprogress.py'),
     ('code/run_lda_reward_progress.py', 'mFC_data/code/run_lda_reward_progress.py'),
+    # Added 2026-10-02 with the event-kernel analysis (Tsao / Kanter ramps); both datasets load
+    # through the same module, so a drift would make LEC and PFC kernels non-comparable.
+    ('code/event_kernels.py', 'mFC_data/code/event_kernels.py'),
+    ('code/event_kernels_synthetics.py', 'mFC_data/code/event_kernels_synthetics.py'),
+    ('code/population_drift.py', 'mFC_data/code/population_drift.py'),
+    ('code/population_drift_synthetics.py', 'mFC_data/code/population_drift_synthetics.py'),
 ]
 
 DEF_PAIRS = [

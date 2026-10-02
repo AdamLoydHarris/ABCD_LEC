@@ -1,6 +1,12 @@
 # Plan: SLEAP tracking QC and a corrected cleaning (both datasets), rebuild the pickles
 
-**Status: handoff, not started (user, 2026-09-20).** Written after the measurements below;
+**Status: superseded (2026-09-23).** Implementation started 2026-09-23 with a revised order and four
+changed decisions (maze-2 geometry hotfix first; QC on every session before freezing constants;
+conditional confidence gate; `Locs_raw` from the cleaned track); the record of what was measured and
+built is `code/preprocessing/TRACKING_QC.md`. The context below stands, except that the LEC maze
+CSVs are the raw affine (see the correction paragraph) and the mEC maze-2 affine was degenerate.
+
+**Original status: handoff, not started (user, 2026-09-20).** Written after the measurements below;
 nothing in it has been implemented. Scope and constants were agreed with the user (full scope,
 2 s gap limit, 100 cm/s cap). Until it runs, `XY_raw`/`HD_raw` in every pickle carry the v1
 cleaning described under Context, and any pickle with NaN positions (LEC v2, mEC) will break GLM

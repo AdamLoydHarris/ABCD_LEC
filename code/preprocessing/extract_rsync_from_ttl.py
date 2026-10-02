@@ -7,10 +7,10 @@ none, so this derives them from the raw TTL events and, unlike the caches, recor
 Per recording in a block's `recording_sessions_in_concat.csv` (using that row's own
 `ttl_path` and `sample_numbers_path`, i.e. the mouse's own probe stream):
 
-1. Rising edges of the sync line (`states > 0`), in OpenEphys sample numbers, made relative
-   to the AP continuous stream's first sample -- the timebase Kilosort spike times use once
-   `extract_neuron_raw` subtracts the recording's concat offset. Saved raw as
-   `ttl_rising_{date}_{time}.npy`.
+1. Rising edges of the sync line (`states > 0`), converted from OpenEphys sample numbers to
+   `continuous.dat` indices by subtracting the counter origin (`counter_origin`) -- the
+   timebase Kilosort spike times use once `extract_neuron_raw` subtracts the recording's
+   concat offset. Saved as `ttl_rising_{date}_{time}.npy`.
 2. If the recording is a task session (a metadata row names its `Ephys` stamp), the TTL
    train is matched to that session's pyControl `rsync` events and every pyControl rsync
    time is mapped into ephys samples. That array is saved as
@@ -29,16 +29,23 @@ Per recording in a block's `recording_sessions_in_concat.csv` (using that row's 
 3. Sleep-box recordings get the raw relative train under the `rsync_timestamps_` name too;
    `session_window` never reads it for sleep (origin 0), it is there for completeness.
 
-Measured on 2024-03-24_10-52-32: the first TTL edges sit ~136k samples BEFORE the AP
-stream's first sample (the events stream starts earlier than the continuous one), which is
-why matching by intervals rather than "first TTL = first rsync" is not optional here.
+The origin (`--origin`; docs/handoff/SPIKE_CLOCK_V4.md). OpenEphys 0.6.6 writes the first
+716-2932 samples of some recordings with a stale counter and then restarts the count near 0.
+`sample_numbers[0]` and `sync_messages.txt` report the stale value; the TTL events carry the
+restarted count. That is 95 of 758 LEC recordings and every LEC task recording whose first
+sample is > 0. On bp01 2024-03-24_10-52-32 the count runs 603,172..604,163, then 480 onwards,
+which is why its TTL edges looked ~136k samples early.
+- `counter` (default): origin = `sn[j] - j` over the final contiguous run. Right in all 758.
+- `first_sample`: origin = `sn[0]`, the v2 rule that wrote `ephys_rsync/`. It puts spikes
+  0.94-29.2 s late in the 42 LEC restart task recordings; kept only to reproduce v2.
 
-QC per recording -> `ephys_rsync_qc.csv`: n_ttl, n_pycontrol, n_matched, slope, residual.
+QC per recording -> `<out>_qc.csv`: n_ttl, n_pycontrol, n_matched, slope, residual, origin.
 Nothing is overwritten.
 
 Usage::
 
     python extract_rsync_from_ttl.py --dataset mec [--recdays ...] [--write]
+    python extract_rsync_from_ttl.py --origin first_sample --compare-to ephys_rsync   # v2 control
 """
 
 from __future__ import annotations
@@ -59,8 +66,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import recday_registry as rr                                          # noqa: E402
 
-RSYNC_PATH = rr.REPO_ROOT / "data" / "processed_data" / "ephys_rsync"
-QC_PATH = rr.REPO_ROOT / "data" / "processed_data" / "ephys_rsync_qc.csv"
+PROCESSED = rr.REPO_ROOT / "data" / "processed_data"
+DEFAULT_OUT = "ephys_rsync_v4"   # v2's `ephys_rsync/` holds the first_sample-origin trains
+ORIGIN_MODES = ("counter", "first_sample")
+MAX_STALE_SAMPLES = 30_000       # restarts sit at 716-2932 samples in all 95 LEC cases; a jump past
+                                 # 1 s would leave two plausible counts for the TTL, so it raises
+SCAN_CHUNK = 10_000_000          # sample_numbers are scanned in 80 MB pieces (a recording is ~290 MB)
 SAMPLE_RATE_HZ = 30_000
 SAMPLES_PER_MS = SAMPLE_RATE_HZ // 1000
 COARSE_BIN_MS = 20.0     # histogram bin for the offset search: wider than the ~12 ms drift over a
@@ -125,8 +136,32 @@ def pycontrol_rsync_ms(path: Path) -> np.ndarray:
     return np.asarray(times.get("rsync", []), dtype=np.int64)
 
 
-def ttl_rising_relative(row: pd.Series) -> tuple[np.ndarray, int, int]:
-    """(rising-edge samples relative to the AP stream's first sample, ap_first, first_raw_ttl)."""
+def counter_origin(sample_numbers_path, chunk: int = SCAN_CHUNK) -> dict:
+    """Sample number of `.dat` index 0 on the count the TTL events use.
+
+    Returns {origin, restart_at, stale_first, n, n_jumps}; `restart_at` is the first index of
+    the final contiguous run (0 when the count never restarts).
+    """
+    sn = np.load(sample_numbers_path, mmap_mode="r")
+    n = len(sn)
+    if n == 0:
+        raise ValueError(f"{sample_numbers_path}: empty sample_numbers")
+    jumps: list[int] = []
+    for lo in range(0, n - 1, chunk):
+        seg = np.asarray(sn[lo:lo + chunk + 1])           # one sample of overlap covers the seam
+        jumps.extend(int(lo + i) for i in np.flatnonzero(np.diff(seg) != 1))
+    start = jumps[-1] + 1 if jumps else 0
+    if start > MAX_STALE_SAMPLES:
+        raise ValueError(f"{sample_numbers_path}: sample-number jump at index {jumps[-1]}, past the "
+                         f"first {MAX_STALE_SAMPLES} samples; the TTL count cannot be placed")
+    return dict(origin=int(sn[start]) - start, restart_at=start, stale_first=int(sn[0]),
+                n=n, n_jumps=len(jumps))
+
+
+def ttl_rising_relative(row: pd.Series, origin_mode: str = "counter") -> tuple[np.ndarray, dict]:
+    """(rising edges as `.dat` indices, origin and QC fields) for one concat-manifest row."""
+    if origin_mode not in ORIGIN_MODES:
+        raise ValueError(f"origin_mode {origin_mode!r} not in {ORIGIN_MODES}")
     ttl = Path(row["ttl_path"])
     if ttl.suffix == ".npy":            # the concat manifest stores the sample_numbers file itself
         ttl = ttl.parent
@@ -134,7 +169,17 @@ def ttl_rising_relative(row: pd.Series) -> tuple[np.ndarray, int, int]:
     states = np.load(ttl / "states.npy")
     rising = samples[states > 0]
     ap_first = int(np.load(row["sample_numbers_path"], mmap_mode="r")[0])
-    return rising - ap_first, ap_first, int(samples[0]) if len(samples) else -1
+    info = dict(ap_first_sample=ap_first, first_ttl_raw=int(samples[0]) if len(samples) else -1,
+                origin_mode=origin_mode)
+    if origin_mode == "first_sample":
+        info["origin"] = ap_first
+    else:
+        c = counter_origin(row["sample_numbers_path"])
+        rel = rising - c["origin"]
+        info.update(origin=c["origin"], restart_at=c["restart_at"], n_jumps=c["n_jumps"],
+                    n_samples=c["n"], ttl_outside_dat=int(((rel < 0) | (rel >= c["n"])).sum()),
+                    ttl_in_stale_window=int(((rel >= 0) & (rel < c["restart_at"])).sum()))
+    return rising - info["origin"], info
 
 
 def save_new(path: Path, array: np.ndarray) -> str:
@@ -152,7 +197,47 @@ def save_new(path: Path, array: np.ndarray) -> str:
     return "written"
 
 
-def process_recday(recday: str, write: bool, done: set) -> list[dict]:
+def process_row(row: pd.Series, pc_ms: np.ndarray | None, origin_mode: str = "counter"):
+    """One concat-manifest row -> (QC fields, TTL `.dat` indices, rsync train, fit dict or None).
+
+    `pc_ms` is the session's pyControl rsync train, or None for a sleep / unlisted recording,
+    whose rsync train is the raw TTL train. The rsync train is None when matching fails.
+    """
+    rel, info = ttl_rising_relative(row, origin_mode)
+    rec = dict(n_ttl=len(rel), **info, first_ttl_rel=int(rel[0]) if len(rel) else None,
+               ttl_before_ap_start=int((rel < 0).sum()))
+    if pc_ms is None:
+        rec.update(kind="sleep_or_unlisted", n_pycontrol=0, n_matched=0)
+        return rec, rel, rel, None
+    rec.update(kind="task", n_pycontrol=len(pc_ms))
+    try:
+        m = match_trains(rel / SAMPLES_PER_MS, pc_ms.astype(float))
+    except (ValueError, IndexError, np.linalg.LinAlgError) as exc:
+        rec.update(n_matched=0, error=f"{type(exc).__name__}: {exc}")
+        return rec, rel, None, None
+    fitted_ms = m["slope"] * pc_ms + m["intercept_ms"]
+    fitted = np.rint(fitted_ms * SAMPLES_PER_MS).astype(np.int64)
+    rec.update(n_matched=int(m["matched"].sum()), slope_ephys_per_pc=m["slope"],
+               residual_rms_ms=m["residual_rms_ms"], hist_peak=m["peak"],
+               hist_second=m["second_peak"], n_ttl_unmatched=m["n_ttl_unmatched"],
+               first_pc_rsync_matched=bool(m["matched"][0]),
+               first_pc_rsync_sample=int(fitted[0]))
+    # The fitted clock itself, for `extract_neuron_raw --sync fitted`:
+    # dat_index = a * pycontrol_ms + b, the index on this recording's own continuous.dat
+    fit = dict(a_samples_per_ms=m["slope"] * SAMPLES_PER_MS,
+               b_samples=m["intercept_ms"] * SAMPLES_PER_MS,
+               n_rsync=int(len(pc_ms)), n_matched=int(m["matched"].sum()),
+               residual_rms_ms=m["residual_rms_ms"],
+               first_rsync_ms=float(pc_ms[0]), last_rsync_ms=float(pc_ms[-1]))
+    if origin_mode != "first_sample":      # first_sample must reproduce v2's json text exactly
+        fit.update(origin=info["origin"], origin_mode=origin_mode)
+    return rec, rel, fitted, fit
+
+
+def process_recday(recday: str, write: bool, done: set, *, origin_mode: str = "counter",
+                   out_dir: Path = PROCESSED / DEFAULT_OUT,
+                   compare_dir: Path | None = None) -> list[dict]:
+    """QC rows for every recording of one block; writes into `out_dir` with `write`."""
     mouse, _ = rr.recday_dates(recday)
     concat = pd.read_csv(rr.kilosort_dir(recday).parent / "recording_sessions_in_concat.csv")
     task_rows = rr.task_session_rows(recday)
@@ -170,48 +255,62 @@ def process_recday(recday: str, write: bool, done: set) -> list[dict]:
             continue
         done.add(key)
         tag = f"{row['date']}_{row['time']}"
-        rec = dict(mouse=mouse, recording=tag, recday_seen=recday)
-        rel, ap_first, first_raw = ttl_rising_relative(row)
-        rec.update(n_ttl=len(rel), ap_first_sample=ap_first, first_ttl_raw=first_raw,
-                   first_ttl_rel=int(rel[0]) if len(rel) else None,
-                   ttl_before_ap_start=int((rel < 0).sum()))
-
         session = stamp_to_session.get((date, str(row["time"])))
-        fit = None
-        if session is None:
-            rec.update(kind="sleep_or_unlisted", n_pycontrol=0, n_matched=0)
-            fitted = rel
-        else:
-            pc_path = rr.pycontrol_file(recday, session)
-            pc_ms = pycontrol_rsync_ms(pc_path)
-            rec.update(kind="task", session=session, pycontrol=pc_path.name, n_pycontrol=len(pc_ms))
+        pc_ms = None
+        extra = {}
+        if session is not None:
             try:
-                m = match_trains(rel / SAMPLES_PER_MS, pc_ms.astype(float))
-                fitted_ms = m["slope"] * pc_ms + m["intercept_ms"]
-                fitted = np.rint(fitted_ms * SAMPLES_PER_MS).astype(np.int64)
-                rec.update(n_matched=int(m["matched"].sum()), slope_ephys_per_pc=m["slope"],
-                           residual_rms_ms=m["residual_rms_ms"], hist_peak=m["peak"],
-                           hist_second=m["second_peak"], n_ttl_unmatched=m["n_ttl_unmatched"],
-                           first_pc_rsync_matched=bool(m["matched"][0]),
-                           first_pc_rsync_sample=int(fitted[0]))
-                # The fitted clock itself, for `extract_neuron_raw --sync fitted`:
-                # ephys_sample = a * pycontrol_ms + b  (relative to the recording's first AP sample)
-                fit = dict(a_samples_per_ms=m["slope"] * SAMPLES_PER_MS,
-                           b_samples=m["intercept_ms"] * SAMPLES_PER_MS,
-                           n_rsync=int(len(pc_ms)), n_matched=int(m["matched"].sum()),
-                           residual_rms_ms=m["residual_rms_ms"], pycontrol=pc_path.name,
-                           first_rsync_ms=float(pc_ms[0]), last_rsync_ms=float(pc_ms[-1]))
-            except (ValueError, IndexError, np.linalg.LinAlgError) as exc:
-                rec.update(n_matched=0, error=f"{type(exc).__name__}: {exc}")
-                fitted = None
-
+                pc_path = rr.pycontrol_file(recday, session)
+            except (FileNotFoundError, KeyError, AssertionError) as exc:
+                # ah10 2025-07-18 has ephys rows but no pyControl file; one such row must not
+                # stop the block, and it must not pass for a sleep recording either
+                out.append(dict(mouse=mouse, recording=tag, recday_seen=recday, kind="task",
+                                session=session, n_pycontrol=0, n_matched=0,
+                                error=f"pycontrol: {type(exc).__name__}: {exc}"))
+                continue
+            pc_ms = pycontrol_rsync_ms(pc_path)
+            extra = dict(session=session, pycontrol=pc_path.name)
+        fields, rel, fitted, fit = process_row(row, pc_ms, origin_mode)
+        if fit is not None:
+            fit["pycontrol"] = extra["pycontrol"]
+        rec = dict(mouse=mouse, recording=tag, recday_seen=recday, **fields, **extra)
+        if compare_dir is not None:
+            rec.update(compare_existing(compare_dir / mouse, tag, rel, fitted, fit))
         if write:
-            rec["ttl_file"] = save_new(RSYNC_PATH / mouse / f"ttl_rising_{tag}.npy", rel)
+            rec["ttl_file"] = save_new(out_dir / mouse / f"ttl_rising_{tag}.npy", rel)
             if fitted is not None:
-                rec["rsync_file"] = save_new(RSYNC_PATH / mouse / f"rsync_timestamps_{tag}.npy", fitted)
+                rec["rsync_file"] = save_new(out_dir / mouse / f"rsync_timestamps_{tag}.npy", fitted)
             if fit is not None:
-                rec["fit_file"] = save_new_json(RSYNC_PATH / mouse / f"rsync_fit_{tag}.json", fit)
+                rec["fit_file"] = save_new_json(out_dir / mouse / f"rsync_fit_{tag}.json", fit)
         out.append(rec)
+    return out
+
+
+def compare_existing(folder: Path, tag: str, ttl, rsync, fit) -> dict:
+    """Read-only twin of the writes, per file: 'identical', 'DIFFERS', 'absent' (computed, not on
+    disk), 'stale' (on disk, not computed now) or '-'.
+
+    'stale' is not a difference in what the code computes: four bp01 2024-03-21 fits in mEC's
+    `ephys_rsync/` survive from a first run that mapped bp01's 12:59 pyControl file to the 13:23
+    recording, which every later run, and the registry, treat as sleep.
+    """
+    import json
+
+    def status(on_disk: bool, new_none: bool, same) -> str:
+        if not on_disk:
+            return "-" if new_none else "absent"
+        if new_none:
+            return "stale"
+        return "identical" if same() else "DIFFERS"
+
+    out = {}
+    for key, name, new in (("cmp_ttl", f"ttl_rising_{tag}.npy", ttl),
+                           ("cmp_rsync", f"rsync_timestamps_{tag}.npy", rsync)):
+        p = folder / name
+        out[key] = status(p.exists(), new is None, lambda: np.array_equal(np.load(p), new))
+    p = folder / f"rsync_fit_{tag}.json"
+    text = None if fit is None else json.dumps(fit, indent=1, sort_keys=True)
+    out["cmp_fit"] = status(p.exists(), text is None, lambda: p.read_text() == text)
     return out
 
 
@@ -236,21 +335,33 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--dataset", default=rr.DATASET, choices=sorted(rr.DATASETS))
     ap.add_argument("--recdays", nargs="*", default=None)
+    ap.add_argument("--origin", choices=ORIGIN_MODES, default="counter",
+                    help="TTL sample-number origin: counter (default) or first_sample (v2's rule)")
+    ap.add_argument("--out", default=DEFAULT_OUT, help="output tree under data/processed_data")
+    ap.add_argument("--compare-to", default=None,
+                    help="read-only: compare every output with this tree under data/processed_data")
     ap.add_argument("--write", action="store_true")
     args = ap.parse_args()
+    if args.write and args.compare_to:
+        ap.error("--compare-to is read-only; run it without --write")
+    out_dir = PROCESSED / args.out
+    compare_dir = PROCESSED / args.compare_to if args.compare_to else None
 
     rows, done = [], set()
     for recday in args.recdays or rr.all_recdays():
-        rows.extend(process_recday(recday, args.write, done))
+        rows.extend(process_recday(recday, args.write, done, origin_mode=args.origin,
+                                   out_dir=out_dir, compare_dir=compare_dir))
     qc = pd.DataFrame(rows)
     pd.set_option("display.width", 250)
     task = qc[qc["kind"] == "task"]
-    print(f"{len(qc)} recordings ({len(task)} task, {len(qc) - len(task)} sleep/unlisted)")
+    print(f"{len(qc)} recordings ({len(task)} task, {len(qc) - len(task)} sleep/unlisted)  "
+          f"[origin={args.origin}, out={args.out}]")
     if len(task):
         print("task recordings: n_ttl vs n_pycontrol vs n_matched")
         cols = ["mouse", "recording", "session", "n_ttl", "n_pycontrol", "n_matched", "n_ttl_unmatched",
                 "hist_peak", "hist_second", "first_pc_rsync_matched", "slope_ephys_per_pc",
-                "residual_rms_ms", "ttl_before_ap_start"] + (["error"] if "error" in task else [])
+                "residual_rms_ms", "ap_first_sample", "origin", "restart_at", "ttl_before_ap_start"] + (
+                    ["error"] if "error" in task else [])
         print(task[[c for c in cols if c in task]].to_string(index=False))
         ok = task[task["n_matched"] > 0]
         if len(ok):
@@ -260,12 +371,34 @@ def main() -> None:
                   f"{(ok['slope_ephys_per_pc'] - 1).min():.2e} .. {(ok['slope_ephys_per_pc'] - 1).max():.2e}; "
                   f"residual rms ms median {ok['residual_rms_ms'].median():.3f} max {ok['residual_rms_ms'].max():.3f}")
             print(f"first pyControl rsync observed in TTL: {int(ok['first_pc_rsync_matched'].sum())}/{len(ok)}")
+    if "restart_at" in qc:
+        restart = qc["restart_at"] > 0
+        print(f"\ncounter origin: {int(restart.sum())}/{len(qc)} recordings restart the count "
+              f"(task {int((restart & (qc['kind'] == 'task')).sum())}); first sample > 0 without a "
+              f"restart: {int(((qc['ap_first_sample'] > 0) & ~restart).sum())}; TTL edges outside the "
+              f".dat: {int(qc['ttl_outside_dat'].sum())}; in a stale window: {int(qc['ttl_in_stale_window'].sum())}")
+    failed = False
+    if compare_dir is not None:
+        for col in ("cmp_ttl", "cmp_rsync", "cmp_fit"):
+            print(f"{col} vs {args.compare_to}: {qc[col].value_counts().to_dict()}")
+        stale = qc[(qc[["cmp_ttl", "cmp_rsync", "cmp_fit"]] == "stale").any(axis=1)]
+        if len(stale):
+            print(f"\n{len(stale)} recording(s) have files in {args.compare_to} that this run does not compute "
+                  f"(left by an earlier run; not a difference in what the code computes):")
+            print(stale[["mouse", "recording", "kind", "cmp_ttl", "cmp_rsync", "cmp_fit"]].to_string(index=False))
+        differs = qc[(qc[["cmp_ttl", "cmp_rsync", "cmp_fit"]] == "DIFFERS").any(axis=1)]
+        if len(differs):
+            failed = True
+            print(f"\n{len(differs)} recording(s) DIFFER from {args.compare_to}:")
+            print(differs[["mouse", "recording", "cmp_ttl", "cmp_rsync", "cmp_fit"]].to_string(index=False))
     if args.write:
+        qc_path = PROCESSED / f"{args.out}_qc.csv"
         n = 0
-        while (p := QC_PATH.with_name(QC_PATH.stem + (f".v{n}" if n else "") + ".csv")).exists():
+        while (p := qc_path.with_name(qc_path.stem + (f".v{n}" if n else "") + ".csv")).exists():
             n += 1
         qc.to_csv(p, index=False)
         print(f"QC -> {p}")
+    sys.exit(1 if failed else 0)
 
 
 if __name__ == "__main__":

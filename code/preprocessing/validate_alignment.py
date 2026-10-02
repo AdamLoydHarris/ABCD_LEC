@@ -24,21 +24,46 @@ across arrays produced by independent parts of the pipeline:
    cover at least that many bins. Scored sessions only: a session with no completed
    trials is deliberately binned to the end of the recording rather than to a
    behavioural window, so its array routinely outruns the tracking by design.
+5. `rsync_ok`     -- the TTL pairing behind the neural clock (QC of `extract_rsync_from_ttl`).
+
+Checks 1-5 cannot see a spike clock that is off by a constant: in v2 every one of them passed
+while 42 LEC task sessions had spikes 0.94-29.2 s late (docs/handoff/SPIKE_CLOCK_V4.md). The
+probes below compare the spikes themselves with behaviour, and are hard gates:
+
+6. `speed_*`      -- lag of the population rate against running speed (tracking, frame clock),
+   searched over ±90 s; must sit within ±0.5 s of the mouse's own reference, the median over
+   its sessions whose recording starts at sample 0. Tested where r > 0.2 and the peak beats
+   everything more than 2 s away by 20 %: a flat cross-correlation has no lag to test. The
+   reference is per mouse because it differs: -0.30 s for ah10, about +0.15 s for ah08.
+7. `reward_*`     -- peak of the mean |z| reward-entry PSTH (250 ms blocks, ±30 s); must lie
+   in [-2, +4] s. Tested where peak / median > 2.
+8. `wallclock_s`  -- pyControl start stamp minus OpenEphys Software Time minus the clock's
+   own t = 0 offset; must lie within the IQR ± 3 s of the same mouse's sessions from the same
+   pyControl format. The maze `.txt` and open-field `.tsv` rigs' PC clocks differ by ~3.5 s, and
+   `.txt` stamps are 1 s.
+9. `early_ok`     -- a session whose first bin maps before ephys sample 0 passes only if the
+   wall clock confirms it.
 
 Reads the arrays on disk rather than `data_dic_lec.pkl`, so a recday can be checked before
-it is built into the dictionary.
+it is built into the dictionary. `--rsync` names the train tree that made the arrays under
+test (v1 `ephys_rsync_mingyutest`, v2 `ephys_rsync`, v4 `ephys_rsync_v4`); the probes 8-9
+read its clock.
 
 Usage::
 
     python validate_alignment.py                       # whole cohort, per-mouse summary
     python validate_alignment.py --recdays ly05_20250618_20250619 --detail
+    python validate_alignment.py --neural v4 --tracking v3 --rsync ephys_rsync_v4
 """
 
 import argparse
 import os
 import sys
+from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import List
+from zoneinfo import ZoneInfo
 
 # `--dataset` must reach recday_registry before it is imported (default: lec, unchanged).
 if "--dataset" in sys.argv:
@@ -46,6 +71,8 @@ if "--dataset" in sys.argv:
 
 import numpy as np
 import pandas as pd
+from scipy.ndimage import gaussian_filter1d
+from scipy.signal import fftconvolve
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -61,11 +88,35 @@ _TRACKING = sys.argv[sys.argv.index("--tracking") + 1] if "--tracking" in sys.ar
 NEURON_PATH = PROCESSED_DATA / ("neuron_raw_mingyutest" if _NEURAL == "mingyutest" else f"neuron_raw_{_NEURAL}")
 TRIALTIMES_PATH = PROCESSED_DATA / "trialtimes_raw_mingyutest"
 TRACKING_PATH = rr.REPO_ROOT / "data" / ("processed" if _TRACKING == "processed" else f"processed_{_TRACKING}")
-RSYNC_QC = PROCESSED_DATA / "ephys_rsync_qc.csv"          # extract_rsync_from_ttl.py, TTL-derived trains
+# `--rsync`: the train tree behind the arrays under test, read by the wall-clock and early-start
+# probes. Its own QC (`<tree>_qc.csv`) when it has one; the legacy caches have none, and fall back
+# to the TTL-derived QC, whose pairing columns are the same in v2 and v4.
+_RSYNC = sys.argv[sys.argv.index("--rsync") + 1] if "--rsync" in sys.argv else "ephys_rsync"
+RSYNC_TREE = PROCESSED_DATA / _RSYNC
+RSYNC_QC = PROCESSED_DATA / (f"{_RSYNC}_qc.csv" if list(PROCESSED_DATA.glob(f"{_RSYNC}_qc*.csv"))
+                             else "ephys_rsync_qc.csv")
 
-_suffix = "" if (rr.DATASET == "lec" and _NEURAL == "mingyutest" and _TRACKING == "processed") else (
-    f"_{rr.DATASET}" + ("" if _NEURAL == "mingyutest" else f"_n{_NEURAL}") + ("" if _TRACKING == "processed" else f"_t{_TRACKING}"))
+_suffix = "" if (rr.DATASET == "lec" and _NEURAL == "mingyutest" and _TRACKING == "processed"
+                 and _RSYNC == "ephys_rsync") else (
+    f"_{rr.DATASET}" + ("" if _NEURAL == "mingyutest" else f"_n{_NEURAL}") + ("" if _TRACKING == "processed" else f"_t{_TRACKING}")
+    + ("" if _RSYNC == "ephys_rsync" else f"_r{_RSYNC.replace('ephys_rsync_', '')}"))
 REPORT_PATH = PROCESSED_DATA / f"alignment_qc{_suffix}.csv"
+
+BIN_MS = 25
+SAMPLES_PER_MS = 30
+LONDON = ZoneInfo("Europe/London")      # pyControl stamps are local wall time; OpenEphys logs UTC ms
+SPEED_MAX_LAG_S = 90.0                  # mEC's largest first-sample offset is 67 s
+SPEED_R_MIN = 0.2                       # below this the speed cross-correlation is multi-peaked noise
+SPEED_PEAK_RATIO_MIN = 1.2              # peak / best value > 2 s away: 12 ly05 sessions with r 0.21-0.38
+                                        # sit at 1.00-1.14 with lags scattered over +-70 s, also where
+                                        # v4 == v2; 95 % of the other sessions are >= 1.24
+SPEED_TOL_S = 0.5
+REWARD_HALF_S = 30.0
+REWARD_BLOCK_BINS = 10                  # 250 ms blocks
+REWARD_WINDOW_S = (-2.0, 4.0)           # ah10 v1 peaks inside [-1, 4] in 38/38; 8 mEC sessions whose speed
+                                        # probe passes peak at -1.25 to -1.5 s (activity before the entry)
+REWARD_PTM_MIN = 2.0
+WALLCLOCK_PAD_S = 3.0
 
 #: Threshold for `loc_at_goal`, set from the measured separation rather than by taste.
 #: Correctly aligned sessions score 0.944-1.000 across the whole cohort (90% score exactly
@@ -180,17 +231,38 @@ def check_session(recday: str, session: int) -> dict:
         row["rsync_first_ok"] = None
         row["rsync_ok"] = None
 
-    # 6. speed x population-rate cross-correlation: running speed comes from the tracking (on
-    #    the pyControl clock through the frame fit), population rate from the spikes (through
-    #    the rsync fit). Movement-related firing puts the peak near lag 0 when both clocks are
-    #    right; a neural offset shows as a displaced peak. Reported per session, not gated.
-    row["speed_lag_bins"] = np.nan
-    row["speed_lag_r"] = np.nan
+    # 6-7. behaviour-locked probes on the spikes themselves (module docstring). Gated per mouse
+    #      afterwards by `probe_gates`, which needs every session of the mouse.
+    row.update(ap_first_sample=np.nan if qc is None else qc.get("ap_first_sample", np.nan),
+               speed_lag_s=np.nan, speed_r=np.nan, speed_peak_ratio=np.nan, reward_peak_s=np.nan, reward_ptm=np.nan,
+               n_rewards=0, wallclock_s=np.nan, t0_dat_s=np.nan)
     neuron_path = NEURON_PATH / f"Neuron_raw_{recday}_{session}.npy"
     xy_path = _tracking_dir(recday) / f"XY_raw_{recday}_{session}.npy"
-    if neuron_path.exists() and xy_path.exists():
-        lag, r = speed_rate_lag(np.load(neuron_path, mmap_mode="r"), np.load(xy_path))
-        row["speed_lag_bins"], row["speed_lag_r"] = lag, r
+    if neuron_path.exists():
+        neural = np.load(neuron_path)
+        if xy_path.exists():
+            row["speed_lag_s"], row["speed_r"], row["speed_peak_ratio"] = speed_probe(neural, np.load(xy_path))
+        if pokes is not None:
+            row["reward_peak_s"], row["reward_ptm"], row["n_rewards"] = reward_probe(neural, pokes)
+
+    # 8-9. wall clock and early start, on the clock of the `--rsync` tree
+    if qc is not None:
+        try:
+            pc_path = rr.pycontrol_file(recday, session)
+            row["pycontrol_suffix"] = pc_path.suffix
+            times, _ = parse_pycontrol(pc_path)
+            pc_zero = _pc_zero_samples(recday, qc["recording"], times)
+            sync = _sync_messages(recday, qc["recording"])
+            pc_start = pycontrol_start(pc_path)
+            if pc_zero is not None:
+                a_on = times.get("A_on", np.array([], dtype=np.int64))
+                t0 = ((int(a_on[0]) // BIN_MS) * BIN_MS if len(a_on) and trial_times is not None
+                      and len(trial_times) else int(times["rsync"][0]))
+                row["t0_dat_s"] = (pc_zero + SAMPLES_PER_MS * t0) / (1000 * SAMPLES_PER_MS)
+                if sync is not None and pc_start is not None:
+                    row["wallclock_s"] = wallclock_discrepancy_s(pc_start, oe_start(sync), pc_zero)
+        except (KeyError, FileNotFoundError, AssertionError, ValueError) as exc:
+            row["notes"] += f"wall clock unresolved ({exc}); "
 
     return row
 
@@ -200,36 +272,126 @@ def _tracking_dir(recday: str) -> Path:
     return TRACKING_PATH / mouse / "_".join(dates)
 
 
-def speed_rate_lag(neuron_raw, xy_cm: np.ndarray, max_lag: int = 80, smooth_bins: int = 4):
-    """(lag in bins at the peak |cross-correlation| of speed vs population rate, r at that lag).
+def _z(x: np.ndarray) -> np.ndarray | None:
+    s = x.std()
+    return None if not np.isfinite(s) or s == 0 else (x - x.mean()) / s
 
-    Both signals z-scored and lightly smoothed (box of `smooth_bins`). Positive lag means the
-    rate leads the speed. Sessions with < 2000 common bins return NaN.
+
+def speed_probe(neuron_raw, xy_cm, max_lag_s: float = SPEED_MAX_LAG_S) -> tuple[float, float, float]:
+    """(lag in s maximising corr(speed[t], pop[t + lag]), r there, r / best r more than 2 s away);
+    negative lag = population leads.
+
+    neuron_raw (units, bins), xy_cm (bins, >= 2). Population rate sigma 10 bins; speed from XY
+    with NaNs interpolated, sigma 3 bins, then the gradient (the handoff probe exactly).
     """
-    pop = np.asarray(neuron_raw).sum(axis=0).astype(float)
+    pop = gaussian_filter1d(np.asarray(neuron_raw).sum(axis=0).astype(float), 10)
     xy = np.asarray(xy_cm, dtype=float)
-    n = min(len(pop), len(xy))
-    if n < 2000:
-        return np.nan, np.nan
-    speed = np.hypot(*np.diff(xy[:n], axis=0).T)
-    speed = np.append(speed, speed[-1])
-    ok = ~np.isnan(speed)
-    if ok.sum() < 2000:
-        return np.nan, np.nan
-    speed = np.where(ok, speed, np.nanmedian(speed))
-    k = np.ones(smooth_bins) / smooth_bins
-    a = np.convolve(speed, k, mode="same")
-    b = np.convolve(pop[:n], k, mode="same")
-    a = (a - a.mean()) / (a.std() + 1e-12)
-    b = (b - b.mean()) / (b.std() + 1e-12)
-    lags = np.arange(-max_lag, max_lag + 1)
-    cc = np.array([np.dot(a[max(0, -l):n - max(0, l)], b[max(0, l):n - max(0, -l)]) / (n - abs(l)) for l in lags])
-    i = int(np.argmax(np.abs(cc)))
-    return int(lags[i]), float(cc[i])
+    if xy.ndim != 2 or xy.shape[1] < 2:
+        return np.nan, np.nan, np.nan
+    xy = xy[:, :2].copy()
+    for k in range(2):
+        ok = np.isfinite(xy[:, k])
+        if ok.sum() < 2000:
+            return np.nan, np.nan, np.nan
+        xy[:, k] = np.interp(np.arange(len(xy)), np.flatnonzero(ok), xy[ok, k])
+    speed = np.hypot(*np.gradient(gaussian_filter1d(xy, 3, axis=0), axis=0).T)
+    n = min(len(pop), len(speed))
+    lead = int(np.argmax(pop[:n] > 0))      # a late ephys start leaves leading empty bins
+    a, b = speed[lead + 40:n], pop[lead + 40:n]
+    m = min(int(round(max_lag_s * 1000 / BIN_MS)), len(a) // 3)
+    a, b = _z(a), _z(b)
+    if a is None or b is None or m < 40:
+        return np.nan, np.nan, np.nan
+    c = fftconvolve(b, a[::-1], "full") / len(a)
+    seg = c[len(a) - 1 - m:len(a) + m]
+    k = int(np.argmax(seg))
+    far = np.abs(np.arange(len(seg)) - k) > 2000 // BIN_MS
+    ratio = float(seg[k] / seg[far].max()) if far.any() and seg[far].max() > 0 else np.inf
+    return (k - m) * BIN_MS / 1000, float(seg[k]), ratio
+
+
+def reward_probe(neuron_raw, pokes: np.ndarray, half_s: float = REWARD_HALF_S,
+                 block_bins: int = REWARD_BLOCK_BINS) -> tuple[float, float, int]:
+    """(peak lag in s, peak / median, n rewards) of the mean |z| across units of the PSTH
+    around rewarded poke entries (`pokes[:, 3] == 1`, entry bin in column 0), in blocks of
+    `block_bins` starting at entry + lag. Each unit is z-scored across lags before |.|."""
+    counts = np.asarray(neuron_raw, dtype=np.float64)
+    h = int(round(half_s * 1000 / (BIN_MS * block_bins)))
+    entries = np.asarray(pokes)[np.asarray(pokes)[:, 3] == 1, 0].astype(np.int64) if len(pokes) else np.array([], int)
+    entries = entries[(entries - h * block_bins >= 0) & (entries + (h + 1) * block_bins <= counts.shape[1])]
+    if len(entries) < 5:
+        return np.nan, np.nan, int(len(entries))
+    cs = np.concatenate([np.zeros((counts.shape[0], 1)), np.cumsum(counts, axis=1)], axis=1)
+    lags = np.arange(-h, h + 1)
+    starts = entries[:, None] + lags[None, :] * block_bins
+    psth = (cs[:, starts + block_bins] - cs[:, starts]).mean(axis=1)          # (units, lags)
+    sd = psth.std(axis=1)
+    if not (sd > 0).any():
+        return np.nan, np.nan, int(len(entries))
+    z = (psth[sd > 0] - psth[sd > 0].mean(axis=1, keepdims=True)) / sd[sd > 0, None]
+    curve = np.abs(z).mean(axis=0)
+    k = int(np.argmax(curve))
+    return float(lags[k] * block_bins * BIN_MS / 1000), float(curve[k] / np.median(curve)), int(len(entries))
+
+
+def pycontrol_start(path) -> datetime | None:
+    """Aware start time of a pyControl file: `.txt` 'I Start date' (1 s), `.tsv` start_time (ms)."""
+    path = Path(path)
+    with open(path) as f:
+        for i, line in enumerate(f):
+            if path.suffix == ".txt" and line.startswith("I Start date"):
+                t = datetime.strptime(line.split(":", 1)[1].strip(), "%Y/%m/%d %H:%M:%S")
+                return t.replace(tzinfo=LONDON)
+            if path.suffix == ".tsv" and "\tstart_time\t" in line:
+                # UTC: read as London time, all 8 April mEC .tsv sessions sit at -3599.4 s and March ones do not
+                return datetime.fromisoformat(line.rstrip("\n").split("\t")[-1]).replace(tzinfo=timezone.utc)
+            if i > 50:                       # the header is the first ~10 lines
+                break
+    return None
+
+
+def oe_start(sync_messages: Path) -> datetime:
+    """Aware UTC time the recording started, from `sync_messages.txt` 'Software Time' (ms)."""
+    for line in Path(sync_messages).read_text().splitlines():
+        if line.startswith("Software Time"):
+            return datetime.fromtimestamp(int(line.rsplit(":", 1)[1].strip()) / 1000, tz=timezone.utc)
+    raise ValueError(f"{sync_messages}: no Software Time line")
+
+
+def wallclock_discrepancy_s(pc_start: datetime, oe_t0: datetime, pc_zero_samples: float) -> float:
+    """pyControl start minus OpenEphys start minus the clock's own pyControl t = 0 offset, in s.
+    0 when the clock is right; v2's error shows as +(sn0 - origin) / 30 kHz."""
+    return (pc_start - oe_t0).total_seconds() - pc_zero_samples / (1000 * SAMPLES_PER_MS)
+
+
+@lru_cache(maxsize=None)
+def _concat_manifest(recday: str) -> pd.DataFrame:
+    return pd.read_csv(rr.kilosort_dir(recday).parent / "recording_sessions_in_concat.csv")
+
+
+def _sync_messages(recday: str, tag: str) -> Path | None:
+    """`sync_messages.txt` of the recording named `YYYY-MM-DD_HH-MM-SS`, via the concat manifest."""
+    c = _concat_manifest(recday)
+    hit = c[(c["date"].astype(str) == tag[:10]) & (c["time"].astype(str) == tag[11:])]
+    if not len(hit):
+        return None
+    p = Path(hit.iloc[0]["sample_numbers_path"]).parents[2] / "sync_messages.txt"
+    return p if p.exists() else None
+
+
+def _pc_zero_samples(recday: str, tag: str, times: dict) -> float | None:
+    """`.dat` index of pyControl t = 0 on the `--rsync` tree's train: train[0] - 30 * rsync[0].
+    For a legacy cache that is `session_window`'s pc_zero; for a fitted tree it is b to < 1 ms."""
+    mouse, _ = rr.recday_dates(recday)
+    p = RSYNC_TREE / mouse / f"rsync_timestamps_{tag}.npy"
+    rsync = times.get("rsync", np.array([]))
+    if not p.exists() or not len(rsync):
+        return None
+    train = np.load(p)
+    return float(train[0]) - SAMPLES_PER_MS * float(rsync[0]) if len(train) else None
 
 
 RSYNC_MATCH_FLOOR = 0.9
-REWARD_LAG_MAX = 80        # bins (2 s) either side
 
 
 def _rsync_qc_table() -> pd.DataFrame | None:
@@ -264,20 +426,62 @@ def _rsync_qc_row(recday: str, session: int) -> dict | None:
     return hit.iloc[0].to_dict() if len(hit) else None
 
 
-def reward_response_lag(neuron_raw, pokes: np.ndarray, max_lag: int = REWARD_LAG_MAX):
-    """(peak lag in bins, peak / median of the event-triggered population rate).
+def _speed_testable(df: pd.DataFrame) -> pd.Series:
+    """A session's speed lag means something: r above the floor and a distinct peak."""
+    ratio = df["speed_peak_ratio"] if "speed_peak_ratio" in df else pd.Series(np.inf, index=df.index)
+    return (df["speed_r"] > SPEED_R_MIN) & (ratio >= SPEED_PEAK_RATIO_MIN)
 
-    Population rate = spike counts summed over units. Averaged around every rewarded poke
-    entry (`pokes[:, 3] == 1`) over lags -max_lag..+max_lag; the argmax is the lag reported.
+
+def probe_gates(report: pd.DataFrame) -> pd.DataFrame:
+    """Per-mouse references and pass flags for probes 6-9; adds *_ref and *_ok columns.
+
+    References come from the mouse's sessions whose recording starts at sample 0, where every
+    clock version agrees, so a shifted version cannot drag its own reference along.
     """
-    pop = np.asarray(neuron_raw).sum(axis=0).astype(float)
-    entries = pokes[pokes[:, 3] == 1, 0].astype(int)
-    entries = entries[(entries >= max_lag) & (entries < len(pop) - max_lag)]
-    if len(entries) < 5:
-        return np.nan, np.nan
-    lags = np.arange(-max_lag, max_lag + 1)
-    curve = np.array([pop[entries + l].mean() for l in lags])
-    return int(lags[int(np.argmax(curve))]), float(curve.max() / max(np.median(curve), 1e-9))
+    report = report.copy()
+    for col in ("speed_ref_s", "wallclock_lo_s", "wallclock_hi_s"):
+        report[col] = np.nan
+    report["ref_source"] = ""
+    if "pycontrol_suffix" not in report:
+        report["pycontrol_suffix"] = ""
+    report["pycontrol_suffix"] = report["pycontrol_suffix"].fillna("")
+    clean_all = report["ap_first_sample"] == 0
+    cohort_sp = report[clean_all & _speed_testable(report)]["speed_lag_s"].dropna()
+    for mouse, g in report.groupby("mouse"):
+        clean = g["ap_first_sample"] == 0
+        sp = g[clean & _speed_testable(g)]["speed_lag_s"].dropna()
+        # Too few clean sessions falls back to the cohort's clean sessions, never to this mouse's
+        # suspect ones: on a 2-recday subset that fallback put ah10's reference at +4.55 s.
+        src = "speed mouse" if len(sp) >= 3 else "speed cohort"
+        sp = sp if len(sp) >= 3 else cohort_sp
+        idx = report["mouse"] == mouse
+        report.loc[idx, "ref_source"] = src
+        if len(sp):
+            report.loc[idx, "speed_ref_s"] = float(sp.median())
+    # wall-clock band per mouse and pyControl format (rig), with the same fallback rule
+    for (mouse, suffix), g in report.groupby(["mouse", "pycontrol_suffix"]):
+        wc = g[g["ap_first_sample"] == 0]["wallclock_s"].dropna()
+        src = "wall mouse"
+        if len(wc) < 4:
+            wc = report[clean_all & (report["pycontrol_suffix"] == suffix)]["wallclock_s"].dropna()
+            src = "wall cohort"
+        idx = (report["mouse"] == mouse) & (report["pycontrol_suffix"] == suffix)
+        report.loc[idx, "ref_source"] = report.loc[idx, "ref_source"] + f", {src}{suffix}"
+        if len(wc):
+            q1, q3 = np.percentile(wc, [25, 75])
+            report.loc[idx, "wallclock_lo_s"] = q1 - WALLCLOCK_PAD_S
+            report.loc[idx, "wallclock_hi_s"] = q3 + WALLCLOCK_PAD_S
+    speed_tested = _speed_testable(report) & report["speed_ref_s"].notna()
+    report["speed_ok"] = np.where(speed_tested, (report["speed_lag_s"] - report["speed_ref_s"]).abs()
+                                  <= SPEED_TOL_S, None)
+    reward_tested = report["reward_ptm"] > REWARD_PTM_MIN
+    report["reward_ok"] = np.where(reward_tested, report["reward_peak_s"].between(*REWARD_WINDOW_S), None)
+    wall_tested = report["wallclock_s"].notna() & report["wallclock_lo_s"].notna()
+    report["wallclock_ok"] = np.where(wall_tested, report["wallclock_s"].between(
+        report["wallclock_lo_s"], report["wallclock_hi_s"]), None)
+    early = report["t0_dat_s"] < 0
+    report["early_ok"] = np.where(early, report["wallclock_ok"] == True, None)    # noqa: E712
+    return report
 
 
 def check_recdays(recdays: List[str], verbose: bool = True) -> pd.DataFrame:
@@ -316,8 +520,13 @@ def summarise(report: pd.DataFrame, verbose: bool = True) -> pd.DataFrame:
         bins_ok=("bins_ok", verdict),
         rsync_ok=("rsync_ok", verdict),
         rsync_matched_min=("rsync_matched_frac", "min"),
-        speed_lag_median=("speed_lag_bins", "median"),
-        speed_lag_r_median=("speed_lag_r", "median"),
+        speed_ok=("speed_ok", verdict),
+        speed_lag_median=("speed_lag_s", "median"),
+        reward_ok=("reward_ok", verdict),
+        reward_peak_median=("reward_peak_s", "median"),
+        wallclock_ok=("wallclock_ok", verdict),
+        wallclock_median=("wallclock_s", "median"),
+        early_ok=("early_ok", verdict),
     )
     # poke_loc is a tracking-quality measure, so judge it against the same mouse only.
     per_mouse = grouped.groupby("mouse")["poke_loc_mean"]
@@ -344,7 +553,35 @@ def failures(report: pd.DataFrame) -> List[str]:
         for _, r in report[report["rsync_ok"] == False].iterrows():   # noqa: E712
             bad.append(f"{r['recday']} s{r['session']}: rsync pairing weak or first pulse unmatched "
                        f"(matched {r['rsync_matched_frac']:.2f}, first {r['rsync_first_ok']})")
+    if "speed_ok" in report:
+        for _, r in report[report["speed_ok"] == False].iterrows():   # noqa: E712
+            bad.append(f"{r['recday']} s{r['session']}: speed lag {r['speed_lag_s']:+.2f} s vs the mouse "
+                       f"reference {r['speed_ref_s']:+.2f} s (r {r['speed_r']:.2f}, peak ratio {r['speed_peak_ratio']:.2f})")
+        for _, r in report[report["reward_ok"] == False].iterrows():  # noqa: E712
+            bad.append(f"{r['recday']} s{r['session']}: reward PSTH peak {r['reward_peak_s']:+.2f} s outside "
+                       f"{list(REWARD_WINDOW_S)} (peak/median {r['reward_ptm']:.1f}, {r['n_rewards']} rewards)")
+        for _, r in report[report["wallclock_ok"] == False].iterrows():   # noqa: E712
+            bad.append(f"{r['recday']} s{r['session']}: wall clock {r['wallclock_s']:+.2f} s outside the mouse "
+                       f"band [{r['wallclock_lo_s']:+.2f}, {r['wallclock_hi_s']:+.2f}] s")
+        for _, r in report[report["early_ok"] == False].iterrows():   # noqa: E712
+            bad.append(f"{r['recday']} s{r['session']}: first bin maps {-r['t0_dat_s']:.2f} s before ephys "
+                       f"sample 0 and the wall clock does not confirm it")
     return bad
+
+
+def probe_table(report: pd.DataFrame) -> pd.DataFrame:
+    """Per mouse: sessions tested and passed for each probe, and the references."""
+    rows = []
+    for mouse, g in report.groupby("mouse"):
+        row = {"mouse": mouse, "sessions": len(g), "speed_ref_s": g["speed_ref_s"].iloc[0],
+               "wallclock_median_s": g.loc[g["ap_first_sample"] == 0, "wallclock_s"].median(),
+               "ref_source": g["ref_source"].iloc[0]}
+        for probe in ("speed", "reward", "wallclock", "early"):
+            seen = g[f"{probe}_ok"].dropna()
+            row[f"{probe}_tested"] = len(seen)
+            row[f"{probe}_passed"] = int(seen.astype(bool).sum())
+        rows.append(row)
+    return pd.DataFrame(rows)
 
 
 def main():
@@ -354,6 +591,9 @@ def main():
     parser.add_argument("--recdays", nargs="*", default=None)
     parser.add_argument("--neural", default=_NEURAL, help="neuron_raw source: mingyutest (default) or v2")
     parser.add_argument("--tracking", default=_TRACKING, help="tracking source: processed (default) or v2")
+    parser.add_argument("--rsync", default=_RSYNC,
+                        help="train tree behind the arrays (read before import): ephys_rsync (default), "
+                             "ephys_rsync_v4, ephys_rsync_mingyutest")
     parser.add_argument("--detail", action="store_true", help="print every session")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
@@ -364,10 +604,27 @@ def main():
     if report.empty:
         print("no sessions found")
         sys.exit(1)
+    report = probe_gates(report)
 
     if args.detail:
         print("\n" + report.round(3).to_string(index=False))
     summarise(report, verbose=verbose)
+    table = probe_table(report)
+    print(f"\nbehaviour probes [neural={_NEURAL}, tracking={_TRACKING}, rsync={_RSYNC}]: tested / passed")
+    print(table.round(2).to_string(index=False))
+    # The gates are relative to each mouse's clean sessions, so a constant offset shared by all of
+    # them would pass; these absolute bounds (ah10 -0.30 s, ah08 +0.35 s; wall clock -0.3..-0.7 s
+    # per mouse in the handoff) flag it. Notes, not failures: the PCs' clocks are not ours.
+    for _, r in table.iterrows():
+        if pd.notna(r["speed_ref_s"]) and abs(r["speed_ref_s"]) > 1.0:
+            print(f"  note: {r['mouse']} speed reference {r['speed_ref_s']:+.2f} s is beyond ±1 s")
+        if pd.notna(r["wallclock_median_s"]) and abs(r["wallclock_median_s"]) > 2.0:
+            print(f"  note: {r['mouse']} clean-session wall clock median {r['wallclock_median_s']:+.2f} s is beyond ±2 s")
+    refs = table["speed_ref_s"].dropna()
+    for _, r in table.iterrows():
+        if pd.notna(r["speed_ref_s"]) and len(refs) > 1 and abs(r["speed_ref_s"] - refs.median()) > SPEED_TOL_S:
+            print(f"  note: {r['mouse']} speed reference {r['speed_ref_s']:+.2f} s sits more than "
+                  f"{SPEED_TOL_S} s from the cohort median {refs.median():+.2f} s")
     # never overwrite an earlier report (user rule): version it
     out = REPORT_PATH
     n = 0
