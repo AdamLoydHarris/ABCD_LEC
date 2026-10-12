@@ -43,6 +43,12 @@ export OPENBLAS_NUM_THREADS=$OMP_NUM_THREADS
 export MKL_NUM_THREADS=$OMP_NUM_THREADS
 
 echo "Running LEC GLM: recday=$RECDAY extra=$*"
+# `set -e` is off for this line so the trailer always prints: a GLM job that died used to be
+# detectable only by the ABSENCE of "All done!" (87 of 1432 logs), which no grep can assert on.
+set +e
 python code/run_glm_batch.py "$RECDAY" "$@"
+rc=$?
+set -e
 
-echo "All done! $(date)"
+echo "All done! $(date) EXIT=$rc"
+exit $rc

@@ -48,8 +48,12 @@ def hrs(t0):
     return f'{(time.time() - t0) / 3600:.2f} h'
 
 
-def load_lec(only=None):
-    with open(os.path.join(REPO, 'data', 'processed_data', 'data_dic_lec.pkl'), 'rb') as f:
+def load_lec(only=None, data_version=None):
+    sys.path.insert(0, os.path.join(REPO, 'code'))
+    import recday_registry as rr
+    version, dd_path = rr.resolve_data_version(data_version)
+    print(f'data_dic: {dd_path.name}  (version {version})', flush=True)
+    with open(dd_path, 'rb') as f:
         data_dic = pickle.load(f)
     recdays = sorted(k for k in data_dic if '_sb' not in k)
     return data_dic, [r for r in recdays if not only or r in only]
@@ -89,6 +93,8 @@ def build_valid_sessions(data_dic, recdays, min_trials=5):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--dataset', required=True, choices=('lec', 'pfc'))
+    ap.add_argument('--data-version', default=None,
+                    help='LEC only: data_dic build (default v4); also tags the default --out')
     ap.add_argument('--conjunction', default='trial_progress', choices=('trial_progress', 'reward_progress'))
     ap.add_argument('--min-trials', type=int, default=10, help='first N trials per session')
     ap.add_argument('--n-shuffles', type=int, default=1000)
@@ -116,7 +122,8 @@ def main():
     import lda_reward_goalprogress as lrg
 
     only = set(args.recdays.split(',')) if args.recdays else None
-    data_dic, recdays = (load_lec if args.dataset == 'lec' else load_pfc)(only)
+    data_dic, recdays = ((lambda o: load_lec(o, args.data_version)) if args.dataset == 'lec'
+                         else load_pfc)(only)
     valid_sessions_dic = build_valid_sessions(data_dic, recdays)
     print(f'[{hrs(t0)}] {args.dataset.upper()}: {len(recdays)} recdays loaded', flush=True)
 
@@ -187,6 +194,10 @@ def main():
         print(f'[{hrs(t0)}] done {rd}', flush=True)
 
     out = args.out or OUT_DEFAULT[args.dataset]
+    if not args.out and args.dataset == 'lec':
+        sys.path.insert(0, os.path.join(REPO, 'code'))
+        import recday_registry as rr
+        out = out.replace('LEC_lda', 'LEC_lda' + rr.version_suffix(args.data_version))
     if not args.out and args.n_pcs is not None:
         out = out.replace('.pkl', f'_pcs{args.n_pcs}.pkl')
     if not args.out and args.region_group is not None:

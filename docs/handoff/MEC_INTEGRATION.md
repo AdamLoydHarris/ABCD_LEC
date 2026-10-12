@@ -431,10 +431,13 @@ The v4 gates also found a data-integrity fault unrelated to the clock. `data/raw
 holds a nested `2024-03-19_10-44-12/` copy, and both bp02 03-19 sorts read it in place of 11-58-14.
 - Their binaries are 432,672 samples longer than the manifest.
 - 10-44-12's data appears twice, and every later recording is 14.42 s late.
-- `data_dic_mec_v4.pkl` leaves the two blocks out for now.
-- Repair, 2026-10-02: the copy, byte-identical, moved to `data/raw/duplicates/`; both blocks
-  re-sorted from the correct files with the original recipe (jobs 3674427, 3674428); both sorters
-  now raise on a nested folder or a loaded-length mismatch. See `SPIKE_CLOCK_V4.md` section 2.4.
+- Repaired 2026-10-05:
+  - the copy, byte-identical, moved to `data/raw/duplicates/`;
+  - both blocks re-sorted from the correct files with the original recipe (jobs 3674427, 3674428);
+    binaries now match the manifests exactly;
+  - `data_dic_mec_v4.pkl` rebuilt with all 36 recdays;
+  - both sorters now raise on a nested folder or a loaded-length mismatch.
+  - See `SPIKE_CLOCK_V4.md` section 2.4.
 
 ### 7.4 Tracking on the fitted frame clock
 mEC (`--sync matched`, 180 sessions): fps bp01 59.995, bp02/bp04 59.949; 99.6 % of pulses anchored
@@ -956,6 +959,88 @@ returns "Access/permission denied"), but **can** for a *pending* one -- ah10 (36
 5 to 7 days while queued. ah10 was also moved in place from `gpu:l40s:1` (one node in the
 cluster) to `gpu:a100:1` (four) via `scontrol update TresPerNode=gres/gpu:a100:1`, which kept its
 original submit time and so its queue position.
+
+**First 6-day block done: ah08, 2026-10-03.** Job 3668325, 3 d 08 h 41 min on an A100 (gpu-sr670-20):
+823 clusters including mua, **150 single units** through the gate. The 150 agrees three ways:
+re-applying `QC_GATE` to the block's `quality_metrics.htsv`, the length of `QC_single_units.npy`,
+and `recday_registry.qc_unit_count`. The registry resolves
+`ah08_20250714_20250715_20250716_20250717_20250718_20250719` as `merged` with 24 task sessions,
+**12 ABCD + 12 ABCDE**. Against ah08's June 2-day blocks:
+
+| ah08 block | days | clusters | single units | fail only presence | fail only ISI | median ISI ratio |
+|---|---|---|---|---|---|---|
+| 20250613_20250615 | 2 | 819 | 151 | 24 | 384 | 0.336 |
+| 20250616_20250617 | 2 | 874 | 164 | 13 | 378 | 0.373 |
+| 20250624_20250625 | 2 | 836 | 186 | 15 | 411 | 0.290 |
+| **20250714 ... 20250719** | **6** | **823** | **150** | **10** | 366 | 0.372 |
+
+(20250618_20250619 and 20250620_20250623 have no `quality_metrics.htsv`.) Six days cost little
+in count: 150 is at the low end of the June range, 9% under its median of 164, for three times the
+span. Unit-sessions are 150 x 24 = 3600, against roughly 164 x 8-9 = 1400 per June block.
+**Presence ratio is not the limiter even across six days.** Only 10 clusters fail on it alone,
+fewer than in any June block; median presence ratio is 1.0. ISI is the binding criterion again,
+with 366 failing on it alone, the same pattern as every other block in both datasets (8.2).
+**Not established:** that each unit is one neuron across all six days. High presence means the
+cluster fires throughout, not that rigid (`nblocks=1`) drift correction never swapped in a
+neighbour. Kilosort's drift estimate is stored only as numbers (`sorter_output/ops.npy`,
+`dshift`, one value per 2 s batch) and has not been plotted. A per-day breakdown
+(`rescore_qc_epochs.py --split per_day`) has not been run either.
+
+**ly06 done, 2026-10-03.** Job 3666094, 5 d 06 h 47 min on an A100: 528 clusters including mua,
+**55 single units**. `qc_unit_count` matches, and the recday resolves with 12 ABCD + 12 ABCDE.
+Against ly06's five June 2-day blocks:
+
+| ly06 block | days | clusters | single units | fail only presence | fail only ISI | median ISI ratio |
+|---|---|---|---|---|---|---|
+| 20250613_20250615 | 2 | 671 | 68 | 3 | 304 | 0.645 |
+| 20250616_20250617 | 2 | 501 | 79 | 7 | 294 | 0.386 |
+| 20250618_20250619 | 2 | 472 | 76 | 9 | 274 | 0.388 |
+| 20250620_20250623 | 2 | 492 | 67 | 10 | 278 | 0.396 |
+| 20250624_20250625 | 2 | 479 | 66 | 9 | 292 | 0.359 |
+| **20250714 ... 20250719** | **6** | **528** | **55** | **1** | 294 | **0.502** |
+
+ly06 loses more than ah08: 55 is 19% under the June median of 68 and below every June block. The
+loss is **not** presence ratio -- just 1 cluster fails on it alone, the lowest of any ly06 block.
+It is contamination: median ISI violation ratio 0.502 against 0.359-0.396 in four of the five June
+blocks (the fifth, 0.645, is the outlier). ah08's 6-day block stayed in its June range (0.372). So
+where six days cost units, it shows as dirtier clusters, not units dropping out. Drift folding
+neighbouring neurons into one cluster would produce that, which is what the unplotted `dshift`
+trace would test. Hypothesis, not established. Unit-sessions are still 55 x 24 = 1320 against
+~580 per June block.
+
+**Four of five done, 2026-10-08; the cost of six days splits by mouse line.** ah10 (3668326,
+4 d 05 h, A100) 706 clusters -> 140 single units; ly07 (3674384, 3 d 01 h, A100) 508 -> 52.
+Re-applying `QC_GATE` reproduces `QC_single_units.npy` on all 22 LEC blocks with a
+`quality_metrics.htsv`. Against each mouse's June 2-day blocks:
+
+| mouse | June blocks | June units | June median | 6-day units | change | June median ISI ratio | 6-day | fail only presence |
+|---|---|---|---|---|---|---|---|---|
+| ah08 | 3 | 151-186 | 164 | 150 | -9% | 0.29-0.37 | 0.372 | 10 |
+| ah10 | 5 | 139-164 | 154 | 140 | -9% | 0.32-0.38 | 0.390 | 13 |
+| ly06 | 5 | 66-79 | 68 | 55 | -19% | 0.36-0.65 | 0.502 | 1 |
+| ly07 | 5 | 73-89 | 88 | 52 | -41% | 0.34-0.39 | 0.551 | 11 |
+
+The ah mice lose 9% each, with 6-day contamination inside their June range. The ly mice lose 19%
+and 41%, with contamination well above it. Presence ratio is never the limiter (1-13 clusters fail
+on it alone). Unit-sessions per block still rise for every mouse (6-day x 24 sessions: 3600, 3360,
+1320, 1248). **Not established:** why the ly mice. More probe drift over six days than rigid
+`nblocks=1` correction absorbs, merging neighbours, would produce exactly this; so would denser,
+smaller units. The `dshift` trace in `sorter_output/ops.npy` would discriminate, and is still
+unplotted. n = 2 mice per line, so this is a pattern, not a line effect.
+
+**ly05 timed out after Kilosort finished.** Job 3666093 ran the full 7 days: Kilosort completed
+(430 units including mua, `sorter_output/spike_times.npy` 1.27 GB on disk), and every analyzer
+extension was saved, but `compute_quality_metrics` + `export_report` had run 5.9 h when the
+walltime killed it. That stage took 3.9 / 6.2 / 4.4 / 3.9 h on ah08 / ly06 / ah10 / ly07, so it
+was near the end. Nothing was lost. `resume_kilosort_from_binary.py --qc-only` (new, 2026-10-08)
+reads the finished sort with `ss.read_sorter_folder` instead of re-running Kilosort; checked to
+return the same 430 units. `get_quality_metrics` loads a saved `sorting_analyzer/` and skips every
+extension, so only the metrics and cluster reports rerun, on CPU. The incomplete extension
+(`info.json` and `params.json`, no data) was copied to
+`kilosort_output/quality_metrics_extension.incomplete_timeout_2026-10-05` first. Submitted as
+**3705865** (`sbatch_files/qconly_ly05_2025-07-14_to_2025-07-19.sbatch`, `cpu`, 8 cores, 96G,
+2 days). Note `compute_quality_metrics` is called without `n_jobs`, so it runs single-threaded --
+that is why it takes 4-6 h on a 6-day block.
 
 **Practice worth keeping.** `--smoke-minutes N` sorts a slice of an existing `binary/` into
 `kilosort_output_SMOKE_Nmin` through the *same* function as production. Two full rounds were lost

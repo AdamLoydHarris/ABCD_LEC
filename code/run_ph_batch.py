@@ -160,11 +160,14 @@ def parse_args(argv=None):
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("mouse_recday")
     p.add_argument("state", choices=["wake", "sleep", "both"])
-    p.add_argument("--data-dic", default="data/processed_data/data_dic_lec.pkl",
-                   help="wake data_dic pickle (relative to repo root)")
+    p.add_argument("--data-dic", default=None,
+                   help="wake data_dic pickle; default resolves --data-version via the registry")
+    p.add_argument("--data-version", default=None,
+                   help="data_dic build (default v4); also tags --out unless --out is given")
     p.add_argument("--data-root", default="data",
                    help="data/ dir holding processed_data/neuron_raw_mingyutest")
-    p.add_argument("--out", default="data/ph_outputs")
+    p.add_argument("--out", default=None,
+                   help="output tree; default data/ph_outputs tagged by --data-version")
     p.add_argument("--n-landmarks", type=int, default=1200)
     p.add_argument("--n-shuffles", type=int, default=100)
     p.add_argument("--n-pca", type=int, default=6)
@@ -175,7 +178,15 @@ def parse_args(argv=None):
                    help="skip the shuffle significance null (much faster)")
     p.add_argument("--quick", action="store_true",
                    help="tiny smoke-test run (1 session, few landmarks/shuffles)")
-    return p.parse_args(argv)
+    a = p.parse_args(argv)
+    import recday_registry as rr
+    version, dd_path = rr.resolve_data_version(a.data_version)
+    a.data_version = version
+    if a.data_dic is None:
+        a.data_dic = str(dd_path)
+    if a.out is None:
+        a.out = "data/ph_outputs" + rr.version_suffix(version)
+    return a
 
 
 if __name__ == "__main__":

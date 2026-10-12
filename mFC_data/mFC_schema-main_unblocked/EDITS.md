@@ -21,7 +21,7 @@ the diff and the IDs listed here.
   archived first, to `replication_run/logs/deposit_outputs/` -- they are the numeric
   reference for verification.
 
-## The 22 edits
+## The 23 edits
 
 | ID | Notebook | Where | Class | Why strictly necessary |
 |---|---|---|---|---|
@@ -47,6 +47,7 @@ the diff and the IDs listed here.
 | `UNBLOCK-F7-02` | Figure7.ipynb | cell 76 L26 | `NAMEDEF` | define the undefined loop bound in cell 76 |
 | `UNBLOCK-F7-03` | Figure7.ipynb | cell 52 L9 | `COVERAGE` | guard the only unguarded Neuron_ load in this notebook. Cell 52 iterates every entry of awake_session_behaviour_, but Neuron_<rd>_<s>.npy exists only for sessions with trialtimes: ah07_27082023_28082023 has 8 entries and 7 files, and on LEC the Object and zero-trial sessions have none. HIS OWN stored notebook dies here with the same FileNotFoundError, so his Phase_diff_dic covered only the first 12 recdays and cell 59 skipped the rest. This edit lets every recday with files contribute; the f7_elgaby_state VARIANT reproduces his truncated state for comparison |
 | `UNBLOCK-F7-04` | Figure7.ipynb | cell 28 L19 | `BUG` | the except branch prints All_session_ind, a name that leaks from cell 24; this cell's loop variable is ephys_indx. Reachable whenever a shard is missing, where the handler itself would raise NameError instead of skipping the session |
+| `UNBLOCK-F7-05` | Figure7.ipynb | cell 82 L5, cell 82 L21, cell 82 L36 | `REPORT` | record n per angle bin per sleep stage; cell 82 computes it and discards it **/** per-stage bin counts, captured from the same arrays the panel is drawn from **/** cell 86 averages the stages with a plain np.mean, so one empty bin in one stage makes that bin NaN in the saved figure: the LEC v4 aggregate is missing bins 1 and 2 for exactly this reason. Record which bins were lost and to what |
 
 **Exactly one edit changes a scientific quantity: `F2-03`.**
 

@@ -39,8 +39,18 @@ REFERENCE = {
                          'non-zero-lag 90 deg excluded': 224},
     'his_stored_beyond': {'all state-tuned': 482, 'non-zero-lag 30 deg excluded': 278,
                           'non-zero-lag 90 deg excluded': 69},
-    'v5_band':          {'all state-tuned': '447-481', 'non-zero-lag 30 deg excluded': '246-287',
-                         'non-zero-lag 90 deg excluded': '79-92'},
+    # V5 under the CORRECTED pool rule (code/PANEL_POOL_CORRECTION.md, 2026-09-08): a panel's
+    # pool is state-tuned AND >= 1 finite fold FOR THAT PANEL. The old 'every fold finite' rule
+    # gave 447-481 / 246-287 / 79-92 and is superseded -- it selected the small well-fit subset
+    # (247 of 1252 PFC neurons) and suppressed the non-zero-lag panels ~4x in n.
+    'v5_corrected_pfc_elasticnet': {'all state-tuned': '610 (t 13.98)', 'non-zero-lag 30 deg excluded': '358 (t 3.03)',
+                                    'non-zero-lag 90 deg excluded': '120 (t 1.99)'},
+    'v5_corrected_pfc_poisson':    {'all state-tuned': '573 (t 15.83)', 'non-zero-lag 30 deg excluded': '298 (t 5.11)',
+                                    'non-zero-lag 90 deg excluded': '73 (t 3.14)'},
+    'v5_corrected_lec_elasticnet': {'all state-tuned': '1170 (t 31.88)', 'non-zero-lag 30 deg excluded': '544 (t 5.34)',
+                                    'non-zero-lag 90 deg excluded': '203 (t 1.72)'},
+    'v5_superseded_everyfold':     {'all state-tuned': '447-481', 'non-zero-lag 30 deg excluded': '246-287',
+                                    'non-zero-lag 90 deg excluded': '79-92'},
     # --- LEC context (this copy runs on LEC data) ---
     # his code on his PFC data, from ../replication_run (REPRODUCTION.md):
     'pfc_his_code_poisson':    {'all state-tuned': '581 (t=17.15)', 'non-zero-lag 30 deg excluded': '296 (t=6.76)',
@@ -134,8 +144,11 @@ def main():
             print(f"  {label:32s} n={d['n']:4d}  mean r={d['mean_r']:+.4f}  "
                   f"t={d['t']:7.3f}  p={d['p']:.3e}")
             ref = {k: v[label] for k, v in REFERENCE.items() if label in v}
+            _m = 'poisson' if r['model'] == 'Poisson' else 'elasticnet'
+            _v5 = ref.get(f'v5_corrected_lec_{_m}') or ref.get('v5_corrected_lec_elasticnet')
             print(f"  {'':32s} reference: paper {ref['paper']}, "
-                  f"his stored (_beyond) {ref['his_stored_beyond']}, V5 {ref['v5_band']}")
+                  f"his stored (_beyond) {ref['his_stored_beyond']}, "
+                  f"V5 corrected (LEC {_m}) {_v5}")
 
     os.makedirs(LOGDIR, exist_ok=True)
     with open(os.path.join(LOGDIR, 'figure5_stats.json'), 'w') as f:

@@ -17,7 +17,10 @@
 
 echo "Script started: $(date)"
 module load miniconda
-source activate maze_ephys
+# maze_ephys_np126 = maze_ephys cloned with numpy pinned to 1.26.4. maze_ephys has numpy
+# 2.0.2, which kilosort 4.0.18, spikeinterface 0.101.2 and neo 0.13.3 all forbid
+# (pip check); it broke sorting three ways. See docs/handoff/MEC_INTEGRATION.md 8.6.
+source activate maze_ephys_np126
 cd /ceph/behrens/adam_harris/Taskspace_abstraction_lEC
 
 python code/resume_kilosort_from_binary.py ly05 2025-07-14_2025-07-15_2025-07-16_2025-07-17_2025-07-18_2025-07-19 9 8

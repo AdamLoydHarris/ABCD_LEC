@@ -32,7 +32,14 @@ if HERE not in sys.path:
 UNIT_REGIONS = os.path.join(REPO, 'data', 'processed_data', 'unit_regions.pkl')
 CLUSTER_META = os.path.join(REPO, 'data', 'glm_outputs', 'LEC_selectivity_geometry',
                             'clustering__meta.pkl')
-OUT_PATH = os.path.join(REPO, 'data', 'processed_data', 'w0_gates.pkl')
+def out_path(data_version=None):
+    """Gate results for one data version; '' for v1 keeps the original name."""
+    import recday_registry as rr
+    return os.path.join(REPO, 'data', 'processed_data',
+                        f'w0_gates{rr.version_suffix(data_version)}.pkl')
+
+
+OUT_PATH = out_path()
 
 #: Coarse region labels, ordered superficial -> deep along a typical trajectory.
 GROUP_ORDER = ['ENTl-sup', 'ENTl-deep', 'ENTm', 'SUB/ProS', 'CA1/HPF', 'fibre/other']
@@ -161,11 +168,19 @@ def gate_hd_lengths(data_dic):
     is length T and must match Locs_raw.
     """
     rows = []
+    skipped_no_locs = []
     for rd in sorted(data_dic):
         for s in sorted(k for k in data_dic[rd] if isinstance(data_dic[rd][k], dict)):
             sd = data_dic[rd][s]
             hd = sd.get('HD_raw')
             if hd is None:
+                continue
+            # v4 gives the 20 Object sessions (sessions 1/4/5/9 of every *_20250624_20250625
+            # recday) tracking that v1 had none of. They are open-arena, carry `arena` and
+            # `objects` and no `Task`, and so have no maze `Locs_raw` to compare against --
+            # the HD-vs-Locs length gate simply does not apply to them.
+            if 'Locs_raw' not in sd:
+                skipped_no_locs.append((rd, s))
                 continue
             hd = np.asarray(hd)
             locs = np.asarray(sd['Locs_raw'])
@@ -188,7 +203,9 @@ def gate_hd_lengths(data_dic):
         # every other regressor from sample 1 onward.
         df['old_timeline_covered'] = (df['old_truncated_to'] / 2 / df['n_locs']).round(3)
         print(f"\n[gate 2b] HD length: fixed HD matches Locs_raw in "
-              f"{int(df['fixed_matches_locs'].sum())}/{len(df)} sessions")
+              f"{int(df['fixed_matches_locs'].sum())}/{len(df)} sessions"
+              + (f"  ({len(skipped_no_locs)} Object sessions skipped: tracked under v4 but "
+                 f"open-arena, so no Locs_raw)" if skipped_no_locs else ""))
         print(f"  flattened length == 2T in "
               f"{int((df['n_hd_flattened'] == 2 * df['n_hd_fixed']).sum())}/{len(df)}")
         print(f"  under the OLD flatten(), median fraction of the HD TIMELINE covered: "
@@ -327,20 +344,24 @@ def gate_quality_by_region(unit_regions, meta_path=CLUSTER_META):
 
 # ---------------------------------------------------------------------------
 
-def main(strict=True):
+def main(strict=True, data_version=None):
     import glm_analysis_v2 as glm
+    import recday_registry as rr
+    version, dd_path = rr.resolve_data_version(data_version)
 
     print("=" * 78)
     print("W0 GATES — anatomy split")
+    print(f"data_dic: {dd_path.name}  (version {version})")
     print("=" * 78)
 
     unit_regions = _load_pickle(UNIT_REGIONS)
     print(f"unit_regions: {len(unit_regions)} recdays")
 
     print("\nloading data_dic (3.8 GB, this takes a few minutes) ...")
-    data_dic = glm.load_data_dic(validate=True, apply_exclusions=True, verbose=True)
+    data_dic = glm.load_data_dic(path=str(dd_path), validate=True, apply_exclusions=True,
+                                 verbose=True)
 
-    out = {}
+    out = {'data_version': version, 'data_dic': dd_path.name}
     out['length'] = gate_length(data_dic, unit_regions, strict=strict)
     out['hd_columns'] = gate_hd_columns(data_dic)
     out['hd_lengths'] = gate_hd_lengths(data_dic)
@@ -349,11 +370,18 @@ def main(strict=True):
     if q is not None:
         out['quality_joined'], out['quality_summary'] = q
 
-    with open(OUT_PATH, 'wb') as fh:
+    _out = out_path(data_version)
+    with open(_out, 'wb') as fh:
         pickle.dump(out, fh)
-    print(f"\nsaved gate results -> {OUT_PATH}")
+    print(f"\nsaved gate results -> {_out}")
     return out
 
 
 if __name__ == '__main__':
-    main(strict='--no-strict' not in sys.argv)
+    import argparse
+    _ap = argparse.ArgumentParser()
+    _ap.add_argument('--no-strict', action='store_true')
+    _rr = __import__('recday_registry')
+    _rr.add_data_version_arg(_ap)
+    _a = _ap.parse_args()
+    main(strict=not _a.no_strict, data_version=_a.data_version)

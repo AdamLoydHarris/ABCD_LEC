@@ -26,15 +26,27 @@ python code/check_mirror_parity.py || { echo "mirror parity FAILED -- not submit
 
 RECDAYS=()
 ARGS=()
+DATA_VERSION=""
+# Consumed here, NOT forwarded: `cpu` is 260 CPUs and this account's fairshare is 0.006, so a
+# 25-job launch sits on Priority. `cpu_backfill` is 2632 CPUs and is what the admins ask CPU-only
+# jobs to use; it requeues on preemption, which per-recday shards absorb.
+PARTITION=""
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --recdays) shift; while [ "$#" -gt 0 ] && [[ "$1" != --* ]]; do RECDAYS+=("$1"); shift; done ;;
+        --data-version) DATA_VERSION="$2"; ARGS+=("$1" "$2"); shift 2 ;;
+        --partition) PARTITION="$2"; shift 2 ;;
         *) ARGS+=("$1"); shift ;;
     esac
 done
 
 if [ "${#RECDAYS[@]}" -eq 0 ]; then
-    mapfile -t RECDAYS < <(python -c "import pickle; print('\n'.join(str(k) for k in pickle.load(open('data/processed_data/data_dic_lec.pkl','rb')).keys()))")
+    # From the 1 KB session_inds_dic of the version being fitted, not a 3.8 GB unpickle on the
+    # login node -- and it follows --data-version, so the list cannot be a different build's.
+    mapfile -t RECDAYS < <(TSA_DV="$DATA_VERSION" python -c "
+import os, sys; sys.path.insert(0, 'code')
+import recday_registry as rr
+print('\n'.join(rr.recdays_for_version(os.environ.get('TSA_DV') or None)))")
     if [ "${#RECDAYS[@]}" -eq 0 ]; then
         echo "ERROR: could not read recday keys (env not active? wrong cwd?)." >&2
         echo "  python = $(which python)" >&2
@@ -44,9 +56,11 @@ fi
 
 mkdir -p sbatch_files/slurm_outputs
 
-echo "Submitting ${#RECDAYS[@]} job(s) with args: ${ARGS[*]:-<defaults>}"
+echo "Submitting ${#RECDAYS[@]} job(s)${PARTITION:+ on $PARTITION} with args: ${ARGS[*]:-<defaults>}"
+SB=(sbatch --parsable)
+[ -n "$PARTITION" ] && SB+=(--partition="$PARTITION")
 for rd in "${RECDAYS[@]}"; do
-    jid=$(sbatch --parsable --job-name="glm_${rd}" sbatch_files/glm_lec.sbatch "$rd" "${ARGS[@]:-}")
+    jid=$("${SB[@]}" --job-name="glm_${rd}" sbatch_files/glm_lec.sbatch "$rd" "${ARGS[@]:-}")
     echo "  submitted $rd -> job $jid"
 done
 

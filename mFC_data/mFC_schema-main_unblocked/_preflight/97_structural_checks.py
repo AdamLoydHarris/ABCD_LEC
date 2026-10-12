@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Structural checks on the LEC run of El-Gaby's pipeline -- run these BEFORE trusting any
-scientific number. They are the checks LEC_PORT_HANDOFF.md section 8 lists, made into a
-script so they are reproducible rather than ad hoc:
+"""Structural checks on a run of El-Gaby's pipeline -- run these BEFORE trusting any
+scientific number. Ported from the LEC copy 2026-10-08: checks 1-3 had never run on PFC, and
+the mod-3 stripe purity is the only real test that the 324 anchoring regressors are built and
+indexed correctly. Set REGION to pick the tree.
 
   1. GLM_anchoring_prep_dic_regressors<rd> has 324 columns (9 nodes x 3 phases x 12 lags)
   2. Phases_raw2_ values are {0,1,2}, Phases_raw_ are {0..4}, equal length per session
@@ -13,10 +14,10 @@ script so they are reproducible rather than ad hoc:
      read from tuning_phase_boolean_max_<rd>[session], as cell 21 does.
   4. State_99 is a subset of State_95 per recday
   5. speed_ files exist for every exported session; neuron totals vs 2851
-  6. (separate script, 98_compare_neurons_norm.py) pipeline Neuron_ vs data_dic Neurons_norm
+  6. (LEC only, separate script 98_compare_neurons_norm.py) pipeline Neuron_ vs data_dic
 
 Every check prints PASS / FAIL / NOT RUN, and a check that made zero comparisons is NOT RUN,
-never PASS. Exit 1 on any FAIL. Results -> lec_replication_run/logs/lec_structural_checks.json
+never PASS. Exit 1 on any FAIL. Results -> <run>/logs/structural_checks.json
 """
 from __future__ import annotations
 
@@ -35,12 +36,14 @@ def rec_dd():
     return defaultdict(rec_dd)
 
 
+REGION = 'pfc'                                   # the LEC copy says 'lec'
 ROOT = '/ceph/behrens/adam_harris/Taskspace_abstraction_lEC/mFC_data'
-MIRROR = os.path.join(ROOT, 'lec_replication_run', 'data', 'Intermediate_objects')
-LOGDIR = os.path.join(ROOT, 'lec_replication_run', 'logs')
+RUN = 'replication_run' if REGION == 'pfc' else 'lec_replication_run'
+MIRROR = os.path.join(ROOT, RUN, 'data', 'Intermediate_objects')
+LOGDIR = os.path.join(ROOT, RUN, 'logs')
 NUM_NODES, NUM_PHASES, NUM_LAGS = 9, 3, 12
 NUM_REGRESSORS = NUM_NODES * NUM_PHASES * NUM_LAGS
-TOTAL_NEURONS = 2851
+TOTAL_NEURONS = 2851 if REGION == 'lec' else 2182   # Figure2 cell 61 'n'
 MODELS = [('Poisson_', 'Poisson'), ('', 'ElasticNet')]
 
 
@@ -81,6 +84,13 @@ def non_repeat_ses_maker(Tasks, num_trials_day):
         non_repeat_bool_all.append(nr)
     non_repeat_bool_all = np.hstack((non_repeat_bool_all))
     return np.where(np.logical_and(non_repeat_bool_all, num_trials_day > 0))[0]
+
+
+def found_ses(rd, nrs):
+    """Cell 15's actual fold set: the selected sessions whose six per-session files all load."""
+    fams = ('Neuron_raw_', 'Location_raw_', 'Location_', 'XY_raw_', 'speed_', 'trialtimes_')
+    return np.array([s for s in nrs
+                     if all(os.path.exists(P(f'{f}{rd}_{int(s)}.npy')) for f in fams)])
 
 
 def verdict(name, ok, n, detail=''):
@@ -154,7 +164,9 @@ def main():
                 per[rd] = f'unexpected coeff shape {coeffs.shape}'
                 fold_mismatch.append(per[rd]); continue
             if coeffs.shape[1] != len(nrs):
-                per[rd] = f'fold count {coeffs.shape[1]} != len(non_repeat_ses) {len(nrs)}'
+                nrs = found_ses(rd, nrs)
+            if coeffs.shape[1] != len(nrs):
+                per[rd] = f'fold count {coeffs.shape[1]} != loadable sessions {len(nrs)}'
                 fold_mismatch.append(f'{rd}: {per[rd]}'); continue
             on = off = nz = fin = 0
             lag = np.arange(NUM_LAGS)[None, None, None, :]
@@ -173,7 +185,8 @@ def main():
             on_t += on; off_t += off; nz_t += nz; fin_t += fin; n += 1
         purity = on_t / (on_t + off_t) if on_t + off_t else None
         frac = nz_t / fin_t if fin_t else None
-        ok = n > 0 and not fold_mismatch and off_t == 0 and on_t > 0
+        frac_ok = prefix != 'Poisson_' or frac is None or abs(frac - 1 / NUM_PHASES) < 1e-3
+        ok = n > 0 and not fold_mismatch and off_t == 0 and on_t > 0 and frac_ok
         detail = (f'{n}/{len(recdays)} recdays; on-stripe {on_t}, off-stripe {off_t}, '
                   f'purity {purity if purity is None else round(100 * purity, 4)} %, '
                   f'non-zero fraction {frac if frac is None else round(frac, 4)}'
@@ -207,31 +220,49 @@ def main():
     # ---- 5. coverage counts
     # cell 16 computes speed wherever XY_raw_ exists (combined AND single-day names, including
     # trial-less sessions with tracking), so the reference count is the XY_raw_ files.
+    # What matters is not the raw speed_ count -- Figure2 cell 16 legitimately fails on a few
+    # sessions (PFC: 412 files for 416 cohort sessions, the 4 'speed_dic not made' cases) --
+    # but whether every session Figure5_Regression actually folds over has its six per-session
+    # files. Cell 15 skips a session whose loads fail, so a miss here silently drops a fold.
     n_speed = sum(1 for f in os.listdir(MIRROR) if f.startswith('speed_') and f.endswith('.npy'))
-    n_exported = sum(1 for f in os.listdir(MIRROR) if f.startswith('XY_raw_') and f.endswith('.npy'))
+    incomplete, n_folds = [], 0
+    for rd in recdays:
+        try:
+            nrs = non_repeat_ses_maker(load(f'Task_data_{rd}.npy'), load(f'Num_trials_{rd}.npy'))
+        except Exception:
+            continue
+        n_folds += len(nrs)
+        for ses in nrs:
+            miss = [f for f in ('Neuron_raw_', 'Location_raw_', 'Location_', 'XY_raw_', 'speed_', 'trialtimes_')
+                    if not os.path.exists(P(f'{f}{rd}_{int(ses)}.npy'))]
+            if miss:
+                incomplete.append(f'{rd}_{int(ses)}: missing {",".join(m.rstrip("_") for m in miss)}')
     fig5 = {}
     for prefix, label in MODELS:
         tot, tuned, found = 0, 0, 0
         for rd in recdays:
-            f = P(f'{prefix}Predicted_Actual_correlation_mean_{rd}.npy')
-            if not os.path.exists(f):
+            if not os.path.exists(P(f'{prefix}Predicted_Actual_correlation_mean_{rd}.npy')):
                 continue
-            v = load(f'{prefix}Predicted_Actual_correlation_mean_{rd}.npy')
-            tot += int(len(v)); found += 1
-            f95 = P(f'State_95{rd}.npy')
-            if os.path.exists(f95):
+            tot += int(len(load(f'{prefix}Predicted_Actual_correlation_mean_{rd}.npy')))
+            found += 1
+            if os.path.exists(P(f'State_95{rd}.npy')):
                 tuned += int(np.asarray(load(f'State_95{rd}.npy', allow_pickle=True), dtype=bool).sum())
         fig5[label] = dict(recdays_found=found, neurons=tot, state_tuned=tuned)
-    ok = n_speed == n_exported
-    tags['coverage'] = verdict('5. speed_ files == tracked sessions (XY_raw_ files)', ok, 1 if n_exported else 0,
-                               f'speed {n_speed} vs XY_raw_ {n_exported}; Figure 5 entrants: {fig5}; '
-                               f'total LEC neurons {TOTAL_NEURONS}')
-    results['coverage'] = dict(speed_files=n_speed, exported_sessions=n_exported, figure5=fig5)
+
+    ok = n_folds > 0 and not incomplete
+    tags['coverage'] = verdict('5. every Figure 5 fold session has all six per-session files',
+                               ok, n_folds,
+                               f'{n_folds - len(incomplete)}/{n_folds} complete; speed_ files {n_speed}; '
+                               f'Figure 5 entrants: {fig5}; total {REGION.upper()} neurons {TOTAL_NEURONS}')
+    for m in incomplete[:10]:
+        print(f'         {m}')
+    results['coverage'] = dict(speed_files=n_speed, fold_sessions=n_folds,
+                               incomplete=incomplete, figure5=fig5)
 
     os.makedirs(LOGDIR, exist_ok=True)
-    with open(os.path.join(LOGDIR, 'lec_structural_checks.json'), 'w') as f:
+    with open(os.path.join(LOGDIR, 'structural_checks.json'), 'w') as f:
         json.dump(dict(tags=tags, results=results), f, indent=2, default=str)
-    print(f'\nwrote {LOGDIR}/lec_structural_checks.json')
+    print(f'\nwrote {LOGDIR}/structural_checks.json')
     fails = [k for k, v in tags.items() if v == 'FAIL']
     notrun = [k for k, v in tags.items() if v == 'NOT RUN']
     print(f'FAIL: {fails or "none"};  NOT RUN: {notrun or "none"}')

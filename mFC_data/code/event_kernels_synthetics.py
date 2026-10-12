@@ -4,16 +4,17 @@ One real recday's behaviour (timings, tracking, place, pokes, wall clock) enters
 `event_kernels.load_recday`; its spikes are replaced by Poisson units with planted dependencies,
 and Stage 1, the reset test and Stage 2 run unchanged.
 
-    python code/event_kernels_synthetics.py --dataset lec --quick     # ~15 min, n_perm 20
-    sbatch ... event_kernels_synthetics.py --dataset lec              # full, n_perm 100
+    python code/event_kernels_synthetics.py --dataset lec --quick     # ~10 min, n_perm 20
+    sbatch ... event_kernels_synthetics.py --dataset lec              # full, n_perm 100, 50-80 min
+    ... --kin strict                                                  # the conservative kinematic control
 
 | # | planted | must hold |
 |---|---|---|
-| G1 | Poisson noise | locked (p < 0.05 and cpd > 0) not above the permutation null: one-sided binomial p >= 0.01 per block, and for any of the three event blocks |
+| G1 | Poisson noise | locked (p < 0.05 and cpd > 0) not above the permutation null: one-sided binomial p >= 0.01 per block, and for any event block or the A+reward joint |
 | G2 | entry ramps up and down, tau 30 s - 2 h | `ev_entry` significant in >= 80% (tau <= 30 min) |
 | G3 | A-locked ramps, tau 2 - 30 s | `ev_A` or the A+reward joint in >= 80% |
 | G4 | reward ramps, bumps, superposition traces, progress / distance clocks | reward or A+reward in >= 80% |
-| G5 | speed-history units (tau 2 s, 128 s) | any event not above noise with the bank (one-sided Fisher p >= 0.01); >= 50% without it (not vacuous) |
+| G5 | speed-history units (tau 2 s, 128 s) | per tau, any event or the joint not above noise with the bank (one-sided Fisher p >= 0.01); >= 50% without kinematics (not vacuous) |
 | G6 | OU drift, fresh path per session | `ev_entry` not above the null rate (binomial p >= 0.01): session-unique change is not a locked clock |
 | G7 | day-trend units vs entry ramps | reset test: day beats entry in >= 80% of trend units, entry beats day in >= 80% of ramps |
 | G8 | bank initialisation | zero-init raises spurious `ev_entry` in speed units relative to steady-state (reported) |
@@ -267,7 +268,7 @@ def summarise(truth, res, label):
     return pd.DataFrame(rows)
 
 
-def run(dataset: str, recday: str, quick: bool, seed: int = 0) -> dict:
+def run(dataset: str, recday: str, quick: bool, seed: int = 0, kin: str = 'full') -> dict:
     t0 = time.time()
     n_perm = 20 if quick else 100
     rec = ek.load_recday(recday, dataset)
@@ -277,17 +278,17 @@ def run(dataset: str, recday: str, quick: bool, seed: int = 0) -> dict:
     syn, truth = make_synthetic(rec, sessions, specs, seed=seed)
     print(f'{dataset} {recday}: {len(syn)} sessions, {len(truth)} planted units', flush=True)
 
-    out = dict(dataset=dataset, recday=recday, quick=quick, truth=truth, n_perm=n_perm)
-    D = ek.build_design(syn)
+    out = dict(dataset=dataset, recday=recday, quick=quick, truth=truth, n_perm=n_perm, kin=kin)
+    D = ek.build_design(syn, kin=kin)
     out['stage1'] = ek.stage1(syn, n_perm=n_perm, seed=seed, design=D)
     print(f'  stage1 done {time.time() - t0:.0f}s', flush=True)
     out['stage1_nokin'] = ek.stage1(syn, n_perm=n_perm, seed=seed, kin='none')
     print(f'  stage1 kin=none done {time.time() - t0:.0f}s', flush=True)
-    out['stage1_zeroinit'] = ek.stage1(syn, n_perm=n_perm, seed=seed, bank_init='zero')
+    out['stage1_zeroinit'] = ek.stage1(syn, n_perm=n_perm, seed=seed, kin=kin, bank_init='zero')
     print(f'  stage1 zero-init done {time.time() - t0:.0f}s', flush=True)
-    out['stage1_noplace'] = ek.stage1(syn, n_perm=n_perm, seed=seed, place=False)
+    out['stage1_noplace'] = ek.stage1(syn, n_perm=n_perm, seed=seed, kin=kin, place=False)
     print(f'  stage1 place=False done {time.time() - t0:.0f}s', flush=True)
-    out['reset'] = ek.reset_test(rec, syn)
+    out['reset'] = ek.reset_test(rec, syn, kin=kin)
     print(f'  reset test done {time.time() - t0:.0f}s', flush=True)
 
     tab = pd.concat([summarise(truth, out['stage1'], 'bank'),
@@ -337,8 +338,10 @@ def gates(out) -> pd.DataFrame:
     units = lambda kind, **kw: truth[(truth['kind'] == kind) & np.all(
         [truth[k] <= v for k, v in kw.items()], axis=0)]['unit'].to_numpy() if kw else \
         truth[truth['kind'] == kind]['unit'].to_numpy()
-    events = [g for g in ('ev_entry', 'ev_A', 'ev_reward') if g in s1['cpd_cv']]
+    events = [g for g in ('ev_entry', 'ev_A', 'ev_reward', 'ev_A+reward') if g in s1['cpd_cv']]
 
+    # The A+reward joint counts as a hit in G3/G4, so it counts as a leak too: without it the
+    # full PFC run passed G5 while 5/8 tau-2 s speed units were locked to the joint alone.
     def any_event(res, u):
         hit = np.zeros(len(u), bool)
         for g in events:
@@ -365,7 +368,7 @@ def gates(out) -> pd.DataFrame:
     hit_noise = any_event(s1, nz)
     a_any = 1 - (1 - a_null) ** len(events)
     p = excess_p(hit_noise, a_any)
-    add('G1', f'noise: any of the three event blocks (vs {a_any:.3f})', f'{hit_noise.mean():.2f} (p={p:.2f})',
+    add('G1', f'noise: any event block or the A+reward joint (vs {a_any:.3f})', f'{hit_noise.mean():.2f} (p={p:.2f})',
         p >= 0.01)
     er = units('entry_ramp', tau=1800)
     v = float(locked(s1, 'ev_entry')[er].mean())
@@ -382,10 +385,12 @@ def gates(out) -> pd.DataFrame:
             hit |= locked(s1, joint)[u]
         add(gid, f'{kind}: A, reward or joint', float(hit.mean()), hit.mean() >= 0.8)
     sp = units('speed_history')
-    h, v_nk = any_event(s1, sp), float(any_event(s_nk, sp).mean())
-    p = vs_noise(h, hit_noise)
-    add('G5', 'speed units: any event with the bank (Fisher p vs noise)',
-        f'{h.mean():.2f} vs {hit_noise.mean():.2f} (p={p:.2f})', p >= 0.01)
+    for tau in sorted(truth.loc[truth['kind'] == 'speed_history', 'tau'].unique()):
+        h = any_event(s1, truth[(truth['kind'] == 'speed_history') & (truth['tau'] == tau)]['unit'].to_numpy())
+        p = vs_noise(h, hit_noise)
+        add('G5', f'speed units tau {tau:g} s: any event with the bank (Fisher p vs noise)',
+            f'{h.mean():.2f} vs {hit_noise.mean():.2f} (p={p:.3f})', p >= 0.01)
+    v_nk = float(any_event(s_nk, sp).mean())
     add('G5', 'speed units: any event without kinematics', v_nk, v_nk >= 0.5)
     h = locked(s1, 'ev_entry')[units('ou_drift')]
     p = excess_p(h, a_null)
@@ -441,11 +446,14 @@ def main(argv=None):
     ap.add_argument('--recday', default=None)
     ap.add_argument('--quick', action='store_true')
     ap.add_argument('--seed', type=int, default=0)
+    ap.add_argument('--kin', choices=('full', 'strict'), default='full',
+                    help='kinematic nuisance for every arm with kinematics (see build_design)')
     args = ap.parse_args(argv)
     rd = args.recday or DEFAULT_RECDAY[args.dataset]
-    out = run(args.dataset, rd, args.quick, args.seed)
+    out = run(args.dataset, rd, args.quick, args.seed, kin=args.kin)
     os.makedirs(OUT_DIR, exist_ok=True)
-    p = _versioned(os.path.join(OUT_DIR, f"synthetics_{args.dataset}_{rd}{'_quick' if args.quick else ''}.pkl"))
+    tag = ('_quick' if args.quick else '') + ('' if args.kin == 'full' else f'_kin-{args.kin}')
+    p = _versioned(os.path.join(OUT_DIR, f"synthetics_{args.dataset}_{rd}{tag}.pkl"))
     with open(p, 'wb') as fh:
         pickle.dump(out, fh)
     pd.set_option('display.width', 200)

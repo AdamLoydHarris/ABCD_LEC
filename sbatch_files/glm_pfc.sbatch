@@ -43,6 +43,10 @@ export OPENBLAS_NUM_THREADS=$OMP_NUM_THREADS
 export MKL_NUM_THREADS=$OMP_NUM_THREADS
 
 echo "Running PFC GLM: recday=$RECDAY extra=$*"
+set +e
 python mFC_data/code/run_glm_batch.py "$RECDAY" "$@"
+rc=$?
+set -e
 
-echo "All done! $(date)"
+echo "All done! $(date) EXIT=$rc"
+exit $rc

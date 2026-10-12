@@ -44,12 +44,33 @@ BYTE_PAIRS = [
     ('code/elasticnet_v5_synthetics.py', 'mFC_data/code/elasticnet_v5_synthetics.py'),
     ('code/lda_reward_goalprogress.py', 'mFC_data/code/lda_reward_goalprogress.py'),
     ('code/run_lda_reward_progress.py', 'mFC_data/code/run_lda_reward_progress.py'),
+    # Added 2026-09-29 with the kNN state decoder, which builds its samples through the CCGP
+    # builder and its synthetics through the CCGP generator, in each tree's own copy.
+    ('code/ccgp_state_pairs.py', 'mFC_data/code/ccgp_state_pairs.py'),
+    ('code/knn_state_decoding.py', 'mFC_data/code/knn_state_decoding.py'),
+    ('code/run_knn_state_decoding.py', 'mFC_data/code/run_knn_state_decoding.py'),
+    ('code/knn_state_decoding_synthetics.py', 'mFC_data/code/knn_state_decoding_synthetics.py'),
     # Added 2026-10-02 with the event-kernel analysis (Tsao / Kanter ramps); both datasets load
     # through the same module, so a drift would make LEC and PFC kernels non-comparable.
     ('code/event_kernels.py', 'mFC_data/code/event_kernels.py'),
     ('code/event_kernels_synthetics.py', 'mFC_data/code/event_kernels_synthetics.py'),
     ('code/population_drift.py', 'mFC_data/code/population_drift.py'),
+    # Added 2026-10-09 with the v4 migration. `gp_tuning_width` was already byte-identical and
+    # undefended; both now read their data_dic through `recday_registry.version_suffix`, whose
+    # two copies deliberately DIFFER (PFC has one build and raises on a version), so a drift
+    # here would send one tree's curves into the other tree's cache.
+    ('code/gp_tuning_width.py', 'mFC_data/code/gp_tuning_width.py'),
     ('code/population_drift_synthetics.py', 'mFC_data/code/population_drift_synthetics.py'),
+    # Added 2026-10-09 with the spatial pipelines: one pipeline for mEC, LEC and PFC (user rule), so
+    # every module and its gate must be the same bytes in both trees.
+    ('code/spatial_common.py', 'mFC_data/code/spatial_common.py'),
+    ('code/spatial_io.py', 'mFC_data/code/spatial_io.py'),
+    ('code/spatial_tuning.py', 'mFC_data/code/spatial_tuning.py'),
+    ('code/spatial_tuning_synthetics.py', 'mFC_data/code/spatial_tuning_synthetics.py'),
+    ('code/run_spatial.py', 'mFC_data/code/run_spatial.py'),
+    ('code/maze_spatial.py', 'mFC_data/code/maze_spatial.py'),
+    ('code/maze_spatial_synthetics.py', 'mFC_data/code/maze_spatial_synthetics.py'),
+    ('code/spatial_plots.py', 'mFC_data/code/spatial_plots.py'),
 ]
 
 DEF_PAIRS = [

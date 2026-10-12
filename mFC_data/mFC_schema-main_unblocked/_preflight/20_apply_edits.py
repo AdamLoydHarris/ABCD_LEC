@@ -343,6 +343,43 @@ EDITS: dict[str, list] = {
             "the except branch prints All_session_ind, a name that leaks from cell 24; this "
             "cell's loop variable is ephys_indx. Reachable whenever a shard is missing, where the "
             "handler itself would raise NameError instead of skipping the session"),
+
+        # ---- reporting only: writes a JSON, assigns no existing name ----
+        ins_before('F7-05', 'REPORT', 82, 5,
+                   'for stage in sleep_stages_unique:',
+                   ["import json as _json_F7_05   # UNBLOCK-F7-05",
+                    "vshape_report_F7_05={}   # UNBLOCK-F7-05",
+                    "# UNBLOCK-F7-05: cells 82 and 86 never record how many pairs land in each",
+                    "# angle bin, so a bin holding 2 pairs is indistinguishable from one holding",
+                    "# 200 in the saved average. PFC has 605 co-anchored pairs in total over 8",
+                    "# stages x 8 bins, and LEC v4 post5 returns r=-1.000 p=1.000 on the close",
+                    "# arm, which is a 2-point correlation carrying the same weight as every",
+                    "# other stage in cell 86's unweighted np.mean."],
+                   'record n per angle bin per sleep stage; cell 82 computes it and discards it'),
+
+        ins('F7-05', 'REPORT', 82, 21,
+            'sems_all.append(sem)',
+            ["    vshape_report_F7_05[str(stage)]=dict(   # UNBLOCK-F7-05",
+             "        n_per_bin=[int(v) for v in st.binned_statistic(angles_all_stage_,\\",
+             "            sleep_corr_all_stage_,'count',bins=bins_)[0]],   # UNBLOCK-F7-05",
+             "        mean=[None if np.isnan(v) else float(v) for v in means],   # UNBLOCK-F7-05",
+             "        sem=[None if np.isnan(v) else float(v) for v in sem],   # UNBLOCK-F7-05",
+             "        n_total=int(len(angles_all_stage_)),   # UNBLOCK-F7-05",
+             "        n_recdays=int(len(cross_corr_dic['angles'][stage])))   # UNBLOCK-F7-05"],
+            'per-stage bin counts, captured from the same arrays the panel is drawn from'),
+
+        ins('F7-05', 'REPORT', 82, 36,
+            'sems_mean=np.sqrt(',
+            ["vshape_report_F7_05['_aggregate']=dict(   # UNBLOCK-F7-05",
+             "    means_mean=[None if np.isnan(v) else float(v) for v in means_mean],\\",
+             "    n_stages=int(np.shape(means_all)[1]),   # UNBLOCK-F7-05",
+             "    bins_dropped_by_nan=[int(i) for i in np.where(np.isnan(means_mean))[0]])   # UNBLOCK-F7-05",
+             "_json_F7_05.dump(vshape_report_F7_05,\\",
+             "    open(Output_folder+'vshape_bin_n.json','w'),indent=2)   # UNBLOCK-F7-05",
+             "print('UNBLOCK-F7-05 wrote '+Output_folder+'vshape_bin_n.json')   # UNBLOCK-F7-05"],
+            "cell 86 averages the stages with a plain np.mean, so one empty bin in one stage "
+            "makes that bin NaN in the saved figure: the LEC v4 aggregate is missing bins 1 and "
+            "2 for exactly this reason. Record which bins were lost and to what"),
     ],
 }
 
@@ -495,6 +532,13 @@ VARIANTS['f7_elgaby_state'] = dict(
     skip_cells=[],
     ops=[],
     subs=[
+        # F7S-02: this variant writes the SAME 9 figure names as the main run into the SAME
+        # Output_folder, and ran 5 min after it on 2026-09-15, so every Figure7 SVG on disk was
+        # the 12-recday variant's. Every savefig is Output_folder+'<name>.svg' string
+        # concatenation, so one change to Output_folder prefixes all nine and cannot miss one.
+        ('F7S-02', 1,
+         "Output_folder = '/ceph/behrens/adam_harris/Taskspace_abstraction_lEC/mFC_data/replication_run/Output_folder/ephys/'",
+         "Output_folder = '/ceph/behrens/adam_harris/Taskspace_abstraction_lEC/mFC_data/replication_run/Output_folder/ephys/elgabystate_'"),
         ('F7S-01', 52,
          "    awake_sessions=np.load(Input_folder+'awake_session_behaviour_'+mouse_recday+'.npy')",
          "    _days=list(np.load(Input_folder+'combined_ABCDonly_days.npy'))\n"

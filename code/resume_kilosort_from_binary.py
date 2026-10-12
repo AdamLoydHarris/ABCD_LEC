@@ -26,8 +26,13 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-# Same fix the merge script carries; harmless if the import below sets it again.
-np.set_printoptions(legacy="1.25")
+# NumPy 2 removed aliases kilosort 4.0.18 still uses, and changed the repr probeinterface
+# writes into probe.prb. Must be imported before the sorter runs. See code/numpy2_compat.py.
+import numpy2_compat  # noqa: F401,E402
+
+# A transient ceph stall made tqdm's stderr write raise EAGAIN and killed ly07 (3666095);
+# stdio now waits instead of raising. See code/robust_stdio.py.
+import robust_stdio  # noqa: F401,E402
 
 import spikeinterface as si_top
 from spikeinterface import core as si
@@ -48,7 +53,11 @@ def _merge_module():
     return mod
 
 
-def resume(mouse: str, block: str, ths: tuple[int, int]) -> int:
+def resume(mouse: str, block: str, ths: tuple[int, int],
+           smoke_minutes: float = 0.0, qc_only: bool = False) -> int:
+    """Run Kilosort onward on an existing binary. `smoke_minutes` > 0 sorts only that
+    much of it, into a throwaway folder, to prove the path end to end in ~30 min.
+    `qc_only` reads a finished sort from kilosort_output/ instead of re-running Kilosort."""
     block_dir = EPHYS / mouse / f"{block}_preprocessed"
     binary_dir = block_dir / "binary"
     ks_dir = block_dir / "kilosort_output"
@@ -68,6 +77,13 @@ def resume(mouse: str, block: str, ths: tuple[int, int]) -> int:
     if got != expected:
         sys.exit(f"binary is {got} samples, concat table says {expected}; refusing")
 
+    if smoke_minutes:
+        # Same code path, a slice of the data, and never near the real output folder.
+        n = int(smoke_minutes * 60 * rec.sampling_frequency)
+        rec = rec.frame_slice(start_frame=0, end_frame=min(n, got))
+        ks_dir = block_dir / f"kilosort_output_SMOKE_{smoke_minutes:g}min"
+        print(f"SMOKE TEST: {smoke_minutes:g} min slice -> {ks_dir}")
+
     ks_dir.mkdir(parents=True, exist_ok=True)
     merge = _merge_module()
 
@@ -77,8 +93,16 @@ def resume(mouse: str, block: str, ths: tuple[int, int]) -> int:
     sorter_params["do_CAR"] = False        # IBL destriping was done in the preprocessing
     print(f"Running kilosort with parameters: {sorter_params}")
 
-    sorter = ss.run_sorter("kilosort4", recording=rec, folder=str(ks_dir),
-                           verbose=True, remove_existing_folder=True, **sorter_params)
+    if qc_only:
+        # ly05 (3666093) finished Kilosort in 7 d, then hit the walltime 5.9 h into quality
+        # metrics; the sort is on disk, so read it back rather than spend another week.
+        if not (ks_dir / "sorter_output" / "spike_times.npy").exists():
+            sys.exit(f"--qc-only but no finished sort in {ks_dir}/sorter_output; refusing")
+        sorter = ss.read_sorter_folder(str(ks_dir))
+        print(f"QC ONLY: read finished sort from {ks_dir}")
+    else:
+        sorter = ss.run_sorter("kilosort4", recording=rec, folder=str(ks_dir),
+                               verbose=True, remove_existing_folder=True, **sorter_params)
 
     sorter = sc.remove_excess_spikes(sorter, rec)
     sorter = sorter.remove_empty_units()
@@ -93,6 +117,18 @@ def resume(mouse: str, block: str, ths: tuple[int, int]) -> int:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 5:
-        sys.exit("usage: resume_kilosort_from_binary.py MOUSE BLOCK_DATES TH_UNIVERSAL TH_LEARNED")
-    resume(sys.argv[1], sys.argv[2], (int(sys.argv[3]), int(sys.argv[4])))
+    import argparse
+    p = argparse.ArgumentParser()
+    p.add_argument("mouse")
+    p.add_argument("block", help="dates joined by _, without the _preprocessed suffix")
+    p.add_argument("th_universal", type=int)
+    p.add_argument("th_learned", type=int)
+    p.add_argument("--smoke-minutes", type=float, default=0.0,
+                   help="sort only this many minutes, into kilosort_output_SMOKE_*; "
+                        "proves the path without spending a day on it")
+    p.add_argument("--qc-only", action="store_true",
+                   help="skip Kilosort; read the finished sort in kilosort_output/ and run "
+                        "only the quality metrics and gate (reuses a saved sorting_analyzer)")
+    a = p.parse_args()
+    print(f"numpy2_compat restored: {numpy2_compat.RESTORED}")
+    resume(a.mouse, a.block, (a.th_universal, a.th_learned), a.smoke_minutes, a.qc_only)

@@ -81,6 +81,76 @@ PYCONTROL_DIR = REPO_ROOT / "data" / "raw" / "pycontrol"
 EPHYS_MICE = DATASETS[DATASET]["mice"]
 QC_GATE = DATASETS[DATASET]["qc_gate"]
 
+#: Which build of the data dictionary an analysis loads. v4 (2026-10-02) is the corrected
+#: spike clock: v1 pairs each session against a raw ProbeB TTL train whatever the mouse's own
+#: probe, which leaves ly05_20250620_20250623 off by 2.6-38.6 s and every other recday off by
+#: 0-18 bins (docs/handoff/SPIKE_CLOCK_V4.md section 1.5). v4 is therefore the default, and
+#: 'v1' is kept reachable only so a refit can be proved equivalent to what is on disk.
+#: TSA_DATA_VERSION overrides for a whole process.
+DATA_VERSION = os.environ.get("TSA_DATA_VERSION") or "v4"   # empty env var == unset
+
+#: The v1 pickles carry no tag, so 'v1' maps to the untagged name and every other tag suffixes.
+_UNTAGGED_VERSION = "v1"
+
+
+def version_suffix(version=None) -> str:
+    """'' for v1, '_v4' for v4. The one place the output-tree tagging rule lives, so a cache
+    directory and the pickle it was built from can never disagree."""
+    version = DATA_VERSION if version is None else version
+    return "" if version == _UNTAGGED_VERSION else f"_{version}"
+
+
+def data_dic_path(version=None, dataset=None) -> Path:
+    """Path to a data_dic pickle. `version=None` takes DATA_VERSION; 'v1' is the untagged file."""
+    version = DATA_VERSION if version is None else version
+    dataset = DATASET if dataset is None else dataset
+    root = DATASETS[dataset]["root"] if dataset in DATASETS else REPO_ROOT
+    tag = "" if version == _UNTAGGED_VERSION else f"_{version}"
+    return root / "data" / "processed_data" / f"data_dic_{dataset}{tag}.pkl"
+
+
+def norm_neurons_path(version=None) -> Path:
+    """Path to the matching norm_neurons_dic pickle (same tagging rule)."""
+    version = DATA_VERSION if version is None else version
+    tag = "" if version == _UNTAGGED_VERSION else f"_{version}"
+    return REPO_ROOT / "data" / "processed_data" / f"norm_neurons_dic{tag}.pkl"
+
+
+def session_inds_path(version=None) -> Path:
+    """Path to the matching session_inds_dic pickle (same tagging rule)."""
+    version = DATA_VERSION if version is None else version
+    tag = "" if version == _UNTAGGED_VERSION else f"_{version}"
+    return REPO_ROOT / "data" / "processed_data" / f"session_inds_dic{tag}.pkl"
+
+
+def recdays_for_version(version=None) -> list[str]:
+    """Recdays a data version contains, from its 1 KB session_inds_dic rather than the 3.8 GB
+    dict. Built by the same `build_data_dic.py` run, so it cannot drift from it, and it picks
+    up July automatically at v5 where `all_recdays()` already lists unsorted blocks."""
+    import pickle
+    with open(session_inds_path(version), "rb") as fh:
+        return sorted(pickle.load(fh))
+
+
+def add_data_version_arg(parser):
+    """`--data-version` on an entry point, defaulting to the registry (currently v4)."""
+    parser.add_argument('--data-version', default=None,
+                        help=f"data_dic build to fit; default {DATA_VERSION} "
+                             f"(TSA_DATA_VERSION). 'v1' is the pre-clock-fix untagged file.")
+    return parser
+
+
+def resolve_data_version(version=None) -> tuple[str, Path]:
+    """(version, path), raising if the pickle is absent -- a typo must not silently fall back."""
+    version = DATA_VERSION if version is None else version
+    path = data_dic_path(version)
+    if not path.exists():
+        raise FileNotFoundError(
+            f"data_dic version {version!r} -> {path} does not exist. "
+            f"Available: {sorted(q.name for q in path.parent.glob('data_dic_*.pkl'))}")
+    return version, path
+
+
 #: Recdays that must not enter any `data_dic`-joined analysis, with the reason.
 #: Empty is the healthy state -- an entry here means known-bad data is on disk.
 #:

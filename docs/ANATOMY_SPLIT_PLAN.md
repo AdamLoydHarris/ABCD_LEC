@@ -188,6 +188,16 @@ positions to 0.0 µm), and `SHANK_ORDER_VERIFIED` is still `False`. But anatomy 
 position* is invariant and verified, so region labels are unaffected. Only claims of the form
 "shank 0 specifically" need the caveat.
 
+**Correction (2026-10-02, `code/LFP_ANATOMY_CHECK.md`): this is true for contacts by position,
+false for units.**
+- A unit's label comes from its channel's probe (x, y), which is exactly the link the mirror
+  changes. Under the mirror, ENTm unit-recordings change ah10 22→6, ly05 34→84, ly06 49→176,
+  ly07 179→85, and 0 of 284 stay ENTm.
+- Ripple maps now support the current convention. ly06 raw sleep: ripple-gain AUC 0.997 vs 0.547
+  for the mirror. Pre-registered "current" in 3 mice; the post-hoc discordant test favours current
+  in 5 of 5; no mouse supports the mirror.
+- So the existing labels stand, but they rested on this check.
+
 ---
 
 ## 4. Stage 1 — align to the 25-recday cohort and gate the join

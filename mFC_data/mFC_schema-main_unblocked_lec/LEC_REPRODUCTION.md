@@ -3,10 +3,12 @@
 **Status: live document.** Attempt 1 (combined recdays only) completed 2026-09-10/11.
 Attempt 2 adds the 50-day single-day cohort needed for Figure 3's coherence analysis;
 **attempt 2b (2026-09-11/12) completed Figure2, the bridge and Figure3_fast**, and its
-results are below. `Figure5_Figure6` is the only notebook still outstanding: it was killed
-twice and is re-running as of 2026-09-14 (section 4). Started 2026-09-10.
+results are below. Started 2026-09-10. **All notebooks have since run** -- attempt 2c
+(2026-09-16), `Figure5_Figure6` through the cell-17 checkpoint split (2026-09-18) and
+`Figure7` (2026-09-18); nothing is outstanding. Last updated **2026-10-08** (full audit; see
+the final section).
 
-Companion files: `EDITS.md` (the 23-edit ledger, generated), `RUN.md` (how to run this
+Companion files: `EDITS.md` (the 30-edit ledger, generated), `RUN.md` (how to run this
 copy, with a "Resume here" block), `../mFC_schema-main_unblocked/REPRODUCTION.md` (the PFC
 run this mirrors), `../../LEC_PORT_HANDOFF.md` (the brief). Every number below was measured
 on this machine.
@@ -21,7 +23,7 @@ layout his notebooks read, into a **separate** `Input_folder`
 (`../lec_replication_run/data/Intermediate_objects/`), and a copy of the audited PFC
 project runs on it. Three LEC-only notebook edits were unavoidable (section 3); none
 changes a computed quantity. The PFC run in `../replication_run/` is untouched, and its
-audit still passes with its 20 edits.
+audit still passes with its 22 edits.
 
 ---
 
@@ -125,7 +127,7 @@ session's `Neuron_raw` bin count, the trialtimes conversion verified end to end)
 |---|---|---|
 | `Input_folder` | mirror of the deposit (52 GB) + bookkeeping | built from `data_dic_lec.pkl` (attempt 1: 7 GB; attempt 2 with single-day copies: ~40 GB) |
 | cohorts | 25 combined + 55 single-day + 11 `3_task` + 4 ABCDE | 25 combined + 50 single days (attempt 2; none in attempt 1); `3_task` and ABCDE empty |
-| edits | 20 | 23 (`LEC-01/02/03`) |
+| edits | 22 | 30 (`LEC-01` to `LEC-08`) |
 | run-time skips | Figure5_Figure6 `--skip 9` | + Figure3_fast `--skip 20 --allow-errors` |
 | `Neuron_raw_` dtype | float64 as deposited | float64 by cast (pickle is uint16) |
 | XY units | pixels, camera-calibrated | cm, +10 cm offset, ratio-1 calibration files |
@@ -134,7 +136,7 @@ session's `Neuron_raw` bin count, the trialtimes conversion verified end to end)
 | `Num_trials_` basis | his `Num_trials_dic2` (19 recdays) or `len(trialtimes_)` | the pickle's `num_trials` (== `len(Trial_times)` in 182/182) |
 | one-trial folds | none noted | 4 (section 2) |
 | Figure3 single-day cells (54/59/63/66/68/80/86/87) | ran (55 days) | attempt 1: 6 cells errored under `--allow-errors` because the cohort was empty (cell 68's coherence violin was drawn from an empty array); attempt 2b: all ran, coherence over 35 of 50 days, cell 23 errored on the five days whose first session had no trials (it feeds nothing, `use_peak=False`); **attempt 2c: 0 error cells, coherence over 45 of 50 days**, the 5 exclusions all named by his own "<3 sessions" rule (section 6b) |
-| Figure7 | ran | no longer out of scope: a sleep-box source exists and a separate session built the inputs (`12_make_figure7_inputs.py --sleep`, edits LEC-05/06); queued `afterok` the attempt-2c checks job. See the 2026-09-15 Figure7 section |
+| Figure7 | ran | no longer out of scope: a sleep-box source exists and a separate session built the inputs (`12_make_figure7_inputs.py --sleep`, edits LEC-05/06); queued `afterok` the attempt-2c checks job. See the 2026-09-15 Figure7 section. *2026-09-29: ran as 3644578, 23 cells, 0 error outputs, EXIT=0; results in that section* |
 | Figure5_Figure6 | 57091 s total, cell 17 53879 s | three failed attempts: 21947 s into cell 17 on `ephys_ses_9_` (LEC-03); at exactly 86400 s by **`40_run_notebook.py`'s own `--timeout` default**, not the SLURM walltime; then **cell 17 completed in 107489 s (29.9 h)** and cell 44 raised `IndexError` on a 3-session recday (LEC-07) before anything was saved. Attempt 4 runs cells 0-17 and the rest as separate jobs around a runner-side checkpoint. Cell 17 scales with neurons x sessions^2: 2851 neurons (PFC 2182), up to 11 sessions per recday (PFC 9) |
 | Figure2_UMAP, Basic/Behavioural | partial / run | out of scope (undeposited inputs; PFC raw `Data_folder`) |
 | checkpoints vs his stored outputs (`95_checkpoints.py`) | the yardstick | not applicable -- no stored LEC outputs; the yardsticks are section 5 and the PFC / V5 numbers in section 6 |
@@ -167,8 +169,8 @@ and `State_99` are byte-identical across runs.
 | `Phases_raw2_` / `Phases_raw_` values, equal length | {0,1,2} / {0..4} | **182/182 sessions correct** |
 | mod-3 stripe purity, Poisson | 100 %, non-zero fraction 1/3 | **100.0000 % (1,798,632 on / 0 off), fraction 0.3333** |
 | mod-3 stripe purity, ElasticNet | 100 % | **100.0000 % (60,882 on / 0 off), fraction 0.0113** |
-| `State_99` subset of `State_95` | 25/25 | **25/25; 931 within 1426 of 2851** |
-| `speed_` files == exported sessions | 182 | **182** |
+| `State_99` subset of `State_95` | 25/25 | **25/25; 931 within 1426 of 2851** *(the check now runs over 75 recdays: 2793 within 4278 of 8553)* |
+| `speed_` files == exported sessions | 182 | **182** *(superseded: check 5 now tests that every Figure 5 fold session has all six per-session files; `speed_` is 370 after the single-day cohort)* |
 | pipeline `Neuron_` vs pickle `Neurons_norm` (`98_compare_neurons_norm.py`) | shapes match | **182/182 sessions, 20,809 neuron-sessions, r = 1.0000 for every one, identical trial counts** -- his `raw_to_norm` and our normalisation are the same function |
 
 The ElasticNet non-zero fraction (1.1 % of the 324 coefficients, versus exactly one third
@@ -179,8 +181,11 @@ mind when reading panel 3 below. The PFC equivalent was not measured in the PFC 
 Figure2 cell-level counts (from the executed notebook): cell 18 skipped exactly the 30
 trial-less sessions; cells 23/25 report 0 "Files not found" and 0 "betas not calculated"
 (PFC: 12 and 0); the F2-06 cell skipped the same 30; cell 66: 2851 neurons, **phase-tuned
-64.4 %, state-tuned 50.0 % (1426), place-tuned 86.2 %**, state given phase 54.8 %, place given
-phase-and-state 96.7 % (PFC cell 61: 2182 neurons, state-tuned 59 % at p<0.05, goal-progress
+64.5 %, state-tuned 50.0 % (1426), place-tuned 86.4 %**, state given phase 54.9 %, place given
+phase-and-state 96.5 % *(re-read from the attempt-2c notebook 2026-10-08; the figures here
+previously read 64.4 / 86.2 / 54.8 / 96.7, which were attempt-1 or 2b values. Phase and place
+tuning come from the unseeded cell-25 shuffle, so they move between runs; state tuning does
+not)* (PFC cell 61: 2182 neurons, state-tuned 59 % at p<0.05, goal-progress
 ~76 %).
 
 ---
@@ -425,3 +430,113 @@ the `_Angles_` files (rewritten by the queued Figure3_fast), so the LEC run is c
 *(2026-09-15 15:19: re-pointed to `afterok` the Figure5_Figure6 resume job 3633858, because
 attempt 3 of Figure5_Figure6 failed in cell 44 and its `Spatial_anchoring_*` outputs do not yet
 exist; see section 3, LEC-07.)*
+
+*(2026-09-29: the chain above is superseded. Figure7 died twice more before it ran -- 3633768 at
+cell 59 on the overlay snapshot, 3644540 on the empty `post6` stage, fixed by LEC-08 -- and then
+completed as 3644578. The audit now lists 30 IDs across the copy, LEC-07 and LEC-08 included.
+Results below.)*
+
+#### Results, 2026-09-18 (job 3644578; 23 cells, 0 error outputs; 5 min; EXIT=0)
+
+Written 2026-09-29 from `lec_replication_run/executed/Figure7.ipynb`. Error outputs were counted in
+the notebook, not taken from the runner's summary.
+
+Cell 89, the headline. Close = co-anchored pairs 0-180° apart in forward distance, far = 180-360°.
+Cell 87 computes one Pearson r of forward angle against 250 ms sleep co-activity per recday x sleep
+stage and arm, and sets an arm to NaN when it has 10 pairs or fewer; cell 89 keeps the units where
+both arms are defined. PFC and paper columns are copied from PFC `REPRODUCTION.md` §Figure7.
+
+| | LEC, 25 recdays | PFC, ours, 21 recdays | PFC, his stored notebook | paper Fig. 7e |
+|---|---|---|---|---|
+| recday x stage units | 100 | 37 | 36 | 59 |
+| close vs far, paired t (p) | **-7.81 (6e-12)** | -2.81 (0.008) | -5.16 (1e-5) | -5.55 (7e-7) |
+| close r vs 0, t (p) | -5.17 (1e-6) | -1.15 (0.26) | -3.59 (0.001) | -5.16 (1e-4) |
+| far r vs 0, t (p) | +6.98 (3e-10) | +3.70 (7e-4) | +3.00 (0.005) | +4.16 (1e-4) |
+| Wilcoxon p | 3.3e-10 | 0.012 | 1.5e-5 | -- |
+| cell 69 betas t (circular, forward) | -1.25, +0.33 | -1.32, -1.34 | -0.85, +1.02 | -- |
+
+The pool: cell 87 finds 144 recday x stage units with at least one co-anchored pair, over 24
+recdays; 100 have both arms above 10 pairs. The 25th recday, `ly05_20250620_20250623`, has **no**
+co-anchored pair in any stage (cell 87 prints "Not used" only in that case). 13 of its 91 neurons
+are anchored, against a median anchored fraction of 0.58 over the 25 recdays (range 0.14-0.71).
+It is also the LEC-07 recday.
+
+Per-stage Pearson r of forward angle with sleep co-activity (cell 82; pairs pooled over recdays, so
+the p values treat pairs as independent):
+
+| stage | close arm r (p) | far arm r (p) |
+|---|---|---|
+| preX | -0.13 (9e-5) | +0.21 (2e-12) |
+| post0 | -0.16 (1e-6) | +0.23 (2e-14) |
+| post1 | -0.09 (0.015) | +0.11 (0.003) |
+| post2 | -0.10 (0.004) | +0.10 (0.004) |
+| preX2 | -0.12 (3e-4) | +0.08 (0.013) |
+| post3 | -0.13 (2e-5) | +0.08 (0.009) |
+| post4 | -0.14 (5e-5) | +0.12 (7e-5) |
+| post5 | -0.09 (0.65) | +0.37 (0.11) |
+
+Mean sleep co-activity by forward distance (cell 86 plots cell 82's `means_mean`, 45° bins). Cell 86
+prints nothing; these values are read from the marker positions in
+`Output_folder/ephys/Forward_distance_vs_corr_Allsleep.svg` against its y ticks:
+
+| forward distance | 0-45 | 45-90 | 90-135 | 135-180 | 180-225 | 225-270 | 270-315 | 315-360 |
+|---|---|---|---|---|---|---|---|---|
+| co-activity | 0.082 | 0.032 | 0.055 | 0.048 | 0.019 | 0.039 | 0.042 | 0.079 |
+
+**The close-vs-far effect reproduces on LEC, more strongly than on PFC or in the paper.** Both arms
+carry it: close r is negative and far r positive in all 8 stages, significant in 7 (post5 is the
+exception). **The curve is not a clean V.** It is high at both ends (0.082, 0.079) and lowest at
+180-225° (0.019), but it dips to 0.032 at 45-90° and recovers to 0.055 at 90-135°. His stored PFC
+curve falls monotonically to its floor at 90-180°.
+
+Secondary numbers: cell 74 within- vs between-anchor circular betas, t -0.42, p 0.337 one-sided
+(N 1462 / 47648); paper t -1.80, P 0.036: not reproduced, as on PFC. Cell 72 pre- vs post-task
+sleep betas: circular t -0.59 (p 0.55), forward t +0.74 (p 0.46), spatial correlation t -2.05
+(p 0.040).
+
+Not established:
+- **Anything per mouse.** The 100 units come from 24 recdays of 5 mice, and cell 89 treats each
+  as independent. A per-mouse split needs cell 89's per-unit arrays with their recday labels, which
+  the notebook does not save; that is a rerun.
+- **Anything regional.** The pool is the unsplit probe mixture (ENTl, ENTm, SUB/ProS, CA1).
+- **Stage post6.** LEC-08 dropped it: no co-anchored pair in any of the 25 recdays.
+- **Why the curve dips at 45-90°.** Not investigated.
+
+Provenance. The input builder was run three times. 3633597 stopped at
+`GATE ah08_20250624_20250625: 10 wake recordings vs 11 Task_data rows` and 3633710 at the cell-14/20
+lookup gate, both `EXIT=1` in their logs although sacct reports COMPLETED 0:0. The build that
+passed every gate, 2026-09-18 20:53, left `logs/figure7_inputs_manifest.json` (25 recdays in
+`gate.pass_`, 490 recordings = 211 task + 279 sleep) but no log. "Export job 3633597" above is the
+first failed attempt.
+
+Reproduce (maze_ephys, from `mFC_data/mFC_schema-main_unblocked_lec/`): see `RUN.md` §"2026-09-15,
+Figure7" for the builder order, then `bash _preflight/50_sbatch_notebook.sh "Figure7.ipynb"`.
+Re-run `_preflight/12_make_figure7_inputs.py` immediately before submitting; the overlay is a
+snapshot of symlinks.
+
+## 2026-09-29 — Figure5_Figure6 printed statistics (Fig. 5b / 5c / 5f, ED 7h)
+
+Figure5_Figure6 completed on 2026-09-18 through the cell-17 checkpoint split (`RUN.md`).
+n = state-tuned neurons (his `State_`), pooled over recdays; t = one-sample t against 0 with
+neurons as replicates; z = his two-proportions test against 25 %. All read from the printed cell
+outputs of the executed notebooks (`{lec_,}replication_run/executed/Figure5_Figure6.ipynb`) and
+the deposit (`mFC_schema-main/Figure5_Figure6.ipynb`); paper values from the Fig. 5 legend and
+ED 7.
+
+| panel (cell) | paper | his stored notebook | PFC, our run | LEC, our run |
+|---|---|---|---|---|
+| Fig. 5b coherent proportion vs 25 %, all state-tuned (c42) | 39 %, n 738, z 5.69 | 40.4 %, n 738, z 6.31 | 35.8 %, n 738, z 4.50 | 46.1 %, n 1426, z 11.80 |
+| Fig. 5b, non-zero lag (c62) | 36 %, n 545, z 3.87 | 35.9 %, n 314, z 2.97 | 36.1 %, n 288, z 2.89 | 36.4 %, n 433, z 3.64 |
+| Fig. 5c single-anchor map r, all (c69) | n 737, t 9.86 | n 737, t 11.72 | n 736, t 9.08 | n 1423, t 26.30 |
+| Fig. 5c, non-zero lag (c69) | n 544, t 7.55 | n 314, t 6.84 | n 288, t 5.54 | n 433, t 11.01 |
+| Fig. 5f held-out lagged-map r, all (c34) | n 738, t 22.6 | n 738, t 22.64 | n 738, t 20.21 | n 1426, t 45.51 |
+| Fig. 5f, non-zero lag 30° (c34) | n 285, t 7.48 | n 285, t 7.48 | n 307, t 5.72 | n 356, t 8.42 |
+| ED 7h, non-zero lag 90° (c34) | N 135, t 7.07 | n 135, t 7.07 | n 164, t 3.82 | n 179, t 5.83 |
+
+The deposit reproduces the paper's Fig. 5f and ED 7h exactly; its Fig. 5b/5c non-zero-lag pool is
+314, not the legend's 545/544. The cell-31 statistic behind Fig. 5f was never saved per neuron.
+`code/lagged_spatial_maps.py` rebuilds it from `Spatial_anchoring_Phase_shifted_maps_*` and
+reproduces the c34 n and t above exactly in both regions (dt = 0.0 on all six); per-mouse
+results, the LEC anatomy split and the place-vs-goal frame test are in `code/LAGGED_SPATIAL.md`.
+Note `Spatial_anchoring_Cross_val_corr_*` is the Fig. 5c single-anchor value (cell 47), not
+Fig. 5f.

@@ -66,6 +66,7 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
 import glm_analysis_v3 as glm                           # noqa: E402
+import recday_registry as _rr                           # noqa: E402
 import w1_refit as w                                    # noqa: E402
 import run_glm_batch as rb                              # noqa: E402
 
@@ -89,7 +90,8 @@ def _repo_root():
 
 REPO = _repo_root()
 DATA_ROOT = os.path.join(REPO, 'mFC_data', 'data') if IS_PFC else os.path.join(REPO, 'data')
-CACHE_DIR = os.path.join(DATA_ROOT, 'processed_data', 'gp_leg_curves')
+CACHE_DIR = os.path.join(DATA_ROOT, 'processed_data',
+                         'gp_leg_curves' + _rr.version_suffix())
 FIG_DIR = os.path.join(DATA_ROOT, 'figures', 'gp_tuning_width')
 SYNTH_OUT = os.path.join(DATA_ROOT, 'processed_data', 'gp_tuning_width_synthetics.pkl')
 
@@ -315,27 +317,28 @@ def build_recday_cache(data_rd, rd, *, cap_s=CAP_S, n_bins=N_BINS):
     return out
 
 
-def cache_path(rd, cache_dir=CACHE_DIR):
-    return os.path.join(cache_dir, f'{rd}.pkl')
+def cache_path(rd, cache_dir=None):
+    return os.path.join(cache_dir or CACHE_DIR, f'{rd}.pkl')
 
 
-def save_cache(cache, cache_dir=CACHE_DIR):
+def save_cache(cache, cache_dir=None):
+    cache_dir = cache_dir or CACHE_DIR
     _ensure_writable_dir(cache_dir)
     with open(cache_path(cache['recday'], cache_dir), 'wb') as fh:
         pickle.dump(cache, fh, protocol=4)
 
 
-def load_cache(rd, cache_dir=CACHE_DIR):
+def load_cache(rd, cache_dir=None):
     with open(cache_path(rd, cache_dir), 'rb') as fh:
         return pickle.load(fh)
 
 
-def load_all_caches(cache_dir=CACHE_DIR):
+def load_all_caches(cache_dir=None):
     """`{recday: cache}` for every cached recday of this tree, excluded recdays dropped."""
     import glob
     out = {}
     excluded = set(glm._stale_or_excluded(SELECTING_ARM))
-    for p in sorted(glob.glob(os.path.join(cache_dir, '*.pkl'))):
+    for p in sorted(glob.glob(os.path.join(cache_dir or CACHE_DIR, '*.pkl'))):
         rd = os.path.basename(p)[:-4]
         if rd in excluded or rd.startswith('_'):        # `_verify_legacy.pkl` etc. are not caches
             continue
@@ -346,11 +349,13 @@ def load_all_caches(cache_dir=CACHE_DIR):
     return out
 
 
-def build_all(cap_s=CAP_S, n_bins=N_BINS, recdays=None, verbose=True):
+def build_all(cap_s=CAP_S, n_bins=N_BINS, recdays=None, verbose=True, data_version=None):
     """Build and save every recday's cache for this tree. LEC loads the 3.8 GB `data_dic`
     once; PFC is per recday."""
     t0 = time.time()
-    _ensure_writable_dir(CACHE_DIR)
+    cache_dir = os.path.join(DATA_ROOT, 'processed_data',
+                             'gp_leg_curves' + _rr.version_suffix(data_version))
+    _ensure_writable_dir(cache_dir)
     if IS_PFC:
         rds = recdays or w.pfc_recdays()
         for rd in rds:
@@ -358,22 +363,26 @@ def build_all(cap_s=CAP_S, n_bins=N_BINS, recdays=None, verbose=True):
             if rd not in dd:
                 print(f'  {rd}: no data, skipped'); continue
             c = build_recday_cache(dd[rd], rd, cap_s=cap_s, n_bins=n_bins)
-            save_cache(c)
+            save_cache(c, cache_dir)
             if verbose:
                 print(f'  {rd}: {c["curves"].shape[0]} neurons x {c["curves"].shape[1]} legs '
                       f'({c["n_legs_dropped_cap"]} > cap, {c["n_legs_dropped_invalid"]} invalid), '
                       f'sessions {c["sessions"]}  ({time.time() - t0:.0f} s)')
     else:
-        dd = glm.load_data_dic(validate=True, apply_exclusions=True, verbose=verbose)
+        _ver, _dd_path = _rr.resolve_data_version(data_version)
+        if verbose:
+            print(f'data_dic: {_dd_path.name}  (version {_ver})  -> {cache_dir}')
+        dd = glm.load_data_dic(path=str(_dd_path), validate=True, apply_exclusions=True,
+                               verbose=verbose)
         rds = recdays or sorted(dd)
         for rd in rds:
             c = build_recday_cache(dd[rd], rd, cap_s=cap_s, n_bins=n_bins)
-            save_cache(c)
+            save_cache(c, cache_dir)
             if verbose:
                 print(f'  {rd}: {c["curves"].shape[0]} neurons x {c["curves"].shape[1]} legs '
                       f'({c["n_legs_dropped_cap"]} > cap, {c["n_legs_dropped_invalid"]} invalid), '
                       f'sessions {c["sessions"]}  ({time.time() - t0:.0f} s)')
-    print(f'{DATASET}: {len(rds)} recdays cached under {CACHE_DIR} in {(time.time() - t0) / 60:.1f} min')
+    print(f'{DATASET}: {len(rds)} recdays cached under {cache_dir} in {(time.time() - t0) / 60:.1f} min')
 
 
 # ---------------------------------------------------------------------------
@@ -2108,13 +2117,20 @@ def main(argv=None):
     ap.add_argument('--check-mirror', action='store_true')
     ap.add_argument('--recday', action='append', default=None)
     ap.add_argument('--cap-s', type=float, default=CAP_S)
+    ap.add_argument('--data-version', default=None,
+                    help='LEC only; also selects the gp_leg_curves cache tree')
     args = ap.parse_args(argv)
+    if args.data_version is not None:          # rebind so every cache read/write follows it
+        global CACHE_DIR
+        CACHE_DIR = os.path.join(DATA_ROOT, 'processed_data',
+                                 'gp_leg_curves' + _rr.version_suffix(args.data_version))
     if args.check_mirror:
         print('mirror OK:', assert_mirror())
     if args.verify:
         if IS_PFC:
             print('--verify is LEC-only (the legacy pickles are LEC)'); return 1
-        dd = glm.load_data_dic(validate=True, apply_exclusions=True, verbose=True)
+        dd = glm.load_data_dic(path=str(_rr.resolve_data_version(args.data_version)[1]),
+                               validate=True, apply_exclusions=True, verbose=True)
         print('\n--- rebuild vs norm_neurons_dic / gp_curves ---')
         leg = verify_against_legacy(dd)
         print('\n--- currency: the salvage and the GLM session set ---')

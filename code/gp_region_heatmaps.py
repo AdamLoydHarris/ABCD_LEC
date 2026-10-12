@@ -42,7 +42,11 @@ CODE_DIR = Path(__file__).resolve().parent
 REPO_ROOT = CODE_DIR.parent
 OUT_DIR = REPO_ROOT / "data" / "processed_data"
 FIGURE_DIR = REPO_ROOT / "data" / "figures" / "gp_region_heatmaps"
-CURVES_PATH = OUT_DIR / "gp_curves.pkl"
+import sys as _sys                                                             # noqa: E402
+_sys.path.insert(0, str(CODE_DIR))
+import recday_registry as _rr                                                   # noqa: E402
+
+CURVES_PATH = OUT_DIR / f"gp_curves{_rr.version_suffix()}.pkl"
 
 N_STATES = 4
 N_BINS = 90                      # normalised bins per state; 4 x 90 = 360
@@ -129,20 +133,25 @@ def qualifying_recdays(tasks: dict | None = None,
 # the (n, 90) goal-progress curves
 # --------------------------------------------------------------------------
 
-def build_gp_curves(rebuild: bool = False, verbose: bool = True) -> dict:
+def build_gp_curves(rebuild: bool = False, verbose: bool = True,
+                    data_version: str | None = None) -> dict:
     """Extract ``Smoothed_norm`` -> (n, 90) per (recday, session), cached.
 
     ``data_dic_lec.pkl`` is ~3.8 GB and this needs only a few MB of it, so the
     curves are cached and every later run is instant.
     """
-    if CURVES_PATH.exists() and not rebuild:
-        return load_gp_curves()
+    out_path = OUT_DIR / f"gp_curves{_rr.version_suffix(data_version)}.pkl"
+    if out_path.exists() and not rebuild:
+        return load_gp_curves(out_path)
 
     import sys
     sys.path.insert(0, str(CODE_DIR))
     import glm_analysis_v2 as glm
 
-    data_dic = glm.load_data_dic(verbose=verbose)
+    version, dd_path = _rr.resolve_data_version(data_version)
+    if verbose:
+        print(f"data_dic: {dd_path.name}  (version {version})  -> {out_path.name}")
+    data_dic = glm.load_data_dic(path=str(dd_path), verbose=verbose)
     out: dict[str, dict[int, np.ndarray]] = {}
     for recday in sorted(data_dic):
         sessions = {}
@@ -171,8 +180,8 @@ def build_gp_curves(rebuild: bool = False, verbose: bool = True) -> dict:
     return out
 
 
-def load_gp_curves() -> dict:
-    with open(CURVES_PATH, "rb") as f:
+def load_gp_curves(path=None) -> dict:
+    with open(path or CURVES_PATH, "rb") as f:
         return pickle.load(f)
 
 

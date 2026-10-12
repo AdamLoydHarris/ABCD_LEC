@@ -1,7 +1,8 @@
 # Reproducing El-Gaby's deposited notebooks: what we did, and how our run differs
 
 **Status: live document.** Figure2 is complete; the downstream notebooks are running and
-their sections are filled in as they finish. Last updated 2026-09-08.
+their sections are filled in as they finish. Last updated **2026-10-08** (full audit; see the
+final section). Every notebook has now run; nothing is queued.
 
 Companion files: [`EDITS.md`](EDITS.md) is the generated ledger of every code edit;
 [`RUN.md`](RUN.md) is the operating manual. This document is the narrative and the
@@ -23,7 +24,7 @@ reimplementation. The reimplementation already exists
 notebook, listed in `EDITS.md`, and enforced by an audit that fails if the copy differs
 from the deposit in any undeclared way.
 
-**Final tally: 19 edits across 8 notebooks.** 8 are path repoints, 5 fix undefined names,
+**Final tally: 22 edits across 8 notebooks** (19 at the time of writing; `F3-03`, `F7-03`, `F7-04` followed). 8 are path repoints, 5 fix undefined names,
 2 flip a flag, 1 widens a cohort, 1 reorders a dependency, 1 changes a cell type, 1 adds a
 new cell — and **exactly one changes a scientific quantity** (`F2-03`).
 
@@ -321,7 +322,7 @@ pairs and matching scipy's edge cases (NaN input -> NaN; zero variance -> NaN). 
 copy**. The observed gain is smaller than 35x because only the `pearsonr` fraction speeds
 up: cell 29 went from >4h48m (unfinished) to 1603 s.
 
-### `Figure5_Figure6` — queued
+### `Figure5_Figure6` — complete (ran 2026-09-11; see the 2026-09-29 note below)
 
 Will run with `--skip 9`. Cell 9 is a standalone exporter with no consumers in its own
 notebook, and the deposited `Xneuron_correlations` joblib cannot substitute for Figure3
@@ -329,6 +330,33 @@ cell 45 anyway: it carries measures `Max_bins`/`Correlations`/`angle_units` with
 `Angles`**, and covers 3 of 25 recdays.
 
 *Results to follow.*
+
+*2026-09-29.* It ran (`replication_run/executed/Figure5_Figure6.ipynb`). The Fig. 5 statistics
+it printed, beside the paper and his stored notebook:
+
+n = state-tuned neurons (his `State_`), pooled over recdays; t = one-sample t against 0 with
+neurons as replicates; z = his two-proportions test against 25 %. All read from the printed cell
+outputs of the executed notebooks (`{lec_,}replication_run/executed/Figure5_Figure6.ipynb`) and
+the deposit (`mFC_schema-main/Figure5_Figure6.ipynb`); paper values from the Fig. 5 legend and
+ED 7.
+
+| panel (cell) | paper | his stored notebook | PFC, our run | LEC, our run |
+|---|---|---|---|---|
+| Fig. 5b coherent proportion vs 25 %, all state-tuned (c42) | 39 %, n 738, z 5.69 | 40.4 %, n 738, z 6.31 | 35.8 %, n 738, z 4.50 | 46.1 %, n 1426, z 11.80 |
+| Fig. 5b, non-zero lag (c62) | 36 %, n 545, z 3.87 | 35.9 %, n 314, z 2.97 | 36.1 %, n 288, z 2.89 | 36.4 %, n 433, z 3.64 |
+| Fig. 5c single-anchor map r, all (c69) | n 737, t 9.86 | n 737, t 11.72 | n 736, t 9.08 | n 1423, t 26.30 |
+| Fig. 5c, non-zero lag (c69) | n 544, t 7.55 | n 314, t 6.84 | n 288, t 5.54 | n 433, t 11.01 |
+| Fig. 5f held-out lagged-map r, all (c34) | n 738, t 22.6 | n 738, t 22.64 | n 738, t 20.21 | n 1426, t 45.51 |
+| Fig. 5f, non-zero lag 30° (c34) | n 285, t 7.48 | n 285, t 7.48 | n 307, t 5.72 | n 356, t 8.42 |
+| ED 7h, non-zero lag 90° (c34) | N 135, t 7.07 | n 135, t 7.07 | n 164, t 3.82 | n 179, t 5.83 |
+
+The deposit reproduces the paper's Fig. 5f and ED 7h exactly; its Fig. 5b/5c non-zero-lag pool is
+314, not the legend's 545/544. The cell-31 statistic behind Fig. 5f was never saved per neuron.
+`code/lagged_spatial_maps.py` rebuilds it from `Spatial_anchoring_Phase_shifted_maps_*` and
+reproduces the c34 n and t above exactly in both regions (dt = 0.0 on all six); per-mouse
+results, the LEC anatomy split and the place-vs-goal frame test are in `code/LAGGED_SPATIAL.md`.
+Note `Spatial_anchoring_Cross_val_corr_*` is the Fig. 5c single-anchor value (cell 47), not
+Fig. 5f.
 
 ### `Figure5_Regression` — running (the priority notebook)
 
@@ -431,7 +459,8 @@ supplies the array the rest of the code already assumes.
 
 **Consequence for scoring cell 38:** his stored numbers **482 / 278 / 69 are not our
 target**, because they came from a `_beyond` (24-lag) run. Expect the V5 reimplementation
-band, **447–481 / 246–287 / 79–92** (`../code/ELASTICNET_V5.md`). The paper's
+band, **447–481 / 246–287 / 79–92** (`../code/ELASTICNET_V5.md`) — *superseded, see the
+2026-10-08 correction below; the corrected band is 610 / 358 / 120*. The paper's
 489 / 329 / 224 is not a pass criterion — its 90° panel is not reproduced by any definition
 readable from the deposited code.
 
@@ -457,11 +486,14 @@ The full notebook: 10 cells, 0 failed, 9926 s. The `Figure5_Regression_elasticne
 variant (`Poisson_regression=False` -> `ElasticNet(alpha=0.01, positive=True)`) then ran in
 7592 s. Both write to distinct filename prefixes, so the two result sets coexist.
 
-| panel | Poisson | **ElasticNet** | V5 (ElasticNet a=0.01) | paper | his stored (`_beyond`) |
-|---|---|---|---|---|---|
-| all state-tuned | 581, r=+0.272, t=17.15 | **623, r=+0.203, t=15.56** | 447-481, t~14.5 | 489, t=9.3 | 482, t=14.47 |
-| non-zero-lag 30 deg | 296, r=+0.174, t=6.76 | **307, r=+0.073, t=2.87** | 246-287, t~2.48 | 329, t=3.9 | 278, t=8.41 |
-| non-zero-lag 90 deg | 79, r=+0.160, t=2.67 | **86, r=+0.119, t=2.13** | 79-92, t<=1.8 | 224, t=2.53 | 69, t=3.77 |
+| panel | Poisson | **ElasticNet** | V5 EN, corrected pool | V5 Poisson, corrected pool | paper | his stored (`_beyond`) |
+|---|---|---|---|---|---|---|
+| all state-tuned | 581, r=+0.272, t=17.15 | **623, r=+0.203, t=15.56** | 610, t 13.98 | 573, t 15.83 | 489, t=9.3 | 482, t=14.47 |
+| non-zero-lag 30 deg | 296, r=+0.174, t=6.76 | **307, r=+0.073, t=2.87** | 358, t 3.03 | 298, t 5.11 | 329, t=3.9 | 278, t=8.41 |
+| non-zero-lag 90 deg | 79, r=+0.160, t=2.67 | **86, r=+0.119, t=2.13** | 120, t 1.99 | 73, t 3.14 | 224, t=2.53 | 69, t=3.77 |
+
+*V5 columns corrected 2026-10-08 (see below). They previously read 447-481 / 246-287 / 79-92,
+the superseded every-fold pool.*
 
 Both runs: 25/25 recdays, 1252 neurons, 738 state-tuned by `State_95` -- all three exact
 matches to his own figures, on either model.
@@ -469,9 +501,9 @@ matches to his own figures, on either model.
 **The model choice accounts for most of the gap to V5.** Switching from
 `PoissonRegressor(alpha=1)` to `ElasticNet(alpha=0.01)`:
 
-* panel 1 t: 17.15 -> **15.56** against V5's ~14.5;
-* panel 2 t: **6.76 -> 2.87** against V5's ~2.48, i.e. the Poisson t was inflated ~2.4x;
-* panel 3 n: 79 -> **86**, now inside V5's 79-92 band.
+* panel 1 t: 17.15 -> **15.56** against V5's corrected 13.98;
+* panel 2 t: **6.76 -> 2.87** against V5's corrected 3.03, i.e. the Poisson t was inflated ~2.4x;
+* panel 3 n: 79 -> **86**, against V5's corrected 120.
 
 Panel 2's mean r collapses from +0.174 to +0.073, which is the signature of the readout
 mismatch: cell 26 scores predictions as `np.sum(regressors_ses * coeffs_ses_neuron, axis=1)`
@@ -479,12 +511,16 @@ mismatch: cell 26 scores predictions as `np.sum(regressors_ses * coeffs_ses_neur
 predictor and the correlations were inflated. Under ElasticNet the readout is the right one
 for the model, and the effect sizes land in V5's range.
 
-What remains is a **neuron-count** difference (623 vs V5's ~465 in panel 1), i.e. which
+~~What remains is a **neuron-count** difference (623 vs V5's ~465 in panel 1), i.e. which
 neurons survive the finite-correlation filter, not how strong the effect is. That is the
-sharp question for `../HANDOFF_V5_VS_ELGABY.md`.
+sharp question for `../HANDOFF_V5_VS_ELGABY.md`.~~ **Withdrawn 2026-10-08:** the ~465 was the
+superseded pool. Under the corrected rule V5 gives **610** against his code's 623, a 2 % gap,
+and on Poisson 573 / 298 / 73 against his 581 / 296 / 79. There is no neuron-count gap left to
+explain, and `HANDOFF_V5_VS_ELGABY.md` §8 is answered.
 
-**On the 90 deg panel (ED Fig 8a).** `ELASTICNET_V5.md` treats it as unreproduced (79-92
-neurons at t <= 1.8). Running his own code gives a *significant* result on both models --
+**On the 90 deg panel (ED Fig 8a).** `ELASTICNET_V5.md` treated it as unreproduced (79-92
+neurons at t <= 1.8); `../../code/PANEL_POOL_CORRECTION.md` **retracted that** on 2026-09-08
+under the corrected pool (V5 Poisson t 3.14). Running his own code gives a *significant* result on both models --
 t = 2.67 (Poisson) and t = 2.13 (ElasticNet), against the paper's t = 2.53 -- on 79-86
 neurons rather than the published 224. So the panel reproduces in direction and
 significance while resting on roughly a third of the reported neurons.
@@ -539,7 +575,8 @@ So the sleep / replay results of Figure 7 have **not** been reproduced for PFC, 
 21-of-25-recday sleep-chain validity above was never exercised. Unblocking needs a declared
 edit that rebuilds the 18-column table from the 12-column task sheet plus the 6-column
 `_sleep` sheet (or rewrites cell 11 to read both), then a re-run. This is the entry point for
-the TODO item "sleep analysis: rerun PFC and run LEC"; LEC has no Figure7 run at all.
+the TODO item "sleep analysis: rerun PFC and run LEC". *(Corrected 2026-10-08: LEC Figure7 ran
+2026-09-18, job 3644578, 23 cells, 0 error outputs — see `../mFC_schema-main_unblocked_lec/LEC_REPRODUCTION.md`.)*
 
 #### Unblocked 2026-09-15 — what was fabricated, and on what evidence
 
@@ -645,6 +682,13 @@ Secondary numbers: cell 61/67 circular- and forward-angle betas are small and no
 his stored run either (t -0.85 / +1.02); ours are -1.3 / -1.3. Cell 74 within-vs-between: not
 reproduced in either of our runs at the paper's level (paper t = -1.80, P = 0.036 one-sided).
 
+*Correction, 2026-09-29.* The row "recdays dropped by cell 87 (< 10 pairs)" and the diagnosis
+above both mislabel what cell 87 drops. Cell 87 prints "Not used" and drops a recday only when it
+has **no** co-anchored pair in any sleep stage. The 10-pair rule acts per recday x stage and arm:
+cell 87 sets that arm's r to NaN, and cell 89 drops the unit. So his 13 / 25 are recdays with zero
+co-anchored pairs, which makes the gap to our 1 / 21 a stronger sign that the anchoring differs.
+Found while writing up the LEC run (`LEC_REPRODUCTION.md`, Figure7 results).
+
 
 ### `Figure2_UMAP` — queued, partial by construction
 
@@ -722,3 +766,247 @@ the intact retrospective correlation files by re-running cells 32/38 of the depo
 (`executed/Figure5_Regression_figs_only.ipynb`), and the prospective ones by the same cells of
 the rebuilt variant (`executed/Figure5_Regression_prospective_figs_only.ipynb`). The full-run
 executed notebooks are unchanged records.
+
+## 2026-10-08 — Full audit of both runs, and the anchoring measured against his stored outputs
+
+Prompted by a question about `Forward_distance_vs_corr_Allsleep.svg` (Fig. 7d): is the sleep
+activity rebinned to 250 ms, and does the figure subselect state-tuned neurons. **Both are
+answered no-action**, and chasing the real cause produced the first measurement of our
+anchoring against his.
+
+### The two Figure 7 questions
+
+* **250 ms rebinning is present and active.** `Figure7.ipynb` cell 35:
+  `bin_length_original=25`, `bin_length=250`, `factor=10`, writing
+  `Sleepcorr_matrix_rebinned_dic['250']`, which cell 59 line 242 is the sole consumer of. A
+  25 ms matrix is also built in cell 32 and read **nowhere in the notebook** — dead code, and
+  the likely reason this looked doubtful. Both executed runs carry these lines unmodified.
+* **No state-tuning subselection, by design.** `Figure7.ipynb` contains zero occurrences of
+  `State_95`, `State_99`, `neurons_tuned` or `tuning_state_boolean`. Its only neuron gates are
+  the sleep firing-rate threshold (cell 28) and the anchoring booleans, which are full-length
+  over all neurons. `State_95` enters `Figure5_Figure6` cell 37 only to build a polar
+  histogram Figure 7 never reads. Adding a tuning filter would be a deviation, not a repair.
+
+### The anchoring, scored against his stored outputs for the first time
+
+This document previously stated the anchoring "was never checked against his stored outputs
+at the level of anchored fractions or lags". It can be: he ran every cell of
+`Figure5_Figure6` and `logs/deposit_outputs/Figure5_Figure6.outputs.json` keeps what they
+printed. Cell indices align 1:1 (112 cells; the F2-06 +1 shift is Figure2 only).
+`_preflight/94_score_anchoring.py` does it; results in `logs/anchoring_score.{json,md}`.
+
+| deposit cell | quantity | his | ours |
+|---|---|---|---|
+| 34 | state-tuned n | 738 | **738** |
+| 34 | t, all state-tuned | 22.64 | **20.21** |
+| 34 | n / t, non-zero-lag 30° | 285 / 7.48 | **307 / 5.72** |
+| 34 | n / t, non-zero-lag 90° | 135 / 7.07 | **164 / 3.82** |
+| 40 | anchor-angle histogram | — | cosine **0.951**, sum 688.9 vs 678.4 |
+| 42 | total coherent proportion | 0.4041 | **0.3578** (264.1 of 738 vs 298.2) |
+| 42 | two-proportion z | 6.31 | **4.50** |
+| 59 | anchor-angle histogram, non-zero-lag | — | cosine **0.942**, sum 171.0 vs 153.3 |
+| 61 | coherent proportion, non-zero-lag | 0.3590 | **0.3608** |
+| 62 | pool n | 314 | **288** |
+| 69 | n / t, all neurons | 737 / 11.72 | **736 / 9.08** |
+| 72 | lag-distribution n | 681 | **637** |
+
+20 of 28 comparisons differ. The pattern is one-directional: the neuron count entering is
+**exact** (738) and the angular distribution is close (cosine 0.95), but every effect size is
+weaker, fewer neurons come out coherent, and the per-pool counts at cell 34 are *larger*
+(307 vs 285, 164 vs 135). That is a noisier anchor assignment — more neurons scrape past a
+threshold with weak values, fewer are coherent, every t falls. It is the quantity Fig. 7d's
+close arm depends on, which is why the far arm reproduces and the close arm does not.
+
+**This supersedes the "our anchoring is more permissive" reading above**, which was inferred
+from recday drop counts rather than measured.
+
+### Where the divergence enters, and three mechanisms ruled out
+
+The divergence is already present at cell 34, whose only data input is cell 31, whose only
+data input is `Phase_shifted_maps` from cell 17. **So it enters at or before cell 17 — upstream
+of the anchor assignment (cell 44) and the anchored gate (cell 37).** Those two inherit it
+rather than cause it. Ruled out, each by measurement:
+
+1. **The `Location_` mean-vs-`take_max` binning choice (F2-06).** Our 360-bin `Location_` is
+   10.5 % non-integer on PFC, and cell 17 line 203 selects occupancy with `==`, which drops a
+   non-integer bin outright. But rebuilding six sessions with `take_max=True` gives **3.1 %
+   fewer** node-occupancy matches, not more: `take_max` prefers edge IDs 10-21 over node IDs
+   1-9 in any bin spanning both, exactly the bias the mean choice was made to avoid. The
+   binning moves the wrong way and cannot be the cause.
+2. **The unseeded `Phase_` goal-progress tuning.** Cell 31 loads it at line 19 and forms
+   `used_boolean = logical_and(Phase_boolean, State_boolean)` at line 22 — and **never uses
+   it again**. Dead code; the stochastic shuffle does not reach the anchoring.
+3. **Session selection.** On the 3 of 25 recdays where his deposited `Num_trials_dic2` covers
+   every row, our `non_repeat_ses` is **identical**. On the other 22 he deposited nothing, so
+   this is undecidable rather than refuted.
+
+What remains is the 360-bin `Neuron_` arrays and `tuning_phase_boolean_max_`, both regenerated
+by us and neither deposited. **Not separable without his intermediates.**
+
+### Errors of claim corrected in this document
+
+* The V5 comparison columns throughout quoted the **superseded every-fold pool**
+  (447-481 / 246-287 / 79-92), three weeks after `../../code/PANEL_POOL_CORRECTION.md`
+  (2026-09-08) replaced it with a per-panel rule. Corrected above. The headline consequence:
+  his code's 623 against V5's **610** on panel 1, and on Poisson 581 / 296 / 79 against
+  **573 / 298 / 73** — the two pipelines agree, and §8 of `../HANDOFF_V5_VS_ELGABY.md` is
+  answered.
+* The "ED Fig 8a is unreproduced" claim had been formally **retracted** by that same document.
+* `_preflight/96_extract_figure5_stats.py` hardcoded the superseded band and printed it on
+  every run of **both** datasets; it now prints the corrected value for the region and model.
+
+### New checks
+
+| script | what it does | result today |
+|---|---|---|
+| `93_scan_error_cells.py` | every error cell in `executed/`, against an allow-list | PASS; the 4 allowed are `Figure2_UMAP` 26/28/33 and `Figure3_fast` 89 |
+| `94_score_anchoring.py` | the table above | 20 of 28 differ |
+| `97_structural_checks.py` | ported from the LEC copy | see below |
+
+`97` had never run on PFC. First run: 324 regressor columns on 25/25; phase arrays correct on
+196/196 sessions; **mod-3 stripe purity 100 %, off-stripe 0, on all 25 recdays and both
+models** — the strongest available test that the 324 anchoring regressors are built and
+indexed correctly, and it had only ever been run on LEC; `State_99 ⊆ State_95` on 80 recdays.
+Porting it surfaced two deposit properties worth recording: `me10_14122021_15122021` yields
+**4 coefficient folds against 6 selected sessions**, because cell 15 `continue`s past a
+session whose files fail to load (that recday's session 5 has `trialtimes` but no
+`Neuron_raw`), so a fold pairs with `found_ses`, not `non_repeat_ses`; and Figure2 cell 16
+writes 412 `speed_` files for 416 cohort sessions, the 4 documented "speed_dic not made" cases.
+
+### Figure 7 figures were the variant's
+
+All 16 Figure 7 SVGs carried the 14:25 timestamp of `Figure7_elgaby_state.ipynb` — the
+12-recday truncated variant — which ran 5 minutes after the 21-recday main run and overwrote
+it under identical filenames. The numbers in this document came from the executed notebooks
+and are unaffected. Fixed by `VARIANT-F7S-02`, which appends `elgabystate_` to the variant's
+`Output_folder`; every savefig is string concatenation, so one change covers all nine and
+cannot miss one. Both runs were then re-run.
+
+### Not established
+
+* Whether our anchoring or his is the better estimate — only that they differ, and how.
+* The `_fast_pearson_r` substitution behind **every** Figure 3 number is backed by a prose
+  claim of agreement to 4.2e-17 with no script in the repo.
+* Figure 3 and Figure5_Figure6 have no automated check beyond `94_score_anchoring.py`.
+* The audit (`90_audit_diff.py`) inspects only added lines, never deletions, and the variant
+  notebooks are outside its scope by design — so every Figure 3 number and the headline
+  ElasticNet Figure 5 numbers have no audit over the code that produced them.
+
+## 2026-10-12: the Figure 7 V panel — what it compares, and four flaws in how it is summarised
+
+Prompted by the question of whether `Forward_distance_vs_corr_Allsleep.svg` compares only
+co-anchored pairs. It does. Establishing that turned up four properties of cells 59, 76, 82 and
+86 that are worth recording, none of them changed, per the standing rule.
+
+### What the panel actually compares
+
+Tracing cell 86 back through 82, 76 and 59: the panel is built from `phase_place_diff == 0`
+alone, and that group requires, for **both** neurons of a pair,
+
+* `Best_anchor_all[:,0] == phase` and `Best_anchor_all[:,1] == location` — the same anchor
+  phase *and* the same anchor location. `locations_next` comes from
+  `np.where(mindistance_mat[location] == 0)`, and `mindistance_mat` is graph distance on the
+  3×3 maze with zero only on the diagonal, so that resolves to the location itself;
+* membership of `Anchored_bool` (`use_anchored=True`);
+* firing-rate stability across sleep (`use_FRstable=True`).
+
+A pair-level filter then drops any pair whose spatial maps correlate at or above 0.9. Cell 76
+writes `cross_corr_dic` only under `if phase_place_diff==0`, so no other group reaches the panel.
+
+The sample this leaves is small. PFC has **560 anchored neurons over 21 recdays spread across 27
+anchor bins**, about one neuron per bin per recday. Counting co-anchored pairs from
+`Best_anchor_all` and `Anchored_bool` alone gives 605, 5.8 % of the 10,369 pairs among anchored
+neurons; that is an upper bound, since it applies neither the firing-rate filter nor the
+spatial-correlation cut. The panel's own counts, measured below, are **361 to 424 pairs per sleep
+stage** and 2,764 stage-pair observations in all, divided across 8 angle bins.
+
+### Flaw 1 — the per-stage panels are computed and discarded
+
+Cell 82 draws one panel per sleep stage with `plt.show()` inside the loop and saves none of
+them; only cell 86's average reaches disk. The per-stage result is the stronger evidence and was
+invisible for that reason alone. Reading the arm slopes out of the stored notebooks — close arm
+over 0–180°, far arm over 180–360°, a V wanting negative then positive:
+
+| run | stages with the V pattern |
+|---|---|
+| his deposited PFC | 6 of 8 |
+| our PFC re-run | 5 of 8 |
+| our LEC v4 | **8 of 8**, close arm p < 0.001 in 7 of 8 |
+
+The per-stage PNGs are now extracted to `Output_folder/ephys/perstage/` in both trees, with
+`CONTACT_SHEET_vshape.png` showing all three runs against each other.
+
+### Flaw 2 — cell 86 averages the stages unweighted, with a plain `np.mean`
+
+`means_mean = np.mean(means_all, axis=1)` gives every sleep stage equal weight regardless of how
+many pairs it contributed, and propagates NaN rather than ignoring it. Both halves bite:
+
+* **Equal weighting.** LEC v4 `post5` returns r = −1.000, p = 1.000 on the close arm, which is a
+  two-point correlation. It enters the saved average weighted the same as a stage holding
+  hundreds of pairs.
+* **NaN propagation.** A bin empty in *one* stage is NaN in the average and is not plotted. The
+  **LEC v4 saved aggregate is missing bins 1 and 2 entirely** — 6 of 8 bins drawn — while all 8
+  of its per-stage panels show the V. The saved figure understates its own result.
+
+`UNBLOCK-F7-05` (reporting only, 2026-10-12) records n per bin per stage and which bins were
+lost, since neither cell 82 nor 86 reports any count.
+
+### Flaw 3 — `np.logical_and` called with three conditions
+
+Cell 59, twice (once in each of the two neuron-selection blocks):
+
+```python
+neurons_anchoredX = np.where(np.logical_and(Best_anchor_all[:,0]==phase,
+                                            Best_anchor_all[:,1]==location,
+                                            FR_bool==True))[0]
+```
+
+The third positional argument of `np.logical_and` is `out`, not a third condition. The call
+computes `(phase match) & (location match)`, writes it into the temporary `FR_bool==True` array
+and returns that, so **the firing-rate term is silently dropped**. Harmless here only because
+`use_FRstable=True` re-applies it four lines later via `np.intersect1d(..., FR_included)`. It
+would take effect immediately if that flag were ever set `False`. The same pattern appears in the
+`'Non_coanchored'` branch with `np.logical_or`.
+
+### Flaw 4 — groups 1–4 of cell 76 are inert, in his run as well as ours
+
+Cell 59 builds `Sleepcorr_pairs_dic` over `groups_ = np.hstack((0,'Non_coanchored'))`, so its
+only keys are `0` and `'Non_coanchored'`. Cell 76 iterates `np.arange(num_phase_place_diffs_)`,
+i.e. 0–4. Keys 1–4 hit the recursive defaultdict, return empty and are skipped by the
+`len(...)>0` test. This is true of his run too: his stored cell 76 output prints the stage names
+under groups 1–4 because `print(stage)` sits *above* that cell's `try`, not because those groups
+held data. `UNBLOCK-F7-02`'s reconstruction of `num_phase_place_diffs_=5` is consistent with it,
+and the V panel is unaffected either way.
+
+### The bin counts, measured (`UNBLOCK-F7-05`, 2026-10-12)
+
+`Figure7_binreport.ipynb` in both trees, verified reporting-only: the printed output of all 16
+cells that print is **identical** to the previous run after stripping kernel PIDs and wall-clock
+timers, so no plotted number moved. `99_vshape_summary.py` reads the JSON; its `--selftest`
+accepts a planted V, reproduces the bin-deletion failure, and rejects both a flat curve and a
+rogue low-n stage.
+
+PFC co-anchored pairs per angle bin, summed over the 8 sleep stages:
+
+| bin | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
+|---|---|---|---|---|---|---|---|---|
+| pairs | 550 | 239 | 304 | **189** | 315 | 212 | 365 | 590 |
+
+Two things follow.
+
+**Bin 3 is the sparsest bin and it is the panel maximum.** Bin 3 (135–180°) holds 189 pairs
+against 550 and 590 at the ends, and it sits immediately left of the dashed vertex at 3.5 where
+the V should bottom out. The count distribution is U-shaped by construction, because co-anchored
+neurons tend to have similar preferred phases and so cluster at small and large forward angles.
+
+**Weighting does not rescue the PFC panel.** The three estimators give V scores of +0.0282
+unweighted, +0.0282 NaN-tolerant and +0.0249 n-weighted, and bin 3 remains the maximum in all
+three. No bin is NaN on PFC, so the NaN failure does not arise here. The PFC average is noisy
+because the whole co-anchored sample is small -- 361 to 424 pairs per stage, 2,764 stage-pair
+observations in all -- not because of how the stages are combined. `post5` contributes only 70
+pairs from 4 recdays.
+
+On LEC v4 the NaN failure does arise and is decisive: `post5` holds **12 pairs from a single
+recday**, with **zero** in bins 1 and 2, which is exactly why those two bins are NaN in the saved
+average. Replacing `np.mean` with `np.nanmean` restores them at 0.0336 and 0.0429 and leaves the
+V score unchanged at +0.0533. Details in `mFC_schema-main_unblocked_lec_v4/LEC_REPRODUCTION.md`.

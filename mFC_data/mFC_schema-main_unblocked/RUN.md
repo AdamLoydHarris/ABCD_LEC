@@ -10,7 +10,7 @@ locking it blocks collaborators too.
 
 * `REPRODUCTION.md` — the write-up: what was blocking, what we fabricated and on what
   evidence, results per notebook, and every way our run differs from the deposit.
-* `EDITS.md` — the 20 edits, each with the deposited line and why it is unavoidable,
+* `EDITS.md` — the 22 edits, each with the deposited line and why it is unavoidable,
   plus a "deliberately not edited" section. Generated, so it cannot drift.
 * `_preflight/` — all new code. Nothing here is an edit to a deposited notebook.
 
@@ -74,6 +74,14 @@ bash _preflight/50_sbatch_notebook.sh "Figure7.ipynb" --dependency "afterok:$J" 
 bash _preflight/50_sbatch_notebook.sh "Figure2_UMAP.ipynb" --allow-errors  # partial by design
 
 $E _preflight/95_checkpoints.py             # score against his stored outputs
+
+# Figure 7 bin counts (UNBLOCK-F7-05, reporting only). --tag keeps the run log apart and
+# --out keeps the verified executed notebook; the edit writes vshape_bin_n.json and
+# assigns no existing name, so every plotted number is unchanged.
+bash _preflight/50_sbatch_notebook.sh "Figure7.ipynb" --tag binreport \
+     --out Figure7_binreport.ipynb --timeout 3600 --time 2:00:00
+$E _preflight/99_vshape_summary.py --selftest   # synthetic accept + two rejections
+$E _preflight/99_vshape_summary.py              # n per bin, and the three stage averages
 ```
 
 `40_run_notebook.py` executes cell by cell with progress, stops on the first real
@@ -90,6 +98,15 @@ carries measures `Max_bins`/`Correlations`/`angle_units` with **no `Angles`**, a
 3 of 25 recdays. Figure7 cell 59 needs `..._Angles_...`, which only Figure3 cell 45 writes
 — so **Figure3 must run, including cell 45** (which El-Gaby never ran: `execution_count`
 is `null`).
+
+### `--allow-errors` reports "0 failed" -- count error outputs instead
+
+Under `--allow-errors`, nbclient records a cell's exception in the executed notebook and
+continues, so `40_run_notebook.py`'s summary line says `0 failed` and the job exits 0 even
+when cells raised. Measured 2026-10-08: `Figure2_UMAP` carries **three** `NameError` cells
+behind a clean `EXIT=0`. Read failures from the executed notebook, or run
+`_preflight/93_scan_error_cells.py`, which does it against an allow-list of the
+known-by-design failures and exits non-zero on anything else.
 
 ## Known limits
 

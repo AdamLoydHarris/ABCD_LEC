@@ -467,6 +467,7 @@ def main():
                     help="'backbone' = the 10-regressor design; 'full' = all 16, matching "
                          "w1_refit's `all_regressors` section (adds goal_progress_distance, "
                          "the pokes, and the loop-anchored family)")
+    __import__('recday_registry').add_data_version_arg(ap)
     args = ap.parse_args()
 
     global ACTIVE_REG
@@ -479,7 +480,10 @@ def main():
     data_dic = recdays = designs = designs_j = None
     if needs_data:
         import glm_analysis_v2 as glm
-        data_dic = glm.load_data_dic(validate=False, apply_exclusions=True, verbose=True)
+        data_dic = glm.load_data_dic(
+            path=str(__import__('recday_registry').resolve_data_version(
+                getattr(args, 'data_version', None))[1]),
+            validate=False, apply_exclusions=True, verbose=True)
         recdays = one_recday_per_mouse(data_dic)
         if args.recdays:
             recdays = recdays[:args.recdays]

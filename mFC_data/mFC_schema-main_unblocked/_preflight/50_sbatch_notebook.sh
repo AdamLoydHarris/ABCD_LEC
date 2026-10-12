@@ -23,15 +23,21 @@ NB="${1:?usage: 50_sbatch_notebook.sh <Notebook.ipynb> [--dependency spec] [runn
 shift || true
 
 DEP=""
+WALL="24:00:00"   # --time <spec> overrides
+TAG=""            # --tag <name> suffixes the job name, sbatch script and run log, so two
+                  # submissions of the same notebook do not overwrite each other's run_<BASE>.log
 ARGS=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --dependency) DEP="$2"; shift 2 ;;
+        --time) WALL="$2"; shift 2 ;;
+        --tag) TAG="$2"; shift 2 ;;
         *) ARGS+=("$1"); shift ;;
     esac
 done
 
 BASE="$(basename "$NB" .ipynb | tr ' ' '_')"
+[ -n "$TAG" ] && BASE="${BASE}_${TAG}"
 mkdir -p "$LOG"
 SCRIPT="$LOG/sbatch_${BASE}.sh"
 
@@ -41,7 +47,7 @@ cat > "$SCRIPT" <<EOF
 #SBATCH --partition=cpu
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=64G
-#SBATCH --time=24:00:00
+#SBATCH --time=$WALL
 #SBATCH --output=$LOG/slurm_${BASE}_%j.out
 #SBATCH --error=$LOG/slurm_${BASE}_%j.out
 

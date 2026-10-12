@@ -175,9 +175,13 @@ def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--recdays", nargs="*", default=None)
-    p.add_argument("--data-dic", default="data/processed_data/data_dic_lec.pkl")
+    p.add_argument("--data-dic", default=None,
+                   help="wake data_dic pickle; default resolves --data-version via the registry")
+    p.add_argument("--data-version", default=None,
+                   help="data_dic build (default v4); also tags --out unless --out is given")
     p.add_argument("--data-root", default="data")
-    p.add_argument("--out", default="data/ph_outputs")
+    p.add_argument("--out", default=None,
+                   help="output tree; default data/ph_outputs tagged by --data-version")
     p.add_argument("--n-pca", type=int, default=6)
     p.add_argument("--n-shuffles", type=int, default=50)
     p.add_argument("--min-trials", type=int, default=6)
@@ -190,7 +194,15 @@ def parse_args(argv=None):
     p.add_argument("--recday-average", dest="recday_average", action="store_true",
                    help="one cross-session pooled ring per recday (session-weighted, "
                         "A-anchored) instead of per-session rings")
-    return p.parse_args(argv)
+    a = p.parse_args(argv)
+    import recday_registry as rr
+    version, dd_path = rr.resolve_data_version(a.data_version)
+    a.data_version = version
+    if a.data_dic is None:
+        a.data_dic = str(dd_path)
+    if a.out is None:
+        a.out = "data/ph_outputs" + rr.version_suffix(version)
+    return a
 
 
 if __name__ == "__main__":

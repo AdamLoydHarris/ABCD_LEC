@@ -39,6 +39,10 @@ if [ "$DATASET" = "lec" ]; then SCRIPT=code/run_lda_reward_progress.py;
 else SCRIPT=mFC_data/code/run_lda_reward_progress.py; fi
 
 echo "Running reward x goal-progress LDA: dataset=$DATASET extra=$*"
+set +e
 python "$SCRIPT" --dataset "$DATASET" "$@"
+rc=$?
+set -e
 
-echo "All done! $(date)"
+echo "All done! $(date) EXIT=$rc"
+exit $rc

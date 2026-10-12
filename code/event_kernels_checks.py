@@ -35,18 +35,21 @@ def _nan_equal(a, b):
 def main() -> int:
     dd = g3.load_data_dic(version='v4', validate=True, apply_exclusions=True, verbose=True)
     rows = []
-    for rd in sorted(dd):
+    recdays = sorted({f.split('full_sessions_')[1].split('.')[0]
+                      for f in os.listdir(ek.LEC_FULL) if f.startswith('full_sessions_')})
+    for rd in recdays:
         rec = ek.load_recday(rd, 'lec')
         for sess in rec['sessions']:
             s = sess['session']
-            if s not in dd[rd]:
-                rows.append(dict(recday=rd, session=s, status='not in pickle'))
+            meta = dict(recday=rd, session=s, session_type=sess['session_type'], n_trials=sess['n_trials'])
+            if s not in dd.get(rd, {}):
+                rows.append(dict(**meta, status='not in pickle'))
                 continue
             ref = dd[rd][s]
             k = sess['first_A_bin']
             nr = np.asarray(ref['Neuron_raw'])
             core = sess['counts'][:, k:k + nr.shape[1]]
-            r = dict(recday=rd, session=s, counts=np.array_equal(core, nr))
+            r = dict(**meta, status='compared', counts=np.array_equal(core, nr))
             xy_ref = ref.get('XY_raw')
             if xy_ref is not None:
                 n = min(len(xy_ref), sess['xy'].shape[0] - k)
@@ -94,7 +97,14 @@ def main() -> int:
         print(f"time since reward, max |ours - V3| over sessions: {df['blk_tfr_max_abs_diff_s'].max():.4f} s")
     print('->', p)
     bad = df[[c for c in bool_cols]].fillna(True).astype(bool).all(axis=1) == False   # noqa: E712
-    return 1 if bad.any() else 0
+    # A session absent from the pickle has NaN in every column above, which reads as a pass.
+    miss = df[df['status'] == 'not in pickle']
+    print(f"{int((df['status'] == 'compared').sum())} sessions compared, {len(miss)} not in the pickle "
+          f"({miss.groupby('session_type').size().to_dict()})")
+    lost = miss[(miss['session_type'] == 'ABCD') & (miss['n_trials'] >= ek.MIN_TRIALS)]
+    if len(lost):
+        print('analysis sessions missing from the pickle:', list(zip(lost['recday'], lost['session'])))
+    return 1 if bad.any() or len(lost) or not (df['status'] == 'compared').any() else 0
 
 
 if __name__ == '__main__':

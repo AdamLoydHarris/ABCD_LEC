@@ -33,13 +33,13 @@
 > re-run and fails, SLURM cancels the dependents (`DependencyNeverSatisfied`).
 
 A copy of `../mFC_schema-main_unblocked/` (the PFC run) regenerated from the untouched
-deposit `../mFC_schema-main/` with the PFC run's 20 edits plus **two LEC-only edits**
+deposit `../mFC_schema-main/` with the PFC run's 22 edits plus **eight LEC-only edits**
 (`UNBLOCK-LEC-01`, `UNBLOCK-LEC-02`; see `EDITS.md`). Everything this copy reads and writes
 lives under `../lec_replication_run/`; the PFC run in `../replication_run/` is never touched.
 
 * `LEC_REPRODUCTION.md` -- the write-up: what was fabricated and on what evidence, every way
   the LEC run differs from the PFC one, results, and the design flaws documented (not fixed).
-* `EDITS.md` -- the 22 edits (generated; the audit asserts a bijection with the notebooks).
+* `EDITS.md` -- the 30 edits (generated; the audit asserts a bijection with the notebooks).
 * `../../LEC_PORT_HANDOFF.md` -- the brief this copy implements.
 * `../mFC_schema-main_unblocked/RUN.md` and `REPRODUCTION.md` -- the PFC run this mirrors.
 
@@ -194,3 +194,7 @@ undeposited inputs even on PFC.
 > `12_make_figure7_inputs.py` after any upstream notebook writes new files, immediately before
 > submitting Figure7**; it is idempotent and only adds missing links (1125 added here).
 > Resubmitted as 3644540.
+> Resubmitted again as 3644578 after LEC-08 (3644540 died on the empty `post6` stage): 23 cells,
+> 0 error outputs, EXIT=0, 5 min.
+> **2026-09-29.** Figure7 is in scope and done; the "Out of scope" line above predates the sleep
+> source. Results: `LEC_REPRODUCTION.md` §"Results, 2026-09-18".

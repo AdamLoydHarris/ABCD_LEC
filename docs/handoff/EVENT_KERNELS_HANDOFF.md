@@ -206,6 +206,14 @@ Design choices inside `event_kernels.py`, each with its reason:
   - Fast (tau <= 8 s) and slow groups.
   - Untracked blocks are coded **missing** (kinematic columns 0 + a `kin_missing` indicator),
     not dropped. That keeps the PFC pre-A rows and the entry kernel's first seconds.
+  - `kin='strict'` (added 2026-10-02 after the full G5 leak; default `'full'` unchanged, pinned
+    by `code/event_kernels_pin.py`). It adds three things:
+    - decile one-hots of each fast-bank trace in `kin_fast`;
+    - `kin_missing` split into before-first-A, after-last-trial and gap indicators;
+    - A / reward / poke-exit columns zeroed on untracked rows.
+
+    Without it, PFC's untracked segments let the event blocks absorb kinematics. The diagnosis
+    is in `code/EVENT_KERNELS.md`.
 - **Place:** fractional occupancy of codes 0-21; unknown = 0 is its own category.
 - **Stage 1:**
   - both X and FR centred within session, so per-session offsets are exact;
@@ -254,6 +262,49 @@ Design choices inside `event_kernels.py`, each with its reason:
 
 ## 7. Status
 
+### 20:45 UTC, 2026-10-02: M1 complete, stopped for the user's go-ahead
+
+- Full gates under `--kin strict` pass every row in both datasets (jobs 3675492/93, `EXIT=0`).
+  - PFC tau 2 s speed units: 0/8 locked (5/8 under the default).
+  - LEC: 2/8, Fisher p 0.24 against noise.
+  - Every remaining hit has a noise-sized cpd (<= +0.0007).
+  - Planted-unit recovery is unchanged.
+- The M1 report is the first dated entry of `code/EVENT_KERNELS.md`.
+- **Decisions put to the user before M2:**
+  1. Run M2 with `kin='strict'` (recommended) or the default.
+  2. MIN_TRIALS = 10 leaves ly05_20250618_20250619 with 1 analysis session, so no held-out fit
+     is possible. ah08_20250624_20250625 keeps 2.
+  3. Whether to commit the post-57eac39 work: the `strict` option, the gate fixes, the pin and
+     diagnostic scripts, the checks guard, and these documents.
+- **Uncommitted since 57eac39:** `code/event_kernels.py` and `code/event_kernels_synthetics.py`
+  (+ mirrors), `code/event_kernels_checks.py`, `code/event_kernels_pin.py`,
+  `code/event_kernels_leak_diag.py`, `code/EVENT_KERNELS.md` and this file.
+
+### 19:40 UTC, 2026-10-02: full gates; the G5 leak; `kin='strict'`
+
+- The data-path checks pass (job 3675174):
+  - the loader equals the v4 pickle in 211/211 sessions;
+  - the blocks equal V3's in 177/177;
+  - time since reward agrees to 1.1e-13 s.
+- Full population-drift gates pass in both datasets (jobs 3675172/73).
+- Full event-kernel gates, linear bank (jobs 3675170/71): every row passes as first written.
+- The gate itself was faulty. G5 and G9 did not count the A+reward joint, which G3/G4 count as
+  a hit, and G5 pooled fast and slow speed units. Fixed in `gates()`, one hit rule everywhere.
+  Re-scored (`gates_rescored_*.csv`), PFC's tau 2 s speed units are locked in 5/8 (Fisher
+  p 0.002 vs noise): a real fail.
+- `code/event_kernels_leak_diag.py` locates the leak. It comes mostly from PFC's untracked
+  segments before the first A and after the last trial, which one missing indicator could not
+  separate but the A / reward pre-event and overflow columns could. Curvature from the linear
+  bank is a smaller path.
+- `kin='strict'` removes it in the diagnostic: the joint's gain is <= 0 on tracked rows for
+  every unit, and near 0 on untracked rows.
+- **Running:** full gates under `--kin strict` (jobs 3675492/93, about 90 min); quick
+  3675490/91.
+- The quick runs of an earlier deciles-only option (`_kin-full_nl` pickles) are superseded. Its
+  full runs were cancelled.
+
+**M1 still to do** (both done at 20:45): read the full `strict` gates; M1 report to the user.
+
 ### 17:45 UTC, 2026-10-02: WP0 complete, quick gates pass, checkpoint commit
 
 **Done and measured.**
@@ -299,8 +350,8 @@ modules, so there is no version bump.
    - Place units went to 8 (4 per node).
    - A `place=False` arm is reported as G9's positive control. It shows that G9 can fail.
 
-**Committed and pushed** as the checkpoint commit, with the section 3 scope. Find it with
-`git log -1 -- code/event_kernels.py`.
+**Committed and pushed** as `57eac39` (origin/main, 2026-10-02), with the section 3 scope. The
+push also published the user's two unpushed 2026-09-23 snapshot commits (`d406dd1`, `6035467`).
 
 **M1 still to do, in order.**
 
@@ -379,6 +430,12 @@ sbatch --job-name=ek_syn_lec_quick sbatch_files/event_kernels.sbatch code/event_
 sbatch --job-name=ek_syn_pfc_quick sbatch_files/event_kernels.sbatch mFC_data/code/event_kernels_synthetics.py --dataset pfc --quick
 sbatch --job-name=pd_syn_lec_quick sbatch_files/event_kernels.sbatch code/population_drift_synthetics.py --dataset lec --quick
 sbatch --job-name=pd_syn_pfc_quick sbatch_files/event_kernels.sbatch mFC_data/code/population_drift_synthetics.py --dataset pfc --quick
+# the conservative kinematic design: pin the default first, then gate it
+python code/event_kernels_pin.py --against 57eac39            # exit 0 = default bit-identical
+sbatch --job-name=ek_syn_lec_st sbatch_files/event_kernels.sbatch code/event_kernels_synthetics.py --dataset lec --kin strict
+sbatch --job-name=ek_syn_pfc_st sbatch_files/event_kernels.sbatch mFC_data/code/event_kernels_synthetics.py --dataset pfc --kin strict
+# where a leak comes from: the joint's held-out gain by row type, both designs
+sbatch --job-name=ek_diag_pfc --time=0-01:00 sbatch_files/event_kernels.sbatch code/event_kernels_leak_diag.py pfc me11_05122021_06122021
 # data-path checks (LEC, loads the v4 pickle)
 sbatch --job-name=ek_checks --mem=64G sbatch_files/event_kernels.sbatch code/event_kernels_checks.py
 ```

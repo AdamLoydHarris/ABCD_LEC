@@ -306,6 +306,7 @@ def main():
     ap.add_argument('--no-pokes-attach', action='store_true',
                     help='skip attach_pokes (leaves poke regressors all-zero)')
     ap.add_argument('--dry-run', action='store_true')
+    __import__('recday_registry').add_data_version_arg(ap)
     args = ap.parse_args()
 
     sections = list(SECTIONS) if args.all else (args.sections or [])
@@ -325,7 +326,11 @@ def main():
     print('W1 REFIT — 25 recdays, HD fixed, cross-validated')
     print('=' * 78)
 
-    data_dic = glm.load_data_dic(validate=True, apply_exclusions=True, verbose=True)
+    import recday_registry as _rr
+    _ver, _dd_path = _rr.resolve_data_version(getattr(args, 'data_version', None))
+    print(f'data_dic: {_dd_path.name}  (version {_ver})')
+    data_dic = glm.load_data_dic(path=str(_dd_path), validate=True, apply_exclusions=True,
+                                 verbose=True)
 
     # Without this the poke regressors are all-zero columns: their CPD comes back exactly
     # 0.00000 and they cost the design one rank each. That is how a "16-regressor" fit

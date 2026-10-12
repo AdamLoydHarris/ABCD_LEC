@@ -332,8 +332,8 @@ neural extraction is run.
 OpenEphys 0.6.6 restarts its sample count about 25 ms into some recordings and
 `extract_rsync_from_ttl` subtracted the stale first value. v4 takes the origin from the
 counter's final contiguous run: `ephys_rsync_v4/`, `neuron_raw_v4/`, `data_dic_lec_v4.pkl` and
-`data_dic_mec_v4.pkl`. The mEC pickle holds 34 of 36 recdays. Both bp02 2024-03-19 sorts read a
-nested duplicate recording inside `2024-03-19_11-58-14/`, which puts every later session 14.42 s
-late in every version. The repair is pending. `validate_alignment.py` now gates on speed, reward and wall-clock probes.
+`data_dic_mec_v4.pkl`. Both bp02 2024-03-19 sorts had read a nested duplicate recording inside
+`2024-03-19_11-58-14/`, putting every later session 14.42 s late in every version. They were
+re-sorted from the correct files on 2026-10-05, and the mEC pickle now holds all 36 recdays. `validate_alignment.py` now gates on speed, reward and wall-clock probes.
 v1 is not fixed: ly05_20250620_20250623 is off by 2.6-38.6 s in all 8 sessions in every existing
 result. That document's section 3 is the run order for new ephys, the July ABCDE week included.

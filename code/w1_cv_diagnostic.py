@@ -67,11 +67,14 @@ def main():
     ap.add_argument('--recdays', type=int, default=4)
     ap.add_argument('--mice', nargs='*', default=None,
                     help='restrict to these mice (default: one recday from each mouse)')
+    __import__('recday_registry').add_data_version_arg(ap)
     args = ap.parse_args()
 
     import glm_analysis_v2 as glm
 
-    data_dic = glm.load_data_dic(validate=True, apply_exclusions=True, verbose=True)
+    data_dic = glm.load_data_dic(path=str(__import__('recday_registry').resolve_data_version(
+        getattr(args, 'data_version', None))[1]), validate=True,
+        apply_exclusions=True, verbose=True)
 
     # One recday per mouse by default -- the first smoke test was all ah08, which is the
     # lowest-firing mouse and cannot speak for the cohort.

@@ -687,7 +687,7 @@ def _bump(centre, width, n_bins, circular=True):
 
 def make_synthetic_recday(kind, n_neurons=80, n_trials=18, n_tasks=6, noise=1.0,
                           config=None, seed=0, tone_width=6.0, tower_width=6.0,
-                          phase_width=25.0, gain=3.0):
+                          phase_width=25.0, gain=3.0, trial_times='legacy', **session_kw):
     """A data_dic-shaped synthetic recday that flows through the real pipeline unmodified.
 
     kind:
@@ -699,7 +699,16 @@ def make_synthetic_recday(kind, n_neurons=80, n_trials=18, n_tasks=6, noise=1.0,
       'noise'    — nothing                                          -> ~0.5
 
     Tasks are random 4-subsets of towers 1..9, matching the real overlap structure (§2.5).
+
+    `trial_times='session'`, a '+'-joined kind or a kind from SESSION_KINDS goes to
+    `_make_session_recday` (real-time Trial_times, drift and clock cells). The legacy path below
+    is untouched, so every existing number is reproduced exactly.
     """
+    if trial_times != 'legacy' or kind not in ('abstract', 'place', 'tone', 'noise'):
+        return _make_session_recday(kind, n_neurons=n_neurons, n_trials=n_trials,
+                                    n_tasks=n_tasks, noise=noise, config=config, seed=seed,
+                                    tone_width=tone_width, tower_width=tower_width,
+                                    phase_width=phase_width, gain=gain, **session_kw)
     config = config or CCGPConfig()
     rng = np.random.default_rng(seed)
     nbps, nst = config.num_bins_per_state, config.num_task_states
@@ -748,6 +757,111 @@ def make_synthetic_recday(kind, n_neurons=80, n_trials=18, n_tasks=6, noise=1.0,
             'Neuron_raw': np.zeros((n_neurons, int(tt.max()) + 1)),
             'Locs_raw': np.zeros(int(tt.max()) + 1),
             'Trial_times': tt.astype(float),
+        }
+    return {f'synth_{kind}': sessions}
+
+
+#: cell kinds of the session generator; join with '+' for mixtures, e.g. 'abstract+drift_axis'
+SESSION_KINDS = ('abstract', 'place', 'tone', 'noise', 'corridor', 'drift_axis',
+                 'drift_session', 'drift_code', 'clock')
+BIN_S = 0.025
+
+
+def session_trial_times(n_trials, rng, nst=4, leg_s=9.0, sigma=0.25, first_slow=2.0,
+                        end_shrink=0.72):
+    """(n_trials, 5) Trial_times in 25 ms bins: cumulative with no gaps, lognormal legs, trial 0
+    twice as slow, legs shrinking linearly to 0.72x (the measured last/first trial ratio)."""
+    scale = np.linspace(1.0, end_shrink, n_trials)
+    scale[0] *= first_slow
+    legs = leg_s * scale[:, None] * rng.lognormal(0.0, sigma, (n_trials, nst))
+    bins = np.maximum(np.round(legs / BIN_S), 4).astype(int)
+    edges = np.concatenate([[0], np.cumsum(bins.ravel())])
+    return np.stack([edges[k * nst:(k + 1) * nst + 1] for k in range(n_trials)]).astype(float)
+
+
+def _make_session_recday(kind, n_neurons=80, n_trials=18, n_tasks=6, noise=1.0, config=None,
+                         seed=0, tone_width=6.0, tower_width=6.0, phase_width=25.0, gain=3.0,
+                         drift_gain=3.0, drift_rot_bins=90.0, clock_width_s=2.0,
+                         corridor_width=8.0, n_repeat=0):
+    """Session-time synthetic: each warped bin also has a real time from the Trial_times.
+
+    Extra kinds (legacy kinds keep their meaning):
+      'corridor'   — fires mid-leg (bin 45 of the state) when the leg's route node is its node;
+                     the route node is a fixed random function of the leg's two towers
+      'drift_axis' — additive drift along one fixed direction, linear in session time, shared
+                     by every task
+      'drift_session' — the same, but a new random direction in every session
+      'drift_code' — the abstract phase code, its preferred phase rotating by drift_rot_bins over
+                     the session, the same way in every task
+      'clock'      — time since the trial's A onset, in real seconds (a loop-anchored clock)
+    `n_repeat` appends new sessions of the first n tasks (fresh times and noise), which the
+    builder deduplicates, as for the real [0, 3] / [4, 7] repeats.
+    Draws come from default_rng([seed, 1]) so the legacy streams are never touched.
+    """
+    config = config or CCGPConfig()
+    kinds = kind.split('+')
+    bad = [k for k in kinds if k not in SESSION_KINDS]
+    if bad:
+        raise ValueError(f'unknown synthetic kind(s): {bad}')
+    rng = np.random.default_rng([seed, 1])
+    nbps, nst = config.num_bins_per_state, config.num_task_states
+    n_bins = nbps * nst
+    tasks = [rng.choice(np.arange(1, 10), size=nst, replace=False) for _ in range(n_tasks)]
+    pref_phase = rng.uniform(0, n_bins, n_neurons)
+    pref_tower = rng.integers(1, 10, n_neurons)
+    route = rng.integers(1, 10, (9, 9))
+    w_drift = rng.normal(0, 1, n_neurons)
+    latency = rng.uniform(0, 30, n_neurons)
+    frac = (np.arange(nbps) + 0.5) / nbps
+
+    sessions = {}
+    for si, task in enumerate(tasks + tasks[:n_repeat]):
+        tt = session_trial_times(n_trials, rng, nst=nst)
+        # real time (s) of every warped bin: (n_trials, n_bins)
+        t_bin = np.concatenate([(tt[:, s, None] + frac[None] * (tt[:, s + 1] - tt[:, s])[:, None])
+                                for s in range(nst)], axis=1) * BIN_S
+        T = t_bin / (tt[-1, -1] * BIN_S)                      # 0..1 over the session
+        base = np.zeros((n_neurons, n_trials, n_bins))
+        for k in kinds:
+            if k == 'abstract':
+                base += gain * np.stack([_bump(pref_phase[n], phase_width, n_bins)
+                                         for n in range(n_neurons)])[:, None, :]
+            elif k == 'place':
+                for n in range(n_neurons):
+                    for s in range(nst):
+                        if task[s] == pref_tower[n]:
+                            base[n] += gain * _bump(s * nbps, tower_width, n_bins)
+                        if task[(s + 1) % nst] == pref_tower[n]:
+                            base[n] += gain * _bump((s + 1) * nbps % n_bins, tower_width, n_bins)
+            elif k == 'tone':
+                base[: n_neurons // 2] += gain * _bump(0.0, tone_width, n_bins, circular=False)
+            elif k == 'corridor':
+                for n in range(n_neurons):
+                    for s in range(nst):
+                        if route[task[s] - 1, task[(s + 1) % nst] - 1] == pref_tower[n]:
+                            base[n] += gain * _bump(s * nbps + nbps / 2, corridor_width, n_bins)
+            elif k == 'drift_axis':
+                base += drift_gain * w_drift[:, None, None] * (T[None] - 0.5)
+            elif k == 'drift_session':
+                w = rng.normal(0, 1, n_neurons)
+                base += drift_gain * w[:, None, None] * (T[None] - 0.5)
+            elif k == 'drift_code':
+                x = np.arange(n_bins)[None, None, :]
+                centre = pref_phase[:, None, None] + drift_rot_bins * T[None]
+                d = (x - centre + n_bins / 2) % n_bins - n_bins / 2
+                base += gain * np.exp(-0.5 * (d / phase_width) ** 2)
+            elif k == 'clock':
+                e = t_bin - tt[:, :1] * BIN_S                     # s since this trial's A
+                base += gain * np.exp(-0.5 * ((e[None] - latency[:, None, None])
+                                              / clock_width_s) ** 2)
+        act = np.clip(base + rng.normal(0, noise, (n_neurons, n_trials, n_bins)), 0, None)
+        sessions[si] = {
+            'Neurons_norm': act, 'Task': np.asarray(task), 'num_trials': n_trials,
+            'num_neurons': n_neurons,
+            # presence is all get_sessions_for_glm checks; a full-length raw array would cost
+            # ~16 MB per session for nothing
+            'Neuron_raw': np.zeros((n_neurons, 1)), 'Locs_raw': np.zeros(1),
+            'Trial_times': tt,
         }
     return {f'synth_{kind}': sessions}
 

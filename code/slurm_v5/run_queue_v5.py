@@ -146,7 +146,10 @@ def lec_jobs():
     sys.path.insert(0, os.path.join(ROOT, 'code'))
     import elasticnet_regression_v5 as v5
     data_root = os.path.join(ROOT, 'data')
-    with open(os.path.join(data_root, 'processed_data', 'data_dic_lec.pkl'), 'rb') as f:
+    import recday_registry as rr
+    version, dd_path = rr.resolve_data_version(os.environ.get('TSA_DATA_VERSION'))
+    print(f'[{hrs()}] data_dic: {dd_path.name}  (version {version})', flush=True)
+    with open(dd_path, 'rb') as f:
         dd = pickle.load(f)
     mrs = sorted(k for k in dd if '_sb' not in k)
     regions = v5.load_unit_regions(required=False)

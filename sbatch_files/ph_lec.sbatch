@@ -44,6 +44,10 @@ export OPENBLAS_NUM_THREADS=$OMP_NUM_THREADS
 export MKL_NUM_THREADS=$OMP_NUM_THREADS
 
 echo "Running persistent (co)homology: recday=$RECDAY state=$STATE extra=$*"
+set +e
 python code/run_ph_batch.py "$RECDAY" "$STATE" "$@"
+rc=$?
+set -e
 
-echo "All done! $(date)"
+echo "All done! $(date) EXIT=$rc"
+exit $rc

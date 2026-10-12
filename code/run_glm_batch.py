@@ -42,6 +42,36 @@ DEFAULT_SHARDS = os.path.join(REPO, 'data', 'glm_outputs', 'LEC_shards')
 DEFAULT_OUT = os.path.join(REPO, 'data', 'glm_outputs', 'LEC')
 
 
+def default_dirs(data_version):
+    """(shard_dir, out_dir) for a data version. v1 keeps the original trees; a tagged build
+    gets its own, so a bare run can never overwrite the fits another version produced."""
+    import recday_registry as rr
+    tag = rr.version_suffix(data_version)        # one tagging rule, in the registry
+    base = os.path.join(REPO, 'data', 'glm_outputs')
+    return os.path.join(base, f'LEC{tag}_shards'), os.path.join(base, f'LEC{tag}')
+
+
+def _expected_recdays(args):
+    """Recdays a complete merge should hold. Empty if the registry cannot say."""
+    try:
+        import recday_registry as rr
+        return rr.recdays_for_version(args.data_version)
+    except Exception:
+        return []
+
+
+def resolve_io(args):
+    """Resolve --data-version to (version, pickle path) and fill the output dirs it implies."""
+    import recday_registry as rr
+    version, dd_path = rr.resolve_data_version(args.data_version)
+    sh, out = default_dirs(version)
+    if args.shard_dir is None:
+        args.shard_dir = sh
+    if args.out_dir is None:
+        args.out_dir = out
+    return version, dd_path
+
+
 def _artifacts(compute_cpd, cross_validate):
     """Names in the order `run_glm_analysis` returns them."""
     names = ['glm_results', 'permutation_results']
@@ -78,8 +108,14 @@ def add_config_args(ap):
     ap.add_argument('--nulls', nargs='+', default=['freedman_lane'],
                     choices=['shuffle', 'freedman_lane', 'column'],
                     help='permutation nulls to compute; see glm_cv.NULL_METHODS')
-    ap.add_argument('--shard-dir', default=DEFAULT_SHARDS)
-    ap.add_argument('--out-dir', default=DEFAULT_OUT)
+    ap.add_argument('--data-version', default=None,
+                    help='data_dic build to fit (recday_registry.DATA_VERSION, currently v4). '
+                         "'v1' is the pre-spike-clock-fix pickle every result before 2026-10 "
+                         'used; see docs/handoff/SPIKE_CLOCK_V4.md')
+    ap.add_argument('--expect-recdays', type=int, default=25,
+                    help='--merge refuses a merge with a different recday count; 0 disables')
+    ap.add_argument('--shard-dir', default=None, help='default: LEC[_<version>]_shards')
+    ap.add_argument('--out-dir', default=None, help='default: LEC[_<version>]')
     return ap
 
 
@@ -87,6 +123,7 @@ def fit_one(recday, args):
     import importlib
     import w1_refit as w
 
+    data_version, dd_path = resolve_io(args)
     cfg = w.SECTIONS[args.section]
     # The engine is a property of the SECTION: v2 for every production fit on disk (frozen so
     # they stay reproducible), v3 for the reduced arms. See GLM_V3.md.
@@ -113,7 +150,11 @@ def fit_one(recday, args):
           + (f', time_from_reward {args.tfr_scheme} x{args.tfr_bins}' if overrides else '')
           + f', normalise={args.normalise} {norm_kw}')
 
-    data_dic = glm.load_data_dic(validate=True, apply_exclusions=True, verbose=True)
+    # path= explicitly, so the engines' own v1 defaults are unreachable from this driver.
+    # glm_analysis_v2 has no `version` argument at all, which is why the path is resolved here.
+    print(f'  data: {os.path.basename(dd_path)} (--data-version {data_version})')
+    data_dic = glm.load_data_dic(path=str(dd_path), validate=True, apply_exclusions=True,
+                                 verbose=True)
     if recday not in data_dic:
         raise KeyError(f'{recday} not in data_dic ({len(data_dic)} recdays)')
 
@@ -156,7 +197,10 @@ def fit_one(recday, args):
                  'nulls': list(args.nulls),
                  'downsample_mode': 'bin',
                  'filter_correct_paths': cfg.get('filter_correct_paths', False),
-                 'max_transition_seconds': max_leg}
+                 'max_transition_seconds': max_leg,
+                 # Without this a v1 and a v4 shard stamp identically and merge silently --
+                 # exactly the confusion this migration exists to remove.
+                 'data_version': data_version}
     if engine != 'v2':
         # Only the V3 arms carry these keys, so the v2 production stamps stay byte-identical
         # and a later v2 shard still merges with the ones on disk.
@@ -182,6 +226,7 @@ def fit_one(recday, args):
 def merge(args):
     import w1_refit as w
 
+    data_version, _ = resolve_io(args)
     cfg = w.SECTIONS[args.section]
     extra = w.arm_extra(cfg, leg_cap_s=args.leg_cap_s, tfr_scheme=args.tfr_scheme,
                         tfr_bins=args.tfr_bins, normalise=args.normalise)
@@ -223,6 +268,13 @@ def merge(args):
                 raise ValueError(f'{name}: recday(s) {sorted(overlap)} appear in more than '
                                  f'one shard — refusing to merge silently')
             merged.update(d)
+        # A partial merge is the quiet failure: 18 shards merge and print "18 recdays", and
+        # every downstream mean is then over a different cohort than the caption claims.
+        if args.expect_recdays and len(merged) != args.expect_recdays:
+            raise ValueError(
+                f'{name}: merged {len(merged)} recdays, expected {args.expect_recdays}. '
+                f'Missing: {sorted(set(_expected_recdays(args)) - set(merged)) or "unknown"}. '
+                f'Pass --expect-recdays 0 to merge anyway.')
         out = os.path.join(args.out_dir, f'{sect}__{name}.pkl')
         with open(out, 'wb') as fh:
             pickle.dump(merged, fh)

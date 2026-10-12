@@ -168,14 +168,19 @@ def max_abs_diff(a, b, path='', ignore=()):
     return float(np.max(d))
 
 
-def load_real_recday(recday=None):
+def load_real_recday(recday=None, data_version=None):
     """One real recday of this tree's dataset, as a `{recday: {session: ...}}` data_dic."""
     if IS_PFC:
         rds = w.pfc_recdays()
         rd = recday or rds[0]
         dd = g3.build_data_dic_from_pfc(w.DATA_FOLDER, [rd], verbose=False)
     else:
-        dd_all = g3.load_data_dic(validate=True, apply_exclusions=True, verbose=False)
+        # imported here, not at module scope: the PFC tree's registry has no version block
+        import recday_registry as rr
+        _ver, dd_path = rr.resolve_data_version(data_version)
+        print(f'data_dic: {dd_path.name}  (version {_ver})')
+        dd_all = g3.load_data_dic(path=str(dd_path), validate=True, apply_exclusions=True,
+                                  verbose=False)
         rd = recday or ('ah10_20250616_20250617' if 'ah10_20250616_20250617' in dd_all
                         else sorted(dd_all)[0])
         dd = {rd: dd_all[rd]}
@@ -271,7 +276,46 @@ def _tfr_beta(F, rd, i, regs, n_bins=10):
 # controls
 # ---------------------------------------------------------------------------
 
+def nan_free(data, rd):
+    """Copy of `data` with every NaN in `XY_raw` linearly interpolated away.
+
+    Controls 1 and 1b assert "v3 under legacy flags == v2". That premise holds only on
+    NaN-free data, which is all v1 ever was: v2 aggregates Speed with `'mean'` and KEEPS an
+    untracked row (`apply_onehot` zeroes its one-hot, so it silently reads as the reference
+    bin), while v3 aggregates with `'nanmean'` and DROPS the row (glm_analysis_v3:1736-1740).
+    On v4, 8 of 141 LEC sessions carry NaN and the two engines legitimately disagree -- on
+    `ah10_20250616_20250617` by the 77 untracked bins of session 3.
+
+    So the controls interpolate first, which is exactly what v1's builder did, and then test
+    what they were written to test: that v3 did not change the MATHS. v4's NaN handling is a
+    deliberate difference and is measured separately (docs/handoff/V4_MIGRATION.md 1.6).
+    No-op on PFC, which has no NaN.
+    """
+    out = {rd: {}}
+    for s, sd in data[rd].items():
+        if not isinstance(sd, dict) or 'XY_raw' not in sd:
+            out[rd][s] = sd
+            continue
+        xy = np.asarray(sd['XY_raw'], dtype=float)
+        if xy.ndim != 2 or np.isfinite(xy).all():
+            out[rd][s] = sd
+            continue
+        xy = xy.copy()
+        t = np.arange(len(xy))
+        for c in range(xy.shape[1]):
+            ok = np.isfinite(xy[:, c])
+            if ok.sum() >= 2:
+                xy[:, c] = np.interp(t, t[ok], xy[ok, c])
+            elif ok.sum() == 1:
+                xy[:, c] = xy[ok, c][0]
+            else:
+                xy[:, c] = 0.0
+        out[rd][s] = {**sd, 'XY_raw': xy}
+    return out
+
+
 def control_1_v2_equivalence(data, rd):
+    data = nan_free(data, rd)
     regs = w.matched_regressors(w.SECTIONS['all_regressors']['regressors'])
     joint = [j for j in w.SECTIONS['all_regressors']['joint_drop_groups']
              if all(r in regs for r in j[1])]
@@ -283,6 +327,7 @@ def control_1_v2_equivalence(data, rd):
 
 
 def control_1b_decile_arm_equivalence(data, rd):
+    data = nan_free(data, rd)
     a = fit(g2, data, rd, CORE5, cap_s=60.0, joint=JOINT, n_perm=5, num_permutations=3)
     b = fit(g3, data, rd, CORE5, cap_s=60.0, joint=JOINT, n_perm=5, num_permutations=3,
             override=decile_override())
@@ -531,6 +576,8 @@ def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument('--quick', action='store_true', help='30 perms, 30 noise cells, skip control 1')
     ap.add_argument('--recday', default=None)
+    ap.add_argument('--data-version', default=None,
+                    help='LEC only: data_dic build to gate on (default: registry, v4)')
     ap.add_argument('--skip-equivalence', action='store_true', help='skip controls 1 and 1b')
     ap.add_argument('--only-equivalence', action='store_true',
                     help='run only controls 1 and 1b (and the cheap 2 and 9); merge into the saved pickle')
@@ -562,7 +609,7 @@ def main(argv=None):
     record('2  fixed-range edges', control_2_fixed_edges)
     record('9  registry / stale list', control_9_registry)
 
-    rd, data = load_real_recday(args.recday)
+    rd, data = load_real_recday(args.recday, data_version=args.data_version)
     print(f'real recday: {rd}   ({time.time() - t0:.0f} s)')
 
     if not args.only_gap:

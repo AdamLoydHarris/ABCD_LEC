@@ -45,6 +45,7 @@ def main():
     ap.add_argument('--cv-perms', type=int, default=20)
     ap.add_argument('--poisson-neurons', type=int, default=5)
     ap.add_argument('--permutations', type=int, default=100)
+    __import__('recday_registry').add_data_version_arg(ap)
     args = ap.parse_args()
 
     import glm_analysis_v2 as glm
@@ -53,7 +54,9 @@ def main():
     print('W1 SMOKE TEST — cross-validated GLM refit')
     print('=' * 78)
 
-    data_dic = glm.load_data_dic(validate=True, apply_exclusions=True, verbose=True)
+    data_dic = glm.load_data_dic(path=str(__import__('recday_registry').resolve_data_version(
+        getattr(args, 'data_version', None))[1]), validate=True,
+        apply_exclusions=True, verbose=True)
     recdays = sorted(data_dic)[:args.recdays]
     print(f'\nrecdays: {recdays}\n')
 

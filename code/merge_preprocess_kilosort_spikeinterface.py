@@ -30,13 +30,10 @@ from probeinterface.plotting import plot_probe
 from pathlib import Path
 import sys
 
-# NumPy 2 changed the scalar repr: repr(np.int64(0)) is now "np.int64(0)", not "0".
-# probeinterface's write_prb formats channel ids and geometry with repr, and kilosort's
-# io.load_probe reads that file back with exec(contents, {}, metadata) -- empty globals, so
-# "np" is undefined and every sort dies with NameError: name 'np' is not defined. The June
-# 2025 sorts predate the numpy 2.0.2 in this env; they would fail today too.
-# legacy="1.25" restores the old repr. It affects formatting only, never arithmetic.
-np.set_printoptions(legacy="1.25")
+# NumPy 2 removed aliases that kilosort 4.0.18 still uses (np.NaN in swarmsplitter),
+# and changed the scalar repr that probeinterface writes into probe.prb. Both make every
+# sort in this env fail; see code/numpy2_compat.py. Import before any sorter runs.
+import numpy2_compat  # noqa: F401,E402
 
 
 def get_subject_ephys_metadata(subject_id, dates):
@@ -222,6 +219,19 @@ def _plot_preprocessed_trace_qc(split_recordings, preprocessed_recs):
         )
     return fig
 
+def check_loaded_recording(folder_path, rec, meta):
+    """Raise unless `rec` is the recording its metadata row names: no nested recording, same length."""
+    # neo walks the whole folder, so a recording copied inside another one replaces it silently:
+    # mEC 2024-03-19_11-58-14 held a copy of 10-44-12, and both bp02 03-19 sorts read the copy.
+    nested = sorted(d for d in os.listdir(folder_path)
+                    if d.startswith("20") and os.path.isdir(os.path.join(folder_path, d)))
+    if nested:
+        raise RuntimeError(f"{folder_path} contains nested recording folder(s) {nested}; move them out first")
+    expected = int(meta['dat_size']) // 768          # 384 channels x int16 in continuous.dat
+    if rec.get_num_samples() != expected:
+        raise RuntimeError(f"{folder_path}: loaded {rec.get_num_samples()} samples, but dat_size gives {expected}")
+
+
 def concatenate_dates(subject, dates, output_folder="/ceph/behrens/adam_harris/Taskspace_abstraction_lEC/data/preprocessed/ephys"):
     """
     Concatenate and preprocess ephys data for a subject on specified dates.
@@ -268,6 +278,7 @@ def concatenate_dates(subject, dates, output_folder="/ceph/behrens/adam_harris/T
         
         # Load the specific stream
         rec = se.read_openephys(folder_path, stream_name=meta['stream_name'], stream_id=str(meta['stream_id']))
+        check_loaded_recording(folder_path, rec, meta)
 
         recordings_to_merge.append(rec)
     

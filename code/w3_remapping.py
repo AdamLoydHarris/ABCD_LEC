@@ -65,9 +65,22 @@ if HERE not in sys.path:
 import anatomy_split as asplit                                    # noqa: E402
 import remapping_rotation_analysis as rr                          # noqa: E402
 
-CACHE_PATH = os.path.join(REPO, 'data', 'processed_data', 'w3_remapping.pkl')
+def cache_path(data_version=None):
+    """Cache for one data version; '' for v1 keeps the existing file, '_v4' is a new tree."""
+    import recday_registry as rr
+    return os.path.join(REPO, 'data', 'processed_data',
+                        f'w3_remapping{rr.version_suffix(data_version)}.pkl')
+
+
+CACHE_PATH = cache_path()
 FIG_DIR = os.path.join(REPO, 'data', 'figures', 'anatomy_split')
-W0_GATES = os.path.join(REPO, 'data', 'processed_data', 'w0_gates.pkl')
+def w0_gates_path(data_version=None):
+    import recday_registry as rr
+    return os.path.join(REPO, 'data', 'processed_data',
+                        f'w0_gates{rr.version_suffix(data_version)}.pkl')
+
+
+W0_GATES = w0_gates_path()
 
 #: Half a task state. A cell that has moved to a neighbouring state cannot pass.
 GEN_THRESHOLD_DEG = 45.0
@@ -783,9 +796,17 @@ def main(argv=None):
     if '--synthetic' in argv:
         import w3_synthetics
         return w3_synthetics.run_all(verbose=True)
+    data_version = None
+    if '--data-version' in argv:
+        data_version = argv[argv.index('--data-version') + 1]
+        del argv[argv.index('--data-version'):argv.index('--data-version') + 2]
     if '--run' in argv or '--extras' in argv:
         import glm_analysis_v2 as glm
-        data_dic = glm.load_data_dic(validate=True, apply_exclusions=True, verbose=True)
+        import recday_registry as rr
+        version, dd_path = rr.resolve_data_version(data_version)
+        print(f'data_dic: {dd_path.name}  (version {version})  -> {cache_path(data_version)}')
+        data_dic = glm.load_data_dic(path=str(dd_path), validate=True, apply_exclusions=True,
+                                     verbose=True)
         unit_regions = asplit.load_unit_regions()
         for rd in data_dic:
             if rd not in unit_regions:
@@ -794,7 +815,8 @@ def main(argv=None):
 
     if '--run' in argv:
         results = run_all(data_dic, cfg, verbose=True)
-        save_cache(results, meta={'n_recdays': len(results),
+        save_cache(results, path=cache_path(data_version),
+                   meta={'n_recdays': len(results), 'data_version': version,
                                   'gen_threshold_deg': GEN_THRESHOLD_DEG,
                                   'min_tasks_tuned_frac': cfg.min_tasks_tuned_frac})
 

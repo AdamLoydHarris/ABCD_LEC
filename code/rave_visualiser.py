@@ -39,7 +39,9 @@ from spatial_ratemaps import LOC_TO_GRID
 # ─── paths ────────────────────────────────────────────────────────────────────
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _REPO = os.path.dirname(_HERE)
-DEFAULT_PKL = os.path.join(_REPO, "data", "processed_data", "data_dic_lec.pkl")
+import recday_registry as _rr                                                   # noqa: E402
+
+DEFAULT_PKL = str(_rr.data_dic_path())
 CACHE_DIR = os.path.join(_REPO, "data", "rave_cache")
 OUTPUT_DIR = os.path.join(_HERE, "rave_output")
 

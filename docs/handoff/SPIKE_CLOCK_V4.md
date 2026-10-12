@@ -16,13 +16,13 @@
   final contiguous run.
 - **v4** is v2 with only the origin fixed: `ephys_rsync_v4/`, `neuron_raw_v4/`,
   `data_dic_lec_v4.pkl` (25 recdays), and the same in the mEC tree. `data_dic_mec_v4.pkl` holds
-  34 of 36 recdays; the next bullet explains the two left out.
+  all 36 recdays since the 2026-10-05 re-sort of the two bp02 blocks in the next bullet.
   - v4 equals v2 plus the origin shift exactly, on both datasets.
   - Every session v4 changed passes every behaviour probe it can be tested on, with two mEC
-    exceptions, both explained in section 2.4:
+    exceptions, both in merged sorts and both explained in section 2.4:
     - bp02 03-24 s0 fails only in the merged sort; its single-day twin passes.
-    - bp02 03-25 10:34 has a speed lag 0.55 s off, while its reward peak sits at 0.00 s
-      (peak/median 8.7).
+    - bp02 03-25 10:34 in the merged sort has a speed lag 0.55 s off, while its reward peak sits at
+      0.00 s (peak/median 8.7); the single-day copy passes.
   - The validator now gates on speed, reward and wall-clock probes, not just pulse pairing.
   - Results: section 2.4.
 - **A second, separate fault, found by the new gates: two mEC sorts hold the wrong data.**
@@ -34,7 +34,10 @@
     not a clock bug.
   - Gate 1 (binary length against the manifest) fails on exactly those 2 of 36 mEC blocks. A
     scan finds no other nested recording in either tree.
-  - `data_dic_mec_v4.pkl` is built from the other 34 blocks. The repair is open: see section 4.
+  - **Repaired 2026-10-05.** The copy, byte-identical, was moved out, and both blocks were
+    re-sorted from the correct files. Their sessions now sit at bp02's reference, about -0.17 s,
+    instead of +14.4 s. Both sorters now refuse a nested folder or a length mismatch. See
+    section 2.4.
 - **mEC has no unaffected version.** `data_dic_mec.pkl`, `_v2` and `_v3` all carry the bugged
   trains.
 - **v1 (`data_dic_lec.pkl`, used by every existing result) is not fixed here.**
@@ -272,8 +275,10 @@ r 0.31, peak ratio 1.04, lag +3.9 s, untested.
 | v4 arrays (994 MB) | 3672595 | 450 written |
 | gates, all 36 blocks | 3672596 | trains 225/225; arrays 450/450, 116 restart arrays at the expected lag, r >= 0.984. **Gate 1 fails on 2 of 36 blocks:** bp02_20240319 and bp02_20240319_20240321 binaries are 432,672 samples (14.42 s) longer than their manifests. |
 | gates, 34 blocks | 3673456 | all pass |
-| pickle `data_dic_mec_v4.pkl` (1.12 GB) | 3673457 | built from the 34 sound blocks; registry guards pass on 34 recdays and 182 sessions |
-| check against v3 | 3673458, 3673459 | merged 11 recdays / 99 sessions, single-day 23 / 104; `Neuron_raw` identical in 43 and 48, and the 112 that differ are the restart arrays the gates verified; trial times identical 89/89 and 93/93; tracking unchanged |
+| first pickle, 34 recdays (1.12 GB) | 3673457 | registry guards pass on 34 recdays and 182 sessions; now kept as `data_dic_mec_v4.missing_bp02_0319_2026-10-02.pkl` |
+| after the bp02 re-sort: v4 arrays, gates | 3674429, 3674430 | 27 arrays written; gate 1 36/36, trains 225/225, arrays 423/423 (the 27 re-sorted arrays read `missing v2`, their v2 being quarantined) |
+| pickle `data_dic_mec_v4.pkl`, 36 recdays (1.15 GB) | 3685141 | registry guards pass on 36 recdays and 194 sessions. Diff against the 34-recday build: exactly 2 differences, the two bp02 recdays as NEW, so the other 34 are byte-identical |
+| check against v3 | 3685142, 3685143 | merged 12 recdays / 108 sessions, single-day 24 / 108; trial times identical 97/97 in both; tracking unchanged |
 
 **The bp02 2024-03-19 corruption.**
 - `data/raw/ephys/2024-03-19_11-58-14/` holds a nested folder, `2024-03-19_10-44-12/...`.
@@ -296,7 +301,8 @@ same recordings twice.
 | | reward | 29 / 68 | 1 / 73 |
 | | wall clock | 52 / 110 | 0 / 110 |
 | | early start | 4 / 4 | 0 / 0 |
-| corrupted bp02 03-19 rows (13) | speed / reward | 6 / 8, 8 / 12 | 6 / 8, 8 / 12 |
+| bp02 03-19 rows (13), before the re-sort | speed / reward | 6 / 8, 8 / 12 | 6 / 8, 8 / 12 |
+| bp02 03-19 rows (13), after the re-sort (job 3685144) | speed / reward / wall clock | | 0 / 8, 2 / 12, 0 / 13 |
 | other rows (91) | speed / reward / wall clock | 4 / 70, 2 / 67, 0 / 91 | 4 / 70, 2 / 67, 0 / 91 |
 
 The 9 v4 failures outside the corrupted blocks are about 7 recordings. Each has a reason it is not
@@ -348,7 +354,16 @@ and pinned by synthetic controls 9 and 10b.
   - `M/sbatch_files/fixed/bp02_singledays/merge_bp02_2024-03-19_resort_2026-10.sbatch` (job 3674427);
   - `M/sbatch_files/fixed/merge_bp02_2024-03-19_to_2024-03-21_resort_2026-10.sbatch` (job 3674428);
   - chained after them: v4 arrays (3674429), then gates (3674430).
-  - Results: filled in below when the jobs land.
+- **Results, 2026-10-05:**
+
+  | step | result |
+  |---|---|
+  | re-sorts (3674427 1-day, 3674428 2-day) | `EXIT=0` after 6.1 h and 12.7 h on gpu-sr675-31; numpy 1.26.4, spikeinterface 0.101.2, KS 4.0.18, neo 0.13.3; 9 and 18 recordings merged |
+  | binary length | 356,206,716 and 704,009,060 samples, exactly the manifests |
+  | QC single units | 5 (old sort 6) and 3 (old 3): bp02's low yield on these days is genuine |
+  | behaviour, bp02 03-19 sessions | speed lag -0.25 to 0.00 s against bp02's -0.17 s reference, every testable session passing; was +14.28 to +14.45 s. Reward peaks -1.00 to +0.50 s; were +13.75 to +14.75 s |
+  | remaining failure in these blocks | s3 (14-48-33), in both sorts: a reward PSTH from 6 rewards peaks at +12.0 s, while its speed lag passes at 0.00 and -0.18 s |
+  | mEC v4 validation overall | 10 failures, down from 23, all in the classes explained above |
 
 ## 3. Processing new ephys (July ABCDE and later)
 Run in this order. Each step names its output and the check that must pass before the next.
@@ -431,11 +446,14 @@ Heavy steps go through `sbatch sbatch_files/mec_stage.sbatch <script> ...`, whic
 - ah08's speed reference is +0.25 to +0.40 s, against ah10's -0.30 s. Whether that is
   physiology or a residual clock offset is open; the reward probe is the absolute check.
 - No v1-based result has been re-run (user decision).
-- **The bp02 2024-03-19 repair: re-sort chosen** (user, 2026-10-02). It is in progress; see the
-  dated paragraph at the end of section 2.4.
-- Why the reward and speed probes fail in about 7 mEC and 4 LEC sessions that v4 did not
-  change. The candidates are probe noise, behaviour and weak populations; none is a measured
-  clock error.
+- **The bp02 2024-03-19 repair: done 2026-10-05** by re-sort (user's choice). Two things stay on
+  disk until you decide: the old blocks (`*.corrupt_nested_copy_2026-10-02`, about 815 GB) and the
+  62 GB duplicate in `M/data/raw/duplicates/`.
+- Why the probes still fail where no clock error is measured:
+  - 4 LEC sessions, none changed by v4;
+  - 10 mEC session rows, about 7 recordings. 6 of those rows are unchanged by v4; 2 are merged-sort
+    restart rows whose single-day twins pass; 2 are bp02 03-19 s3's 6-reward PSTH.
+  - The candidates are probe noise, behaviour and weak populations.
 
 ## 5. Reproduce
 Job ids are in section 2.4.

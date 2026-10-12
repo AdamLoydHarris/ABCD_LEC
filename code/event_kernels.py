@@ -67,6 +67,7 @@ EDGES_S = {
 #: input (2 sqrt(t1 t2) / (t1 + t2)).
 BANK_TAUS_S = (0.5, 2.0, 8.0, 32.0, 128.0, 512.0)
 FAST_TAU_MAX_S = 8.0
+FAST_EVENTS = ('A', 'reward', 'poke_exit')     # masked where untracked under kin='strict'
 
 
 # ---------------------------------------------------------------------------
@@ -425,8 +426,15 @@ def build_design(sessions: list, events=('entry', 'A', 'reward'), *, kin: str = 
     Groups: 'place', 'kin_inst' (speed / signed accel deciles), 'kin_fast' / 'kin_slow' (bank tau
     <= / > 8 s), 'kin_missing', one per event ('ev_<e>'), and 'day' when `day_clock`.
     `kin='none'` drops every kinematic column (the control that the bank is not vacuous);
+    `kin='strict'` is the conservative control: decile one-hots of each fast-bank trace in
+    `kin_fast`, `kin_missing` split by segment (before the first A, after the last trial, gaps),
+    and the A / reward / poke-exit blocks zeroed where kinematics are untracked. With the default,
+    5/8 planted exp(speed-history) units (tau 2 s, PFC) were locked to the A+reward joint, mostly
+    through PFC's untracked segments (`event_kernels_leak_diag.py`).
     `place=False` drops the place block (the same control for place).
     """
+    if kin not in ('full', 'strict', 'none'):
+        raise ValueError(f'kin must be full, strict or none, got {kin!r}')
     blocks = blocks or [session_blocks(s, events, bank_init) for s in sessions]
     sids = np.concatenate([np.full(b['counts'].shape[1], i) for i, b in enumerate(blocks)])
     cols, groups, names = [], {}, []
@@ -455,12 +463,28 @@ def build_design(sessions: list, events=('entry', 'A', 'reward'), *, kin: str = 
         fast = [j for j, t in enumerate(taus) if t <= FAST_TAU_MAX_S]
         slow = [j for j, t in enumerate(taus) if t > FAST_TAU_MAX_S]
         lab = [f'speed_tau{t}' for t in BANK_TAUS_S] + [f'absacc_tau{t}' for t in BANK_TAUS_S]
-        add('kin_fast', bank[:, fast], [lab[j] for j in fast])
+        F, flab = bank[:, fast], [lab[j] for j in fast]
+        if kin == 'strict':
+            for j in fast:
+                v = np.where(miss, np.nan, bank[:, j])
+                edges = g3.compute_decile_edges(v[np.isfinite(v)], n_bins=10, outlier_pct=1, scheme='decile')
+                M, kept, _ = _reference_coded(g3.apply_onehot(v, edges), sids)
+                F = np.hstack([F, M])
+                flab += [f'{lab[j]}_d{k}' for k in kept]
+        add('kin_fast', F, flab)
         add('kin_slow', bank[:, slow], [lab[j] for j in slow])
         if miss.any() and len(np.unique(sids[miss])) >= 1 and miss.mean() < 1:
-            add('kin_missing', miss[:, None].astype(float), ['missing'])
+            if kin == 'strict':
+                seg = np.concatenate([_missing_segment(s, b) for s, b in zip(sessions, blocks)])
+                M = np.column_stack([miss & (seg == k) for k in range(3)]).astype(float)
+                keep = [k for k in range(3) if M[:, k].any()]
+                add('kin_missing', M[:, keep], [('pre_A', 'post', 'gap')[k] for k in keep])
+            else:
+                add('kin_missing', miss[:, None].astype(float), ['missing'])
     for e in events:
         M = np.vstack([b[f'ev_{e}'] for b in blocks])
+        if kin == 'strict' and e in FAST_EVENTS:
+            M[miss] = 0.0                     # kinematics unobserved: no fast-event claim on these rows
         M, kept, _ = _reference_coded(M, sids)
         edges = EDGES_S[e]
         lab = [f'{edges[j]}-{edges[j + 1]}s' if j < len(edges) - 1 else ('overflow' if j == len(edges) - 1 else 'pre')
@@ -474,6 +498,14 @@ def build_design(sessions: list, events=('entry', 'A', 'reward'), *, kin: str = 
     FR = np.hstack([b['counts'] for b in blocks])
     return dict(X=X, FR=FR, session_ids=sids, groups=groups, names=names, blocks=blocks,
                 n_rows=len(sids), kin_missing=miss)
+
+
+def _missing_segment(sess: dict, b: dict) -> np.ndarray:
+    """Per 250 ms block: 0 before the first A, 1 at or after the last trial's end, 2 between."""
+    t = b['t0_s']
+    tt = sess['trial_times']
+    last = tt.max() * BIN_S if len(tt) else np.inf
+    return np.where(t < sess['first_A_bin'] * BIN_S, 0, np.where(t >= last, 1, 2))
 
 
 def _day_basis(sess: dict, b: dict) -> np.ndarray:
@@ -552,7 +584,7 @@ def stage1(sessions: list, events=('entry', 'A', 'reward'), *, n_perm: int = 100
     return res
 
 
-def reset_test(rec: dict, sessions: list, events=('entry', 'A', 'reward')) -> dict:
+def reset_test(rec: dict, sessions: list, events=('entry', 'A', 'reward'), *, kin: str = 'full') -> dict:
     """Uncentred leave-one-session-out: entry kernel vs wall-clock day term vs both.
 
     A day-long trend shows the same within-session slope in every session, so under per-session
@@ -563,7 +595,7 @@ def reset_test(rec: dict, sessions: list, events=('entry', 'A', 'reward')) -> di
     add_day_clock(rec)
     if any('hours_since_day_start' not in s for s in sessions):
         return dict(skipped='no wall clock for every session')
-    D = build_design(sessions, events, day_clock=True)
+    D = build_design(sessions, events, kin=kin, day_clock=True)
     X = np.column_stack([np.ones(D['n_rows']), D['X']])
     groups = {g: [c + 1 for c in D['groups'][g]] for g in ('ev_entry', 'day') if g in D['groups']}
     res = glm_cv.cv_scores(X, D['FR'], D['session_ids'], groups, n_perm=0,

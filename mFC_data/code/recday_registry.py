@@ -44,6 +44,16 @@ import numpy as np
 import pandas as pd
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+#: PFC is rebuilt in memory from El-Gaby's deposited per-session files -- no TTL, no sample
+#: counter, no data_dic pickle -- so it has exactly one build and the LEC v1/v4 clock versions
+#: do not apply. Shared modules call this; asking for a version here is a mistake, not a tree.
+def version_suffix(version=None) -> str:
+    if version is not None:
+        raise ValueError(f"PFC has no versioned data_dic; --data-version {version!r} is an error")
+    return ""
+
+
 EPHYS_ROOT = REPO_ROOT / "data" / "preprocessed" / "ephys"
 METADATA_DIR = REPO_ROOT / "data" / "metadata"
 PYCONTROL_DIR = REPO_ROOT / "data" / "raw" / "pycontrol"

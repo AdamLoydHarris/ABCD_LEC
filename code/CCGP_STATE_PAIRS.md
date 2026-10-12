@@ -450,6 +450,11 @@ Measured output of `run_synthetic_controls()` at the current defaults (≈3 min)
   noise     none          trim=15  ccgp=0.478 null=0.500 tone=0.460 immune=0.495   <- no false positive
 ```
 
+*2026-09-29.* `make_synthetic_recday` gained `trial_times='session'` and the kinds `corridor`,
+`drift_axis`, `drift_session`, `drift_code`, `clock` and `n_repeat`, for the kNN state decoder
+(`KNN_STATE_DECODING.md`). The legacy path is untouched: max|diff| = 0 over 1008 arrays against
+the previous commit, and the table above was re-measured identically.
+
 **This is not ceremony — it is why the defaults are what they are.** These
 synthetics caught two design errors in this analysis that the real data could never
 have revealed:
