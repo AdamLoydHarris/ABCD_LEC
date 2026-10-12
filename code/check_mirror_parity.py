@@ -61,6 +61,11 @@ BYTE_PAIRS = [
     # here would send one tree's curves into the other tree's cache.
     ('code/gp_tuning_width.py', 'mFC_data/code/gp_tuning_width.py'),
     ('code/population_drift_synthetics.py', 'mFC_data/code/population_drift_synthetics.py'),
+    # Added 2026-10-12 with the M2 runners: both datasets' shards come from these files, so a
+    # drift would stamp LEC and PFC merges from different code.
+    ('code/run_event_kernels.py', 'mFC_data/code/run_event_kernels.py'),
+    ('code/run_population_drift.py', 'mFC_data/code/run_population_drift.py'),
+    ('code/event_kernels_plots.py', 'mFC_data/code/event_kernels_plots.py'),
     # Added 2026-10-09 with the spatial pipelines: one pipeline for mEC, LEC and PFC (user rule), so
     # every module and its gate must be the same bytes in both trees.
     ('code/spatial_common.py', 'mFC_data/code/spatial_common.py'),

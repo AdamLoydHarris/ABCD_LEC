@@ -3,7 +3,321 @@
 Per-neuron kernels of time since maze entry, first A, reward A and every reward, with their time
 constants, in LEC and PFC, read as the state of an SSM trace bank. Plan, user decisions, process
 rules and code map: `docs/handoff/EVENT_KERNELS_HANDOFF.md`. Population drift (Kanter) results
-will go in `code/POPULATION_DRIFT.md`.
+are in `code/POPULATION_DRIFT.md`.
+
+## 2026-10-12 — M2: Stage 1 and the reset test on real data
+
+**Outcome.**
+
+- **Event-locked units are common in both datasets.** Every event block, in every mouse, exceeds
+  the exact null rate of p < 0.05 at n_perm 100 (5/101 = 0.050). Units locked (Freedman-Lane
+  p < 0.05 and held-out cpd > 0), mean of mice:
+
+  | block | LEC, 5 mice | PFC, 7 mice |
+  |---|---|---|
+  | every reward | 0.51 | 0.61 |
+  | entry (recording start) | 0.29 | 0.34 |
+  | reward A | 0.12 | 0.16 |
+
+- **The entry kernel is mostly a first-minute transient, not a slow ramp.** Of the entry-locked
+  units, 62-78% per LEC mouse have their largest kernel weight within a minute of recording
+  start; none peak in the bin beyond 25 min. PFC is mixed: 18-75% per mouse.
+  - This is the per-neuron side of the drift result (`POPULATION_DRIFT.md`): held-out sessions
+    decode only the first minute.
+  - Tsao's slow session ramps are not the main entry-locked pattern here.
+- **Entry calls are not day-long trends.** On held-out sessions, the entry kernel predicts
+  better than a linear trend in hours since the day began in 82% of entry-locked LEC units (mean
+  of 5 mice, 0.67-0.95) and 72% in PFC (7 mice, 0.42-0.94).
+- **Kinematics.** In LEC, the event block beats the fast speed bank in 68% of entry- and
+  reward-locked units. In PFC the two are level: 55-59%, with similar median cpd. A PFC event
+  call is weaker evidence for an event clock.
+- **Regions.** No regional difference is established. ENTl-deep is more reward-locked than
+  SUB/ProS: +0.13 in fraction, rate-matched, 4 mice, p 0.023, two of the four mice near zero. It
+  is a candidate.
+- **The 5-trial arm** changes the weakest mice, not the picture. ly05's reward-locked fraction
+  rises from 0.27 to 0.51, so per-mouse differences at 10 trials partly reflect how many sessions
+  a recday has.
+
+### What was done
+
+| file | role |
+|---|---|
+| `code/run_event_kernels.py` (+ mirror) | one job per recday and anchor. Stage 1 (`ek.stage1`), the reset test on anchor `entry` (`ek.reset_test`), all-session betas and raw lag-bin rates for figures, a rank report. Stamped shards; `--merge` to long tables; `--gate`. |
+| `code/run_population_drift.py` (+ mirror) | the Kanter measures (`POPULATION_DRIFT.md`) |
+| `code/event_kernels_plots.py` (+ mirror) | figures F1-F14 and the tables quoted below |
+| `sbatch_files/submit_event_kernels.sh` | submission. Recdays come from files, never a pickle. Runs the parity check. `--after` gates the jobs on others. Partition `cpu_backfill`. |
+| `sbatch_files/event_kernels.sbatch` | partition `gpu_lowp` -> `cpu_backfill` (the 2026-10-09 site warning) |
+| `code/event_kernels_M2_comparison.ipynb`, `code/LEC_event_kernels.ipynb`, `mFC_data/code/PFC_event_kernels.ipynb` | `RUN_MODE = 'load'`, executed through sbatch |
+
+- **Design:** `kin='strict'` (user decision, 2026-10-12); ABCD sessions with >= 10 trials;
+  leave one session out; Freedman-Lane, n_perm 100, seed 0.
+- **Two anchors on identical rows:**
+  - `entry` (recording start): events entry, A, reward, plus the reset test;
+  - `first_A`: events first A, A, reward.
+- **Arms:** LEC >= 10, PFC >= 10, and LEC >= 5 as a sensitivity arm.
+- **Engine:** no change; `event_kernels.py` is byte-identical to 2c7f99c.
+
+### Runner gates (planted units through the runner)
+
+- **Stage 1.** The quick planted units on the gate recday go through `fit_recday`, the shard,
+  `merge_dir` and the long table. Every check passes, 11/11 in each dataset:
+  - per unit and block, cpd and p equal the stage-1 values in the M1 pickle
+    `synthetics_<ds>_<rd>_quick_kin-strict.pkl`: max |runner - gate| = 0;
+  - the merged locked table, the fraction locked per kind and block (G1-G4's inputs) and the
+    reset calls are identical;
+  - the merge refuses a changed stamp field, a duplicate recday and a short recday count;
+  - a recday without 2 sessions writes `skipped`.
+- **Gate runs.** Three passes:
+  - jobs 3750326/28;
+  - 3750341/43, after the rank report and runner hash were added;
+  - 3751709/10, after the untracked-recday skip below.
+- **Drift gate:** `POPULATION_DRIFT.md`.
+
+### Runs
+
+| arm | jobs | fitted recdays | units | sessions | skipped |
+|---|---|---|---|---|---|
+| LEC, >= 10 trials | 50, `EXIT=0` | 24 | 2742 | 135 | ly05_20250618_20250619: 1 session |
+| PFC, >= 10 trials | 50, `EXIT=0` | 24 | 1229 | 171 | me08_12092021_13092021: no tracked position (below) |
+| LEC, >= 5 trials | 50 + 1 resubmitted, `EXIT=0` | 25 | 2851 | 164 | none |
+
+- Stage 1 per recday and anchor: 1-20 min at 8 CPUs, median 4.8 min (LEC).
+- Median held-out r2 per recday, median of recdays: 0.051 (LEC) and 0.040 (PFC).
+
+Three incidents, each resolved inside M2:
+
+1. **Two jobs refused on a transient mirror drift.**
+   - What happened: `cpu_backfill` preempts and requeues jobs, and a requeued job re-runs the
+     parity check. Two requeued jobs started while `event_kernels_plots.py` had been edited in
+     `code/` and not yet copied to its mirror.
+   - Fix: resubmitted (LEC 5-trial ah10_20250613_20250615 entry). The PFC one was superseded by
+     incident 2.
+   - Rule: while jobs can requeue, write both copies of a registered file in one step.
+2. **PFC me08_12092021_13092021 crashed in `build_design`.**
+   - Cause: its XY is unusable (`xy_ok` False in all 7 sessions), so no speed sample is finite and
+     the decile edges are `None`. M1 never ran this recday through the design.
+   - Fix: the runner now skips a recday with no tracked position in any analysis session. A
+     rate-only fit would lack the kinematic control that kept speed out of the event blocks in
+     M1 (G5).
+   - The rule changed the runner, whose sha1 is in every stamp. So the whole PFC arm was rerun
+     on the revised runner after the last LEC job ended (jobs 3751711-60). The first PFC shards
+     are in `shards_superseded/runner_pre_untracked_skip_2026-10-12/`.
+   - The LEC arms ran on the runner before this rule. It cannot fire on LEC, where every
+     analysis session is tracked.
+3. **A smoke check in the plan was mis-specified.**
+   - The plan asked for `fold_rank_min == n_cols`. The M1 design already ran at 147 of 149
+     columns on the gate recday, and the smoke run showed why: the `pre` columns of A, reward
+     and first A mark the same rows, before the first A.
+   - The runner now reports each fold's null space and sets betas of unidentified columns to
+     NaN. The analysis of what that null space does is below.
+
+### Rank: what the null space does to held-out predictions
+
+A rank deficit changes a held-out cpd only if the held-out rows have a component along the
+training fold's null space; otherwise the min-norm choice never reaches a prediction. Tested
+directly with SVD on 5 designs, and characterised for every shard by its null-space columns:
+
+| fits | null space | held-out component |
+|---|---|---|
+| every `entry` fit, LEC and PFC, both thresholds, except the last row | duplicated `pre` columns; an all-zero `kin_missing:gap` or `:post` when the only session with such rows is held out | 0 for the duplicates (5e-16 on PFC); the zero nuisance columns sit in both models, so they do not enter cpd |
+| PFC `first_A` (24 recdays) | `ev_first_A:pre` = `kin_missing:pre_A`: PFC has no tracking before the first A | 5e-16 on 0 rows (me11_05122021_06122021, ah04_05122021_06122021) |
+| LEC `first_A`, 8 recdays at >= 10 (9 at >= 5) | `ev_first_A:pre` = `ev_A:pre` + `kin_missing:pre_A` (under `strict` the A and reward `pre` columns are zeroed where untracked) | 0, except in the fold whose held-out session holds the recday's only untracked pre-A rows |
+| LEC >= 5, ly05_20250620_20250623 | one relation through the whole reward block, `ev_A:pre` and `kin_missing:post` | 4e-16 on 0 rows |
+
+- **The one case that reaches held-out rows:** the LEC first-A fits.
+  - On each of the 8 recdays exactly one session holds 27-62 untracked blocks before the first
+    A, 7-16 s and under 0.2% of the recday's blocks.
+  - In the fold that holds it out, those rows get an arbitrary share of the pre-A offset in the
+    full model and none in the reduced one.
+  - Freedman-Lane permutes residuals on the same design, so the p values stay calibrated, but
+    those rows can move a first-A cpd.
+  - The entry-anchor results carry no such effect.
+- **The runner's flag has false alarms.** It marks the PFC first-A and some LEC shards as
+  non-duplicate (`rank_benign` False) because it compares exact bytes. One-hot fractions sum
+  to 0.9999999999999999 where an indicator is 1.0. The direct tests above override the flag.
+  The fix is a tolerance in `rank_report`, at the next runner revision: not mid-run, because the
+  runner hash is in the stamp.
+
+### Measured (>= 10 trials unless stated; per mouse = recday mean, then mouse mean)
+
+Fraction of units locked (F1). Mean of mice, range over mice in brackets:
+
+| block | LEC (5 mice) | LEC, El-Gaby's rule | PFC (7 mice) |
+|---|---|---|---|
+| entry | 0.288 (0.167-0.426) | 0.298 | 0.344 (0.115-0.613) |
+| first A | 0.271 (0.151-0.429) | 0.282 | 0.244 (0.021-0.472) |
+| reward A | 0.117 (0.100-0.152) | 0.119 | 0.158 (0.084-0.304) |
+| every reward | 0.508 (0.271-0.653) | 0.519 | 0.610 (0.313-0.815) |
+| A + reward joint | 0.381 (0.217-0.495) | 0.393 | 0.554 (0.450-0.755) |
+| speed bank, fast | 0.434 (0.184-0.631) | 0.452 | 0.618 (0.379-0.844) |
+| speed bank, slow | 0.102 (0.069-0.120) | 0.107 | 0.120 (0.068-0.185) |
+| place | 0.795 (0.579-0.924) | 0.808 | 0.735 (0.481-0.888) |
+
+- **El-Gaby's rule** (curation rule 2, applied by `_unit_table` over each recday's ABCD sessions)
+  flags 149 of 2851 LEC units (5.2%), 138 of the 2742 fitted. Removing them moves every
+  fraction by <= 0.02.
+- **This differs from M1.** M1 quoted 245 of 2851 (8.6%) from a count that is not in the code,
+  probably over every task recording, object sessions included. Not reconciled.
+
+Held-out cpd (F2):
+
+- The median over all units is <= 0.002 for every event block: most units' event block does not
+  help the held-out session.
+- Locked units, median cpd:
+
+  | dataset | entry | reward | reward A | A + reward joint |
+  |---|---|---|---|---|
+  | LEC | 0.0048 | 0.0039 | 0.0014 | 0.0055 |
+  | PFC | 0.0058 | 0.0053 | 0.0017 | 0.0070 |
+
+- Place is larger: 0.028 (LEC) and 0.014 (PFC).
+
+Kinematics beside each event call (F3), for units locked to the block:
+
+| block | dataset | locked units | also locked to the fast bank | event cpd > fast-bank cpd | median cpd, event / fast bank |
+|---|---|---|---|---|---|
+| entry | LEC / PFC | 790 / 424 | 0.62 / 0.75 | 0.68 / 0.55 | 0.0048 / 0.0018; 0.0058 / 0.0060 |
+| reward | LEC / PFC | 1380 / 808 | 0.61 / 0.73 | 0.68 / 0.58 | 0.0039 / 0.0016; 0.0053 / 0.0058 |
+| reward A | LEC / PFC | 316 / 176 | 0.54 / 0.64 | 0.54 / 0.44 | 0.0014 / 0.0015; 0.0017 / 0.0039 |
+| A + reward | LEC / PFC | 1010 / 663 | 0.65 / 0.76 | 0.68 / 0.59 | 0.0055 / 0.0028; 0.0070 / 0.0065 |
+
+Where entry kernels peak, as the fraction of entry-locked units whose largest |beta| is in each
+range:
+
+| range | LEC mice | PFC mice |
+|---|---|---|
+| first minute after recording start | 0.62-0.78 | 0.18-0.75 (ah04 0.35, me08 0.18, me11 0.29) |
+| overflow, > 25 min | 0 | 0 |
+
+The F4 heatmaps show units sorted by peak lag, but the sort uses the same data as the display.
+Sorting noise by its peak also draws a diagonal, so the spread of peak times is not yet
+evidence of tiling.
+
+Reset test (F6), the fraction where the entry kernel beats a linear hours-since-day-start term
+on held-out sessions:
+
+| units | LEC (5 mice) | PFC (7 mice) |
+|---|---|---|
+| entry-locked | 0.823 (0.669-0.946) | 0.718 (0.417-0.938) |
+| all units | 0.748 (0.577-0.856) | 0.609 (0.411-0.870) |
+
+- PFC ah03 and me10 contribute 5 entry-locked units each.
+- Skipped, with no wall clock (synthetic session tokens): ab03_29082023_30082023,
+  me08_10092021_11092021, me10_14122021_15122021, me10_20122021_21122021.
+
+Anchor swap (F7), recording start vs the first A on the same rows:
+
+- Locked calls agree in 0.88-0.93 of units per LEC mouse.
+- In PFC, 0.82-0.94 per mouse, except me08 at 0.65 (55 units).
+
+Threshold sensitivity (F8, LEC, 24 shared recdays), unit-level agreement of the call at 10 vs
+5 trials:
+
+| block | agreement |
+|---|---|
+| reward A | 0.92 |
+| A + reward | 0.89 |
+| entry | 0.88 |
+| reward | 0.86 |
+
+- ah10 is identical: the same sessions pass both thresholds.
+- The mice with low-trial sessions rise:
+
+  | mouse | reward, 10 -> 5 trials | entry, 10 -> 5 trials |
+  |---|---|---|
+  | ly05 | 0.271 -> 0.509 | 0.180 -> 0.266 |
+  | ah08 | 0.414 -> 0.542 | 0.167 -> 0.259 |
+
+Reward-kernel latency (F9), the lag of the kernel's maximum in reward-locked units:
+
+- Per-mouse medians are 3.5-19 s (LEC) and 0.75-13.5 s (PFC). Most reward-locked units are
+  suppressed right after the reward (F4), so the maximum is the recovery.
+- The fraction peaking in the first 0.5 s is 0.04-0.14 per LEC mouse and 0.12-0.44 per PFC
+  mouse.
+- **ah08** has the highest first-bin fraction among LEC mice, 0.143. Its kernels are not
+  later than the other mice's, so the speed-reference offset (+0.25 to +0.40 s against -0.30 s)
+  does not show here, at 0.5 s resolution.
+
+Regions (F10; off-boundary units, >= 50 um from a region transition):
+
+- Fraction locked to reward, mean of mice: ENTl-deep 0.595 (5 mice), SUB/ProS 0.567 (4),
+  CA1/HPF 0.415 (2), ENTm 0.400 (3), ENTl-sup 0.310 (3); PFC 0.610 (7).
+- The ENTl-sup and ENTm cells with >= 20 units are single mice (ah08, ly07).
+- ENTl-deep - SUB/ProS: rate-matched within recday, mouse-level difference, labels shuffled
+  within recday, 5000 permutations, 484 units, 4 mice.
+
+  | block | fraction locked: difference, p | cpd: difference, p |
+  |---|---|---|
+  | entry | +0.055, 0.33 | +0.020, 0.0048 |
+  | reward | +0.128, 0.023 | +0.003, 0.29 |
+  | reward A | -0.008, 0.84 | +0.000, 0.89 |
+  | A + reward | +0.075, 0.14 | +0.003, 0.23 |
+
+  - The entry-cpd difference survives Holm over these 8 tests, but ly05 contributes +0.074 and
+    the other three mice +0.001 to +0.004.
+  - The reward-fraction difference is ah10 +0.04, ly05 -0.04, ly06 +0.29, ly07 +0.22.
+  - Both are candidates resting on one or two mice.
+
+Per recday (F11):
+
+- ly05_20250620_20250623, v1's clock-fault recday, is reward-locked at 0.473 under v4: 6th of 24
+  LEC recdays from the bottom, median 0.542. It is not the outlier v1 made it.
+- The bottom five are the low-session recdays: ah08_20250624_20250625 (2 sessions, 0.113) and
+  ly05_20250616_20250617, ly05_20250624_20250625, ly05_20250613_20250615 and
+  ah08_20250613_20250615 (3 sessions each, 0.16-0.33).
+- Median held-out r2 is negative on ah08_20250624_20250625 (-0.18), ly05_20250613_20250615
+  (-0.05) and ly05_20250616_20250617 (-0.05). With 2-3 sessions, the ~150-column model overfits
+  its 1-2 training sessions.
+
+### What was NOT established
+
+- **Whether an entry call is an entry clock or a leaky reward count.** WP1 showed superposition
+  traces flagged by `ev_entry` (5/6 LEC, 6/6 PFC). M5's reset-vs-superposition test is still
+  needed. The first-minute peak argues for a transient, not a count, but was not tested
+  against one.
+- **What the first-minute transient is.** It could be a response to placement, a recording-start
+  artefact, or pre-A behaviour. The mouse is already in the maze at recording start, so entry is
+  left-censored. PFC has no pre-A kinematics, so it carries no first-minute kinematic claims.
+- **The spread of entry peak times as a sequence.** It needs a cross-validated sort (sort on half
+  the sessions, show the other half).
+- **LEC vs PFC.** No dataset contrast was tested. PFC's event calls compete with kinematics more
+  than LEC's do (the F3 table), so a higher PFC fraction is not a stronger event clock.
+- **Low-session recdays.** Recdays with 2-3 sessions sit outside the M1 recovery envelope, which
+  was built at 8 sessions. Per-mouse fractions for ly05 and ah08 are power-limited at 10 trials
+  (F8).
+- **First-A cpd in the 8 LEC recdays** with one session of untracked pre-A rows (the rank
+  section). The p values are calibrated; the cpd can move.
+- **Kernel shapes and time constants** (Stage 2, M3). Tsao's stepwise table (M3). Rest (M4).
+- **The El-Gaby count.** M1's 245 is not reconciled with the code's 149.
+
+### Commands
+
+```
+python code/check_mirror_parity.py                                       # must exit 0
+# runner gates (planted units through the runner; exit 0 = every check passes)
+sbatch --time=0-01:00 --job-name=ek_rgate_lec sbatch_files/event_kernels.sbatch code/run_event_kernels.py --gate --dataset lec
+sbatch --time=0-01:00 --job-name=ek_rgate_pfc sbatch_files/event_kernels.sbatch mFC_data/code/run_event_kernels.py --gate --dataset pfc
+# Stage 1 + reset test, one job per recday and anchor (add --after <gate job ids> to gate them)
+bash sbatch_files/submit_event_kernels.sh --dataset lec
+bash sbatch_files/submit_event_kernels.sh --dataset pfc
+bash sbatch_files/submit_event_kernels.sh --dataset lec --min-trials 5
+# merge after every log reads EXIT=0
+python code/run_event_kernels.py --dataset lec --merge
+python mFC_data/code/run_event_kernels.py --dataset pfc --merge
+python code/run_event_kernels.py --dataset lec --merge --min-trials 5
+# notebooks (RUN_MODE = 'load'): two timeouts, SLURM walltime and the per-cell limit
+sbatch --job-name=ek_nb_cmp --time=0-03:00 --mem=48G --cpus-per-task=4 sbatch_files/event_kernels.sbatch -m jupyter nbconvert --to notebook --execute --inplace --ExecutePreprocessor.timeout=7200 code/event_kernels_M2_comparison.ipynb
+sbatch --job-name=ek_nb_lec --time=0-02:00 --mem=32G --cpus-per-task=4 sbatch_files/event_kernels.sbatch -m jupyter nbconvert --to notebook --execute --inplace --ExecutePreprocessor.timeout=3600 code/LEC_event_kernels.ipynb
+sbatch --job-name=ek_nb_pfc --time=0-01:00 --mem=32G --cpus-per-task=2 sbatch_files/event_kernels.sbatch -m jupyter nbconvert --to notebook --execute --inplace --ExecutePreprocessor.timeout=3600 mFC_data/code/PFC_event_kernels.ipynb
+```
+
+Outputs:
+
+- shards: `data/event_kernels/stage1/shards/<dataset>_kin-strict_mt<k>_np100/`;
+- merged: `data/event_kernels/stage1/stage1_<arm>.pkl`, with `_units`, `_reset` and `_summary`
+  CSVs;
+- figures: `data/figures/event_kernels/M2/` (F1-F11) and `data/figures/population_drift/M2/`
+  (F12-F14).
 
 ## 2026-10-02 — M1: data preparation (WP0) and the synthetic gate (WP1)
 

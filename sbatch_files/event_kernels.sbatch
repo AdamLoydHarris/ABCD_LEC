@@ -5,12 +5,13 @@
 #SBATCH --nodes 1
 #SBATCH --time 0-04:00
 #SBATCH --cpus-per-task 8
-#SBATCH --partition gpu_lowp
+#SBATCH --partition cpu_backfill
 #SBATCH --mem=32G
 #SBATCH --qos=normal
 
-# One event-kernel script, from either tree, on the cluster. CPU only: gpu_lowp because the cpu
-# partition was degraded on 2026-10-02 (user-approved); pass --partition=cpu to override.
+# One event-kernel script, from either tree, on the cluster. CPU only: cpu_backfill, because since
+# 2026-10-09 gpu_lowp warns that CPU-only jobs will be blocked and cpu is 260 CPUs at fairshare 0.006.
+# cpu_backfill requeues on preemption, so keep jobs short (one recday per job).
 # Usage:  sbatch --job-name=<name> sbatch_files/event_kernels.sbatch <script relative to the repo> [args]
 #   e.g.  sbatch --job-name=ek_syn_lec sbatch_files/event_kernels.sbatch code/event_kernels_synthetics.py --dataset lec --quick
 

@@ -262,6 +262,55 @@ Design choices inside `event_kernels.py`, each with its reason:
 
 ## 7. Status
 
+### 2026-10-12, evening: M2 complete, stopped for the M3 go-ahead
+
+Full write-ups:
+
+- `code/EVENT_KERNELS.md`, 2026-10-12 entry: Stage 1, the reset test, the runner gates, the rank
+  analysis;
+- `code/POPULATION_DRIFT.md`: Kanter part 1.
+
+Figures F1-F14 are in `data/figures/event_kernels/M2/` and `data/figures/population_drift/M2/`.
+Notebooks, all `RUN_MODE = 'load'`: `code/event_kernels_M2_comparison.ipynb`,
+`code/LEC_event_kernels.ipynb`, `mFC_data/code/PFC_event_kernels.ipynb`.
+
+- **Results in brief.**
+  - Every event block exceeds the null rate (0.050) in every mouse. Units locked, mean of mice:
+
+    | block | LEC, 5 mice | PFC, 7 mice |
+    |---|---|---|
+    | every reward | 0.51 | 0.61 |
+    | entry | 0.29 | 0.34 |
+    | reward A | 0.12 | 0.16 |
+
+  - The entry kernel is mostly a first-minute transient: 62-78% of entry-locked LEC units peak
+    there. Held-out-session decoding of the 1-min epoch likewise sits almost entirely in the
+    first minute (0.25 vs 0.07, chance 0.056). Over the rest of the session, change is drift.
+  - The entry kernel beats a day-long trend in 82% (LEC) and 72% (PFC) of entry-locked units.
+  - PFC event calls compete with the fast speed bank more than LEC's do.
+  - No regional contrast is established. ENTl-deep > SUB/ProS for reward locking is a candidate
+    (+0.13, p 0.023, 4 mice, two near zero).
+- **Runs.** LEC 24/25 recdays at >= 10 trials (ly05_20250618_20250619 has 1 session), 25/25 at
+  >= 5; PFC 24/25 (me08_12092021_13092021 has no tracked position). Every log reads `EXIT=0`.
+  Both runner gates pass exactly (max |diff| = 0 against the M1 pickles).
+- **Incidents, all resolved and documented in the entry:**
+  - two jobs refused on a transient mirror drift, after a preemption requeue re-ran the parity
+    check;
+  - the me08 crash: a new skip rule, and the PFC arm rerun on the revised runner;
+  - a mis-specified rank smoke check, replaced by a null-space analysis.
+- **Decisions to put to the user before M3:**
+  1. Commit the M2 code and documents? Nothing since 949b99f is committed. The M2 lines of
+     `check_mirror_parity.py` are 3 `BYTE_PAIRS`; the file carries no other uncommitted edits
+     now.
+  2. The next runner revision:
+     - a tolerance in `rank_report` (exact-bytes false alarms);
+     - dropping the redundant `ev_first_A:pre` column. That is an engine design change, so a
+       default-preserving option and a pin.
+  3. M3 inputs:
+     - Stage 2 on which arm, >= 10 or >= 5 (ly05 and ah08 are power-limited at 10);
+     - a cross-validated sort for the F4 heatmaps before reading the peak-time spread as tiling;
+     - whether to exclude the 2-3-session recdays whose median held-out r2 is negative.
+
 ### 2026-10-12: M2 go-ahead and the decisions behind it
 
 The user approved M2 (plan `~/.claude/plans/please-read-this-handoff-crystalline-pinwheel.md`)
