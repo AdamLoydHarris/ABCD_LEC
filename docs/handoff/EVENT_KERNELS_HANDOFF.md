@@ -262,6 +262,45 @@ Design choices inside `event_kernels.py`, each with its reason:
 
 ## 7. Status
 
+### 2026-10-12: M2 go-ahead and the decisions behind it
+
+The user approved M2 (plan `~/.claude/plans/please-read-this-handoff-crystalline-pinwheel.md`)
+and settled the three questions left open at 20:45 on 2026-10-02.
+
+| topic | decision |
+|---|---|
+| kinematic design | `kin='strict'` for every M2 fit |
+| trial threshold | 10 in both datasets is primary; LEC also runs at 5 as a sensitivity arm. `MIN_TRIALS` stays 10 and the runners take `--min-trials`. |
+| commit | the post-57eac39 work, this entry included, committed and pushed |
+| stop point | through the M2 report; stop early only if the runner gate or the real-data smoke fails |
+| partition | `cpu_backfill`. Supersedes the `gpu_lowp` row of section 2: since 2026-10-09 `gpu_lowp` warns that CPU-only jobs will be blocked. |
+
+What the threshold changes:
+
+| | at 10 | at 5 |
+|---|---|---|
+| LEC analysis sessions | 136 | 164 |
+| ly05 analysis sessions | 13 | 25 |
+| LEC recdays with fewer than 2 / 3 sessions | 1 / 2 | 0 / 0 |
+| PFC analysis sessions | 176 | 187, not run |
+
+- At 10, ly05_20250618_20250619 has 1 session and is skipped (109 units). ah08_20250624_20250625
+  has 2 and runs with 2 folds, flagged.
+- The gate recday ah10_20250616_20250617 has 8 sessions at either threshold, so the M1 gates cover
+  both arms.
+
+Checked before starting:
+
+- mirror parity exits 0;
+- no loader input changed after the M1 report;
+- `glm_analysis_v3`, `glm_cv` and `anatomy_split` are identical to 57eac39;
+- the docs written since do not change M2: `BAD_RECDAY_ly05_20250620_20250623.md` is a v1-only
+  fault, the gaps in `TRACKING_GAPS_PROVENANCE.md` are the `gap` segment `strict` already codes,
+  and `V4_MIGRATION.md` concerns other analyses.
+
+M2 adds `run_event_kernels.py`, `run_population_drift.py` and `event_kernels_plots.py` (all
+mirrored), `sbatch_files/submit_event_kernels.sh`, three notebooks and figures F1-F14.
+
 ### 20:45 UTC, 2026-10-02: M1 complete, stopped for the user's go-ahead
 
 - Full gates under `--kin strict` pass every row in both datasets (jobs 3675492/93, `EXIT=0`).
