@@ -34,6 +34,9 @@ mFC_data/mFC_schema-main/
 mFC_data/Intermediate_objects/
 mFC_data/replication_run/
 mFC_data/lec_replication_run/
+# Added 2026-10-12: the v4 LEC run (84 GB, 16,812 files) was unignored and a `git add .` began
+# hashing its 0.7-0.8 GB intermediates into the object store.
+mFC_data/lec_replication_run_v4/
 
 # Notebooks with large embedded outputs
 code/LEC_sploratory_analysis_with_glm_and_population.ipynb
