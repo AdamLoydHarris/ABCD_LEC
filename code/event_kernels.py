@@ -420,7 +420,7 @@ def _reference_coded(M: np.ndarray, sids: np.ndarray, min_sessions: int = 2):
 
 def build_design(sessions: list, events=('entry', 'A', 'reward'), *, kin: str = 'full',
                  place: bool = True, day_clock: bool = False, bank_init: str = 'steady',
-                 blocks: list | None = None) -> dict:
+                 blocks: list | None = None, first_A_pre: bool = True) -> dict:
     """Stacked design over sessions: X (rows, p), FR (units, rows), session_ids, groups.
 
     Groups: 'place', 'kin_inst' (speed / signed accel deciles), 'kin_fast' / 'kin_slow' (bank tau
@@ -432,6 +432,10 @@ def build_design(sessions: list, events=('entry', 'A', 'reward'), *, kin: str = 
     5/8 planted exp(speed-history) units (tau 2 s, PFC) were locked to the A+reward joint, mostly
     through PFC's untracked segments (`event_kernels_leak_diag.py`).
     `place=False` drops the place block (the same control for place).
+    `first_A_pre=False` drops the first-A block's pre-event column, which equals the A block's
+    (`kin='full'`) or the A block's plus `kin_missing:pre_A` (`kin='strict'`). With it, a held-out
+    session holding a recday's only untracked pre-A rows got an arbitrary share of the pre-A
+    offset (M2: 8 LEC recdays, 27-62 blocks each).
     """
     if kin not in ('full', 'strict', 'none'):
         raise ValueError(f'kin must be full, strict or none, got {kin!r}')
@@ -485,6 +489,8 @@ def build_design(sessions: list, events=('entry', 'A', 'reward'), *, kin: str = 
         M = np.vstack([b[f'ev_{e}'] for b in blocks])
         if kin == 'strict' and e in FAST_EVENTS:
             M[miss] = 0.0                     # kinematics unobserved: no fast-event claim on these rows
+        if e == 'first_A' and not first_A_pre:
+            M[:, -1] = 0.0                    # an empty column, so `_reference_coded` drops it
         M, kept, _ = _reference_coded(M, sids)
         edges = EDGES_S[e]
         lab = [f'{edges[j]}-{edges[j + 1]}s' if j < len(edges) - 1 else ('overflow' if j == len(edges) - 1 else 'pre')

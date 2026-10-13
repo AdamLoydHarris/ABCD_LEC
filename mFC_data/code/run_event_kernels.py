@@ -3,6 +3,10 @@
     python code/run_event_kernels.py --dataset lec --recday ah10_20250616_20250617 --anchor entry
     python code/run_event_kernels.py --dataset lec --merge [--min-trials 10 --n-perm 100]
     python code/run_event_kernels.py --dataset lec --gate          # planted units through this path
+    python code/run_event_kernels.py --dataset lec --stage2 --event reward --recday <rd> --min-trials 5
+    python code/run_event_kernels.py --dataset lec --stage2 --merge --min-trials 5
+    python code/run_event_kernels.py --dataset lec --gate-stage2    # Stage 2 on planted units, exact vs M1
+    python code/run_event_kernels.py --compare <old merged.pkl> <new merged.pkl>
 
 Anchor `entry` fits events (entry, A, reward) and the reset test; `first_A` fits (first_A, A,
 reward) on the same rows. Shards: `data/event_kernels/stage1/shards/<arm>/<recday>_<anchor>.pkl`
@@ -11,6 +15,11 @@ recday with < 2 analysis sessions writes a `skipped` shard. The merge refuses mi
 duplicate recdays and a short recday count, and writes a versioned pickle + long CSVs. Betas and
 raw lag-bin rates are kept for figures only; the call is Stage 1's (locked = Freedman-Lane
 p < 0.05 and held-out cpd > 0, `event_kernels_synthetics.locked`).
+
+Since 2026-10-12 (V3): anchor `first_A` fits `build_design(first_A_pre=False)`, because the
+first-A pre column is the A pre column plus `kin_missing:pre_A`, and in M2 that sum let an
+arbitrary share of the pre-A offset reach held-out rows on 8 LEC recdays. Stage 2
+(`ek.stage2_unit`) runs per recday and event on the Stage 1 passers plus a seeded null sample.
 
 This file is byte-identical in `code/` and `mFC_data/code/`.
 """
@@ -27,9 +36,11 @@ import shutil
 import socket
 import sys
 import time
+import zlib
 
 import numpy as np
 import pandas as pd
+from scipy.stats import binom
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
@@ -42,6 +53,9 @@ IS_PFC = 'mFC_data' in HERE
 ANCHORS = ('entry', 'first_A')
 N_RECDAYS = 25
 STAGE1_DIR = os.path.join(ek.REPO, 'data', 'event_kernels', 'stage1')
+STAGE2_DIR = os.path.join(ek.REPO, 'data', 'event_kernels', 'stage2')
+STAGE2_EVENTS = ('entry', 'A', 'reward')
+N_NULL = 10                    # non-locked units per recday and event: the reference for shape fractions
 
 
 # ---------------------------------------------------------------------------
@@ -133,7 +147,7 @@ def stamp(dataset, kin, min_trials, n_perm, seed, synthetic=None) -> dict:
                 bank_taus_s=list(ek.BANK_TAUS_S), fast_tau_max_s=ek.FAST_TAU_MAX_S,
                 sha1_event_kernels=_sha1(ek.__file__), sha1_glm_cv=_sha1(glm_cv.__file__),
                 sha1_glm_analysis_v3=_sha1(ek.g3.__file__), sha1_runner=_sha1(os.path.abspath(__file__)),
-                inputs=input_versions(dataset))
+                first_A_anchor_pre=False, inputs=input_versions(dataset))
 
 
 # ---------------------------------------------------------------------------
@@ -181,39 +195,62 @@ def lag_labels(event: str) -> list:
     return [f'{e[j]}-{e[j + 1]}s' for j in range(len(e) - 1)] + ['overflow', 'pre']
 
 
-def rank_report(X: np.ndarray, names: list) -> tuple:
-    """(columns with a loading on the null space of X, whether the deficiency is only all-zero
-    and duplicated columns). The smoke run found only those: the `pre` columns of A, reward and
-    first A mark the same rows before the first A (and in PFC equal `kin_missing:pre_A`), and a
-    fold whose held-out session holds every tracking gap has an all-zero `kin_missing:gap`."""
-    _, s, vt = np.linalg.svd(X, full_matrices=False)
-    null = vt[s <= s.max() * max(X.shape) * np.finfo(float).eps]
-    if not len(null):
-        return [], True
-    support = np.flatnonzero(np.abs(null).max(axis=0) > 1e-6)
-    zero = [j for j in support if not np.any(X[:, j])]
-    groups = {}
-    for j in support:
-        if j not in zero:
-            groups.setdefault(X[:, j].tobytes(), []).append(j)
-    return [names[j] for j in support], len(zero) + sum(len(g) - 1 for g in groups.values()) == len(null)
+def rank_report(Xtr: np.ndarray, Xte: np.ndarray, names: list, tested: set) -> dict:
+    """What a training fold's rank deficit does to its held-out session.
+
+    Columns all-zero in training get beta 0 in every model, so they cannot move a cpd and are set
+    aside. In what remains, a deficit reaches held-out cpd only through null-space directions with a
+    held-out component (a training identity that fails on held-out rows) touching a tested column.
+    Duplicates are matched with a tolerance: one-hot fractions sum to 0.9999999999999999 where an
+    indicator is 1.0, which the M2 exact-bytes test flagged as non-duplicates.
+    """
+    nz = np.flatnonzero(np.abs(Xtr).max(axis=0) > 1e-12)
+    out = dict(zero_columns=[names[j] for j in np.setdiff1d(np.arange(Xtr.shape[1]), nz)],
+               null_columns=[], leak=0.0, leak_columns=[], tested_leak=False, only_duplicates=True)
+    A, B = Xtr[:, nz], Xte[:, nz]
+    _, s, vt = np.linalg.svd(A, full_matrices=False)
+    N = vt[s <= s.max() * max(A.shape) * np.finfo(float).eps]
+    if not len(N):
+        return out
+    sup = np.flatnonzero(np.abs(N).max(axis=0) > 1e-6)
+    out['null_columns'] = [names[nz[j]] for j in sup]
+    reps = []
+    for j in sup:
+        if not any(np.allclose(A[:, j], A[:, r], atol=1e-9) for r in reps):
+            reps.append(j)
+    out['only_duplicates'] = bool(len(sup) - len(reps) == len(N))
+    if len(B):
+        P = B @ N.T                                        # held-out rows along each null direction
+        scale = max(float(np.abs(B).max()), 1e-12)
+        out['leak'] = float(np.abs(P).max() / scale)
+        if out['leak'] > 1e-9:
+            _, sv, wt = np.linalg.svd(P, full_matrices=False)
+            L = wt[sv > 1e-9 * scale] @ N                  # the part of the null space that leaks
+            cols = np.flatnonzero(np.abs(L).max(axis=0) > 1e-6)
+            out['leak_columns'] = [names[nz[j]] for j in cols]
+            out['tested_leak'] = bool(any(nz[j] in tested for j in cols))
+    return out
 
 
 def rank_check(D: dict) -> dict:
-    """Null-space columns of every training fold and of the all-session design (centred)."""
+    """`rank_report` for every training fold against its held-out session, plus the null-space
+    columns of the all-session design (betas not identified; `kernels` sets them NaN)."""
     sids = D['session_ids']
     Xc = ek.center_within_sessions(D['X'], sids)
-    cols, benign = set(), True
-    for f in np.unique(sids):
-        c, ok = rank_report(Xc[sids != f], D['names'])
-        cols |= set(c)
-        benign &= ok
-    c_all, ok_all = rank_report(Xc, D['names'])
-    return dict(fold_null_columns=sorted(cols), fold_deficiency_benign=bool(benign),
-                all_null_columns=c_all, all_deficiency_benign=bool(ok_all))
+    tested = {c for g in ek.TESTED if g in D['groups'] for c in D['groups'][g]}
+    folds = [{**rank_report(Xc[sids != f], Xc[sids == f], D['names'], tested), 'fold': int(f)}
+             for f in np.unique(sids)]
+    _, s, vt = np.linalg.svd(Xc, full_matrices=False)
+    N = vt[s <= s.max() * max(Xc.shape) * np.finfo(float).eps]
+    all_null = [D['names'][j] for j in np.flatnonzero(np.abs(N).max(axis=0) > 1e-6)] if len(N) else []
+    union = lambda k: sorted(set().union(*[r[k] for r in folds]))
+    return dict(folds=folds, fold_null_columns=union('null_columns'), fold_zero_columns=union('zero_columns'),
+                leak_columns=union('leak_columns'), max_leak=max(r['leak'] for r in folds),
+                tested_leak=any(r['tested_leak'] for r in folds),
+                only_duplicates=all(r['only_duplicates'] for r in folds), all_null_columns=all_null)
 
 
-def kernels(D: dict, events, kin: str, unidentified=()) -> dict:
+def kernels(D: dict, events, kin: str, unidentified=(), first_A_pre: bool = True) -> dict:
     """Per event block, for figures: betas of one all-session OLS fit on the centred design (Hz;
     the reference bin 0, bins dropped for rarity or in the null space NaN) and the raw mean rate
     per lag bin (Hz)."""
@@ -227,6 +264,8 @@ def kernels(D: dict, events, kin: str, unidentified=()) -> dict:
         M = np.vstack([b[f'ev_{e}'] for b in D['blocks']])
         if kin == 'strict' and e in ek.FAST_EVENTS:
             M[D['kin_missing']] = 0.0          # as build_design, so the reference is the same column
+        if e == 'first_A' and not first_A_pre:
+            M[:, -1] = 0.0
         occ = M.sum(axis=0)
         ref = int(np.argmax(occ))
         beta = np.full((D['FR'].shape[0], len(labels)), np.nan)
@@ -252,8 +291,10 @@ def compact_reset(res: dict) -> dict:
                 entry_beats_day=res['entry_beats_day'], n_folds=res['n_folds'])
 
 
-def fit_recday(dataset, recday, anchor, *, kin, min_trials, n_perm, seed, synthetic=None) -> dict:
-    """Stage 1 (+ the reset test for anchor `entry`) on one recday; the shard's `data`."""
+def fit_recday(dataset, recday, anchor, *, kin, min_trials, n_perm, seed, synthetic=None,
+               first_A_pre=None) -> dict:
+    """Stage 1 (+ the reset test for anchor `entry`) on one recday; the shard's `data`.
+    `first_A_pre` None means the V3 rule: dropped for anchor `first_A` (the gate passes True)."""
     t0 = time.time()
     rec = ek.load_recday(recday, dataset)
     ek.add_day_clock(rec)
@@ -281,10 +322,12 @@ def fit_recday(dataset, recday, anchor, *, kin, min_trials, n_perm, seed, synthe
         data['elapsed_s'] = time.time() - t0
         return data
     events = (anchor, 'A', 'reward')
-    D = ek.build_design(sessions, events, kin=kin)
+    fa_pre = (anchor != 'first_A') if first_A_pre is None else bool(first_A_pre)
+    data['first_A_pre'] = fa_pre
+    D = ek.build_design(sessions, events, kin=kin, first_A_pre=fa_pre)
     data['stage1'] = ek.stage1(sessions, events, n_perm=n_perm, seed=seed, design=D)
     data['rank'] = rank_check(D)
-    data['kernels'] = kernels(D, events, kin, unidentified=data['rank']['all_null_columns'])
+    data['kernels'] = kernels(D, events, kin, unidentified=data['rank']['all_null_columns'], first_A_pre=fa_pre)
     if anchor == 'entry':
         data['reset'] = compact_reset(ek.reset_test(rec, sessions, events, kin=kin))
     data['elapsed_s'] = time.time() - t0
@@ -324,6 +367,15 @@ def reset_table(d: dict) -> pd.DataFrame | None:
     return f
 
 
+def _rank_ok(d: dict):
+    """V3 shards: no fold's null space reaches held-out rows through a tested column. V2 shards
+    (M2): the deficit was only exactly duplicated or all-zero columns."""
+    r = d.get('rank')
+    if r is None:
+        return None
+    return (not r['tested_leak']) if 'tested_leak' in r else r.get('fold_deficiency_benign')
+
+
 def merge_dir(shard_dir: str, expect: int = N_RECDAYS) -> dict:
     """Merge every shard of one arm: refusals as `load_shards`, plus `expect` recdays per anchor
     (skipped shards count; 0 disables)."""
@@ -341,7 +393,8 @@ def merge_dir(shard_dir: str, expect: int = N_RECDAYS) -> dict:
         n_cols=d['stage1']['n_cols'] if not d['skipped'] else np.nan,
         n_rows=d['stage1']['n_rows'] if not d['skipped'] else np.nan,
         null_columns=' '.join(d['rank']['fold_null_columns']) if 'rank' in d else None,
-        rank_benign=d['rank']['fold_deficiency_benign'] if 'rank' in d else None,
+        rank_benign=_rank_ok(d),
+        leak_columns=' '.join(d['rank'].get('leak_columns', [])) if 'rank' in d else None,
         r2_cv_median=float(np.nanmedian(d['stage1']['r2_cv'])) if not d['skipped'] else np.nan,
         reset=(None if d['anchor'] != 'entry' or d['skipped'] else d['reset'].get('skipped', 'ok')),
         elapsed_s=d.get('elapsed_s'), slurm_job_id=d.get('slurm_job_id')) for d in shards])
@@ -416,6 +469,40 @@ def gate(dataset: str, kin: str, seed: int = 0) -> pd.DataFrame:
         r_new = M['reset'].sort_values('unit')['entry_beats_day'].to_numpy()
         add('reset test entry_beats_day == gate', int(r_new.sum()), np.array_equal(r_new, ref['reset']['entry_beats_day']))
 
+    # The first-A anchor, never gated in M1, now without its pre column (V3).
+    fa = fit_recday(dataset, rd, 'first_A', kin=kin, min_trials=ek.MIN_TRIALS, n_perm=n_perm, seed=seed,
+                    synthetic='quick')
+    s_fa, truth = fa['stage1'], ref['truth']
+    kind_units = lambda kind, tau_max=np.inf: truth[(truth['kind'] == kind) &
+                                                    (truth['tau'].fillna(0) <= tau_max)]['unit'].to_numpy()
+    a0 = syn.alpha_null(n_perm)
+    h = syn.locked(s_fa, 'ev_first_A')[kind_units('noise')]
+    p = float(binom.sf(h.sum() - 1, len(h), a0))
+    add(f'first-A anchor: noise on ev_first_A (binomial p vs {a0:.3f})', f'{h.mean():.2f} (p={p:.2f})', p >= 0.01)
+    v = float(syn.locked(s_fa, 'ev_first_A')[kind_units('entry_ramp', 1800)].mean())
+    add('first-A anchor: entry ramps tau <= 30 min on ev_first_A', v, v >= 0.8)
+    for kind in ('A_ramp', 'reward_ramp', 'reward_bump'):
+        u = kind_units(kind)
+        hit = syn.locked(s_fa, 'ev_A')[u] | syn.locked(s_fa, 'ev_reward')[u] | syn.locked(s_fa, 'ev_A+reward')[u]
+        add(f'first-A anchor: {kind} on A, reward or joint', float(hit.mean()), hit.mean() >= 0.8)
+    fp = fit_recday(dataset, rd, 'first_A', kin=kin, min_trials=ek.MIN_TRIALS, n_perm=n_perm, seed=seed,
+                    synthetic='quick', first_A_pre=True)['stage1']
+    gone = [n for n in fp['col_names'] if n not in s_fa['col_names']]
+    add('first-A design drops exactly ev_first_A:pre', gone, gone == ['ev_first_A:pre'])
+    # Every block's reduced model keeps a pre-A indicator either way, except the A+reward joint's: with
+    # the first-A pre column gone it carries the pre-A offset, as under anchor entry (LEC gate: 0.019).
+    dc = {g: float(np.nanmax(np.abs(fp['cpd_cv'][g] - s_fa['cpd_cv'][g]))) for g in s_fa['cpd_cv']}
+    same_p = {g: np.array_equal(fp['p_freedman_lane__cpd'][g], s_fa['p_freedman_lane__cpd'][g]) for g in s_fa['cpd_cv']}
+    rest = [g for g in s_fa['cpd_cv'] if g != 'ev_A+reward']
+    add('first_A_pre False vs True, every block but the A+reward joint: max |cpd diff| <= 1e-9, p identical',
+        {g: f'{dc[g]:.0e}' for g in rest}, all(dc[g] <= 1e-9 and same_p[g] for g in rest))
+    flips = int(np.sum(syn.locked(fp, 'ev_A+reward') != syn.locked(s_fa, 'ev_A+reward')))
+    rows.append(dict(check='first_A_pre: the A+reward joint now carries the pre-A offset (reported)',
+                     value=f"max |cpd diff| {dc['ev_A+reward']:.1e}, calls changed {flips}", passed=True))
+    print(f"  [info] A+reward joint under first_A_pre False vs True: max |cpd diff| {dc['ev_A+reward']:.1e}, "
+          f"calls changed {flips}", flush=True)
+    add('first-A fit: no held-out leak through a tested column', fa['rank']['leak_columns'], not fa['rank']['tested_leak'])
+
     # negative arms: each must fire
     neg = os.path.join(root, 'negative_stamp')
     os.makedirs(neg)
@@ -454,6 +541,157 @@ def gate(dataset: str, kin: str, seed: int = 0) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
+# Stage 2: kernel shapes and time constants of the Stage 1 passers
+# ---------------------------------------------------------------------------
+
+def stage1_units_csv(dataset, kin, min_trials, n_perm) -> str:
+    """The unit table of the latest merged Stage 1 pickle of an arm."""
+    return _latest_pickle(os.path.join(STAGE1_DIR, f'stage1_{arm_name(dataset, kin, min_trials, n_perm)}'))[:-4] + '_units.csv'
+
+
+def stage2_stamp(dataset, kin, min_trials, n_perm, seed, glm_alpha, synthetic=None) -> dict:
+    s1 = None if synthetic else stage1_units_csv(dataset, kin, min_trials, n_perm)
+    return {**stamp(dataset, kin, min_trials, n_perm, seed, synthetic), 'runner': 'run_event_kernels.stage2',
+            'stage1_units': os.path.basename(s1) if s1 else None, 'stage1_sha1': _sha1(s1) if s1 else None,
+            'glm_alpha': float(glm_alpha), 'n_null': N_NULL, 'events': list(STAGE2_EVENTS)}
+
+
+def fit_stage2(dataset, recday, event, *, kin, min_trials, n_perm, seed, glm_alpha=1e-4, synthetic=None,
+               units=None) -> dict:
+    """`ek.stage2_unit` for one recday and event, on the design Stage 1 fitted (anchor `entry`):
+    the units locked to `ev_<event>` plus N_NULL seeded non-locked ones, or `units` [(unit, role)]."""
+    t0 = time.time()
+    rec = ek.load_recday(recday, dataset)
+    ek.add_day_clock(rec)
+    sessions = ek.analysis_sessions(rec, min_trials)
+    data = dict(recday=recday, dataset=dataset, event=event, skipped=None, host=socket.gethostname(),
+                slurm_job_id=os.environ.get('SLURM_JOB_ID'))
+    if synthetic:
+        sessions, truth = syn.make_synthetic(rec, sessions, syn.unit_specs(dataset, synthetic == 'quick'), seed=seed)
+        info = synthetic_units(truth, recday)
+    else:
+        T = pd.read_csv(stage1_units_csv(dataset, kin, min_trials, n_perm))
+        T = T[(T['recday'] == recday) & (T['anchor'] == 'entry') & (T['block'] == f'ev_{event}')]
+        if T.empty:
+            data['skipped'] = 'no Stage 1 rows: the recday was skipped in Stage 1'
+            data['elapsed_s'] = time.time() - t0
+            return data
+        info = T.drop(columns=['anchor', 'block'])
+        if units is None:
+            lk, nl = T[T['locked'].astype(bool)], T[~T['locked'].astype(bool)]
+            rng = np.random.default_rng([seed, zlib.crc32(f'{recday}_{event}'.encode())])
+            null = nl.iloc[np.sort(rng.choice(len(nl), min(N_NULL, len(nl)), replace=False))] if len(nl) else nl
+            units = [(int(u), 'locked') for u in lk['unit']] + [(int(u), 'null_sample') for u in null['unit']]
+    D = ek.build_design(sessions, STAGE2_EVENTS, kin=kin)
+    if not synthetic:
+        p1 = os.path.join(STAGE1_DIR, 'shards', arm_name(dataset, kin, min_trials, n_perm), f'{recday}_entry.pkl')
+        with open(p1, 'rb') as fh:
+            names1 = pickle.load(fh)['data']['stage1']['col_names']
+        if names1 != D['names']:
+            raise AssertionError(f'{recday}: the Stage 2 design differs from the Stage 1 design; passers would not match')
+    rows = [{**ek.stage2_unit(D, u, event, glm_alpha=glm_alpha), 'role': role} for u, role in units]
+    t = pd.DataFrame(rows)
+    if len(t):
+        cols = [c for c in info.columns if c not in t.columns or c == 'unit']
+        t = t.merge(info[cols].drop_duplicates('unit'), on='unit', how='left')
+    data['rows'] = t
+    data['elapsed_s'] = time.time() - t0
+    return data
+
+
+def merge_stage2_dir(shard_dir: str, expect: int) -> dict:
+    """Stage 2 shards (recday x event) into one long table; refusals as `load_shards`."""
+    cfg, shards = load_shards(shard_dir, key=lambda d: (d['recday'], d['event']))
+    if expect and len(shards) != expect:
+        raise ValueError(f'{len(shards)} shards, expected {expect}; pass --expect-recdays 0 to merge anyway')
+    rows = [d['rows'].assign(recday=d['recday'], event=d['event']) for d in shards
+            if not d['skipped'] and len(d['rows'])]
+    summary = pd.DataFrame([dict(recday=d['recday'], event=d['event'], skipped=d['skipped'],
+                                 n_locked=int((d['rows']['role'] == 'locked').sum()) if not d['skipped'] and len(d['rows']) else 0,
+                                 n_null=int((d['rows']['role'] == 'null_sample').sum()) if not d['skipped'] and len(d['rows']) else 0,
+                                 elapsed_s=d.get('elapsed_s'), slurm_job_id=d.get('slurm_job_id')) for d in shards])
+    return dict(config=cfg, table=pd.concat(rows, ignore_index=True) if rows else pd.DataFrame(),
+                summary=summary.sort_values(['event', 'recday']).reset_index(drop=True))
+
+
+def write_merged_stage2(M: dict, arm: str) -> str:
+    p = versioned(os.path.join(STAGE2_DIR, f'stage2_{arm}.pkl'))
+    with open(p, 'wb') as fh:
+        pickle.dump(M, fh, protocol=pickle.HIGHEST_PROTOCOL)
+    M['table'].to_csv(p[:-4] + '_units.csv', index=False)
+    M['summary'].to_csv(p[:-4] + '_summary.csv', index=False)
+    return p
+
+
+STAGE2_COLS = ('dev_null', 'dev_np', 'dev_ramp', 'dev_bump', 'gain_np', 'frac_ramp', 'frac_bump', 'tau_median',
+               'tau_log_iqr', 'ramp_weight_median', 'ramp_sign_consistency', 'peak_median', 'k_median')
+
+
+def gate_stage2(dataset: str, kin: str, seed: int = 0) -> pd.DataFrame:
+    """Planted units through the Stage 2 shard + merge path reproduce the M1 quick pickle's
+    `stage2` table exactly (same units, events and design as `event_kernels_synthetics.run`)."""
+    rd = syn.DEFAULT_RECDAY[dataset]
+    ref_path = _latest_pickle(os.path.join(syn.OUT_DIR, f'synthetics_{dataset}_{rd}_quick_kin-{kin}'))
+    with open(ref_path, 'rb') as fh:
+        ref = pickle.load(fh)
+    n_perm = int(ref['n_perm'])
+    truth = ref['truth']
+    want = truth[truth['kind'].isin(['entry_ramp', 'A_ramp', 'reward_ramp', 'reward_bump',
+                                     'reward_fixed_width', 'reward_superposition'])].groupby('kind').head(3)
+    ev_of = {'entry_ramp': 'entry', 'A_ramp': 'A'}
+    root = os.path.join(STAGE2_DIR, 'runner_gate', f"{dataset}_{time.strftime('%Y%m%d_%H%M%S')}")
+    st = stage2_stamp(dataset, kin, ek.MIN_TRIALS, n_perm, seed, 1e-4, synthetic='quick')
+    print(f'stage 2 gate {dataset} {rd} vs {os.path.basename(ref_path)}: {len(want)} planted units', flush=True)
+    for event in STAGE2_EVENTS:
+        u = [(int(x), 'planted') for x, k in zip(want['unit'], want['kind']) if ev_of.get(k, 'reward') == event]
+        d = fit_stage2(dataset, rd, event, kin=kin, min_trials=ek.MIN_TRIALS, n_perm=n_perm, seed=seed,
+                       synthetic='quick', units=u)
+        write_atomic(os.path.join(root, f'{rd}_{event}.pkl'), {'config': st, 'data': d})
+    M = merge_stage2_dir(root, expect=len(STAGE2_EVENTS))
+    a = ref['stage2'].set_index(['unit', 'event']).sort_index()
+    b = M['table'].set_index(['unit', 'event']).sort_index()
+    rows = [dict(check='same unit-event pairs as M1', value=len(b), passed=a.index.equals(b.index))]
+    if rows[0]['passed']:
+        # glum's deviance sums differ in the last bits across nodes (M1 ran elsewhere): 1.5e-11 absolute
+        # on values ~1e4 in the first pass, so the test is relative, with NaN patterns required equal.
+        va = {c: a[c].to_numpy(float) for c in STAGE2_COLS}
+        vb = {c: b[c].to_numpy(float) for c in STAGE2_COLS}
+        nan_same = all(np.array_equal(np.isnan(va[c]), np.isnan(vb[c])) for c in STAGE2_COLS)
+        d = max(float(np.nanmax(np.abs(va[c] - vb[c]) / np.maximum(1.0, np.abs(va[c])))) for c in STAGE2_COLS)
+        rows.append(dict(check='every numeric Stage 2 output: max relative |runner - M1| <= 1e-9, NaN patterns equal',
+                         value=d, passed=d <= 1e-9 and nan_same))
+        same = bool((a['shape'] == b['shape']).all())
+        rows.append(dict(check='shape class identical', value=f"{int((a['shape'] == b['shape']).sum())}/{len(a)}", passed=same))
+    for r in rows:
+        print(f"  [{'PASS' if r['passed'] else 'FAIL'}] {r['check']}: {r['value']}", flush=True)
+    out = pd.DataFrame(rows)
+    out.to_csv(os.path.join(root, 'stage2_gate.csv'), index=False)
+    print(f'-> {root}', flush=True)
+    return out
+
+
+def compare_merged(old_path: str, new_path: str) -> pd.DataFrame:
+    """Per anchor and block: units in both, max |cpd| and |p| differences, locked calls that
+    differ, and the recdays whose cpd changed, between two merged Stage 1 pickles."""
+    A, B = [pickle.load(open(p, 'rb'))['table'] for p in (old_path, new_path)]
+    key = ['recday', 'unit', 'anchor', 'block']
+    m = A[key + ['cpd', 'p', 'locked']].merge(B[key + ['cpd', 'p', 'locked']], on=key, how='outer',
+                                               suffixes=('_old', '_new'), indicator=True)
+    rows = []
+    for (a, b), g in m.groupby(['anchor', 'block']):
+        both = g[g['_merge'] == 'both']
+        dc = (both['cpd_old'] - both['cpd_new']).abs()
+        rows.append(dict(anchor=a, block=b, units=len(both), only_old=int((g['_merge'] == 'left_only').sum()),
+                         only_new=int((g['_merge'] == 'right_only').sum()), max_abs_cpd=float(dc.max()),
+                         max_abs_p=float((both['p_old'] - both['p_new']).abs().max()),
+                         calls_differ=int((both['locked_old'] != both['locked_new']).sum()),
+                         recdays_cpd_changed=' '.join(sorted(both.loc[dc > 0, 'recday'].unique()))))
+    out = pd.DataFrame(rows)
+    print(out.to_string(index=False))
+    return out
+
+
+# ---------------------------------------------------------------------------
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -468,12 +706,48 @@ def main(argv=None) -> int:
     ap.add_argument('--merge', action='store_true')
     ap.add_argument('--expect-recdays', type=int, default=N_RECDAYS)
     ap.add_argument('--gate', action='store_true', help='runner gate on planted units (exit 0 = every check passes)')
+    ap.add_argument('--stage2', action='store_true', help='Stage 2 for --recday and --event (or --merge them)')
+    ap.add_argument('--event', choices=STAGE2_EVENTS)
+    ap.add_argument('--glm-alpha', type=float, default=1e-4)
+    ap.add_argument('--gate-stage2', action='store_true', help='Stage 2 on planted units, exact against M1')
+    ap.add_argument('--compare', nargs=2, metavar=('OLD', 'NEW'), help='diff two merged Stage 1 pickles')
     args = ap.parse_args(argv)
 
+    if args.compare:
+        compare_merged(*args.compare)
+        return 0
     if args.gate:
         out = gate(args.dataset, args.kin, args.seed)
         return 0 if out['passed'].all() else 1
+    if args.gate_stage2:
+        out = gate_stage2(args.dataset, args.kin, args.seed)
+        return 0 if out['passed'].all() else 1
     arm = arm_name(args.dataset, args.kin, args.min_trials, args.n_perm, args.synthetic)
+    if args.stage2:
+        if args.merge:
+            M = merge_stage2_dir(os.path.join(STAGE2_DIR, 'shards', arm), expect=args.expect_recdays * len(STAGE2_EVENTS))
+            p = write_merged_stage2(M, arm)
+            print(M['summary'].groupby('event')[['n_locked', 'n_null']].sum().to_string())
+            print(f"{len(M['summary'])} shards ({int(M['summary']['skipped'].notna().sum())} skipped) -> {p}")
+            return 0
+        if not (args.recday and args.event):
+            ap.error('--recday and --event are required for a Stage 2 fit')
+        path = os.path.join(STAGE2_DIR, 'shards', arm, f'{args.recday}_{args.event}.pkl')
+        st = stage2_stamp(args.dataset, args.kin, args.min_trials, args.n_perm, args.seed, args.glm_alpha, args.synthetic)
+        if check_or_skip(path, st):
+            print(f'{path} already holds this stamp; nothing to do')
+            return 0
+        d = fit_stage2(args.dataset, args.recday, args.event, kin=args.kin, min_trials=args.min_trials,
+                       n_perm=args.n_perm, seed=args.seed, glm_alpha=args.glm_alpha, synthetic=args.synthetic)
+        write_atomic(path, {'config': st, 'data': d})
+        if d['skipped']:
+            print(f"{args.recday} {args.event}: skipped ({d['skipped']}) -> {path}")
+        else:
+            t = d['rows']
+            print(f"{args.recday} {args.event}: {int((t['role'] == 'locked').sum())} locked + "
+                  f"{int((t['role'] == 'null_sample').sum())} null units, {d['elapsed_s']:.0f} s; "
+                  f"classes of locked units {t[t['role'] == 'locked']['shape'].value_counts().to_dict()} -> {path}")
+        return 0
     if args.merge:
         M = merge_dir(os.path.join(STAGE1_DIR, 'shards', arm), expect=args.expect_recdays)
         p = write_merged(M, arm)
@@ -499,7 +773,7 @@ def main(argv=None) -> int:
     rk = d['rank']
     print(f"{args.recday} {args.anchor}: {len(d['sessions'])} sessions, {len(d['units'])} units, "
           f"{res['n_rows']} rows x {res['n_cols']} cols, min fold rank {res['fold_rank_min']} "
-          f"(null space {rk['fold_null_columns'] or 'none'}; only duplicate/zero columns: {rk['fold_deficiency_benign']}), "
+          f"(null space {rk['fold_null_columns'] or 'none'}; held-out leak through a tested column: {rk['tested_leak']}), "
           f"median r2_cv {np.nanmedian(res['r2_cv']):.4f}, {d['elapsed_s']:.0f} s")
     print(f'  fraction locked: {locked}')
     if 'reset' in d:

@@ -5,6 +5,246 @@ constants, in LEC and PFC, read as the state of an SSM trace bank. Plan, user de
 rules and code map: `docs/handoff/EVENT_KERNELS_HANDOFF.md`. Population drift (Kanter) results
 are in `code/POPULATION_DRIFT.md`.
 
+## 2026-10-12, night — M3 part 1: Stage 2 shapes and time constants (>= 5 trials, both datasets)
+
+**Outcome.**
+
+- **Entry kernels are mostly minutes-scale ramps, not first-minute transients.** This corrects the
+  M2 reading below.
+  - Of the entry-locked units, mean of mice: ramps 0.58 in LEC (up 0.37, down 0.21) and 0.42 in
+    PFC (0.25, 0.17).
+  - Broad bumps (k = 2) peak at about 15 min: 0.32 in LEC and 0.19 in PFC.
+  - A ramp also fits 82% of LEC entry bumps (81% in PFC), recovering >= 0.5 of the gain; the
+    median is 0.96 against the bump's 1.13. Over a 20-min session they are ramp-like.
+  - So 85% of entry-locked LEC units are ramps or ramp-like bumps (pooled units). In PFC it is
+    54%, where 27% are `other`.
+  - The ramp time constant is a median 320 s in both datasets. The middle half is 190-910 s
+    (LEC, 567 units) and 160-640 s (PFC, 158 units). 17% are slower than the session.
+  - Two thirds of LEC entry ramps rise over the session (59% in PFC).
+- **Reward kernels are brief and alike in both datasets.**
+  - Bumps peaking a median 1 s after the reward: 0.50 of locked units (LEC) and 0.37 (PFC).
+  - Ramps with tau a median 2 s (LEC) and 1.4 s (PFC), about 80% rising: the post-reward dip
+    recovering.
+- **Reward-A calls are the weakest.** For 31% (LEC) and 44% (PFC) of reward-A passers, the
+  Poisson shape-free kernel gains nothing on held-out sessions.
+- **No regional difference** in entry or reward time constants: LEC entry-ramp tau medians are
+  273-593 s across the five regions, reward 1.6-2 s.
+
+### Correction to the M2 entry (dated, not rewritten)
+
+The M2 entry reads 62-78% of entry-locked LEC units peaking "within a minute of recording start"
+as "a first-minute transient, not a slow ramp".
+
+- The measurement stands. The reading does not.
+- The shape-free kernel is relative to a late reference bin. Against that bin, a 5-min ramp is
+  most different in the first minute, so its largest |beta| sits there whether it rises or falls.
+- Stage 2 shows the shapes are ramps with tau of minutes.
+- The same caution applies to `POPULATION_DRIFT.md`'s reading of first-minute decoding (noted
+  there).
+
+### What was done
+
+- **Stage 1 at >= 5 trials on the V3 runner** (previous entry):
+  - LEC: 50 jobs, `EXIT=0`, 25 recdays, 2851 units, 164 sessions;
+  - PFC: 50 jobs, `EXIT=0`, 24 recdays, 1229 units, 180 sessions; me08_12092021_13092021 has no
+    tracking.
+  - No shard has a held-out leak through a tested column.
+- **Fraction locked at >= 5 trials**, mean of mice with the range over mice. The 5-trial arm lifts
+  ly05 and ah08, so the LEC range narrows from 10 trials.
+
+  | block | LEC (5) | PFC (7) |
+  |---|---|---|
+  | entry | 0.342 (0.259-0.426) | 0.322 (0.160-0.533) |
+  | every reward | 0.587 (0.504-0.665) | 0.609 (0.326-0.800) |
+  | reward A | 0.109 (0.099-0.132) | 0.174 (0.098-0.304) |
+  | A + reward | 0.436 (0.339-0.541) | 0.502 (0.214-0.742) |
+
+- **Stage 2** (`run_event_kernels.py --stage2`, `ek.stage2_unit`, gated as M1 G10 and by
+  `--gate-stage2`):
+  - one job per recday and event: 150 jobs plus 2 smoke jobs, all `EXIT=0`;
+  - about 10 s per unit;
+  - the units locked to `ev_entry`, `ev_A` and `ev_reward` in the anchor-`entry` fit, plus 10
+    seeded non-locked units per recday and event as the null sample.
+
+  | dataset | entry: locked + null | reward A: locked + null | every reward: locked + null |
+  |---|---|---|---|
+  | LEC | 972 + 250 | 308 + 250 | 1656 + 250 |
+  | PFC | 414 + 219 | 194 + 225 | 805 + 203 |
+
+- **Notebook:** `code/event_kernels_M3_stage2.ipynb`. Figures F15-F18 are in
+  `data/figures/event_kernels/M3/`.
+
+### Measured
+
+Shape class of locked units (F15), mean of mice:
+
+| event | dataset | ramp up | ramp down | bump | other | none | null sample: none |
+|---|---|---|---|---|---|---|---|
+| entry | LEC (5 mice) | 0.373 | 0.206 | 0.321 | 0.032 | 0.068 | 0.728 |
+| entry | PFC (7) | 0.250 | 0.170 | 0.187 | 0.273 | 0.120 | 0.678 |
+| reward A | LEC | 0.151 | 0.140 | 0.246 | 0.156 | 0.307 | 0.864 |
+| reward A | PFC | 0.051 | 0.089 | 0.271 | 0.149 | 0.440 | 0.881 |
+| every reward | LEC | 0.323 | 0.083 | 0.496 | 0.064 | 0.034 | 0.504 |
+| every reward | PFC | 0.325 | 0.168 | 0.372 | 0.118 | 0.016 | 0.455 |
+
+Fraction of units whose shape-free kernel gains held-out deviance:
+
+| event | LEC, locked / null | PFC, locked / null |
+|---|---|---|
+| entry | 0.94 / 0.27 | 0.90 / 0.34 |
+| reward A | 0.67 / 0.14 | 0.61 / 0.11 |
+| every reward | 0.97 / 0.50 | 0.98 / 0.55 |
+
+- Reward structure is widespread: half of the non-locked units gain from a reward kernel.
+- The class is therefore a description of the locked units, not a test; the test is Stage 1.
+
+Ramp time constants (F16), for ramp-classed locked units:
+
+| event | dataset | n | median tau | middle half | slower than the session | at the grid edge |
+|---|---|---|---|---|---|---|
+| entry | LEC | 567 | 320 s | 193-905 s | 0.17 | 0.11 |
+| entry | PFC | 158 | 320 s | 160-640 s | 0.17 | 0.10 |
+| reward A | LEC | 88 | 23 s | 2.7-190 s | 0 | 0.18 |
+| reward A | PFC | 43 | 5.7 s | 2.8-14 s | 0 | 0.09 |
+| every reward | LEC | 676 | 2.0 s | 1.2-2.8 s | 0 | 0.04 |
+| every reward | PFC | 359 | 1.4 s | 0.7-2.0 s | 0 | 0.07 |
+
+- **Per-mouse median entry tau:** LEC 273-453 s; PFC 97-866 s, where ah03 and me10 have few
+  units.
+- **Regions** (LEC, off-boundary), entry-ramp median tau:
+
+  | region | median tau | mice | units |
+  |---|---|---|---|
+  | ENTl-deep | 320 s | 5 | 167 |
+  | SUB/ProS | 320 s | 4 | 109 |
+  | ENTm | 320 s | 3 | 54 |
+  | ENTl-sup | 273 s | 3 | 74 |
+  | CA1/HPF | 593 s | 2 | 38 |
+
+  Reward: 1.6-2 s in every region. Reward-A ramps in ENTl-sup are slower (237 s, 16 units, 3 mice),
+  a single small cell.
+
+Bumps (F17), median peak lag:
+
+| event | LEC | PFC |
+|---|---|---|
+| entry | 905 s, k 2 (315 units); 2.5% peak within 1 min | 905 s (83 units); 3.6% within 1 min |
+| every reward | 1.0 s (812 units); 99.8% within 1 min | 1.0 s (353 units) |
+| reward A | 11 s (76 units) | 5.7 s (58 units) |
+
+F18 shows the best ramp and bump fit per event against the Stage 1 kernel. One recday's reward
+betas are not identified at >= 5 trials: ly05_20250620_20250623, whose all-session null space runs
+through the reward block. That relation holds on held-out rows, so cpd is unaffected. F18 skips
+units without at least 5 finite betas.
+
+### What was NOT established
+
+- **Time constants beyond the session.** 17% of entry ramps sit at tau >= 30 min, which a 20-min
+  session cannot pin (M1: recovered at 0.13-3.43x of truth). The rest are inside the M1 envelope
+  for the selection used here, but they are selection-conditioned.
+- **Entry clock vs a leaky reward count.** Unchanged since M2: the M5 test. Rising entry ramps
+  with tau of minutes are exactly what a leaky count of rewards would look like.
+- **Broad entry bumps (peak about 15 min, k = 2).** A ramp fits 82% of them nearly as well. The
+  rest may turn over near the session's end, or reflect the post-task segment. Not separated.
+- **PFC's 27% `other` entry kernels:** neither shape recovers half the gain. Not characterised.
+- **LEC vs PFC.** No dataset contrast was tested. The class fractions and the tau spectra overlap
+  at mouse level.
+- **Kernels at short lags.** They are evaluated at the block-mean lag, an approximation for
+  tau <= 0.5 s; this applies to reward ramps.
+- **M3 part 2** (Tsao's stepwise table, Kanter part 2) waits for the user.
+
+### Commands
+
+```
+python code/check_mirror_parity.py                                          # must exit 0
+python code/event_kernels_pin.py --against HEAD                             # engine default pinned
+sbatch --time=0-01:30 --job-name=ek_rgate_lec sbatch_files/event_kernels.sbatch code/run_event_kernels.py --gate --dataset lec
+sbatch --time=0-01:30 --job-name=ek_s2gate_lec sbatch_files/event_kernels.sbatch code/run_event_kernels.py --gate-stage2 --dataset lec
+# (the same two for PFC from mFC_data/code/)
+bash sbatch_files/submit_event_kernels.sh --dataset lec --min-trials 5
+bash sbatch_files/submit_event_kernels.sh --dataset pfc --min-trials 5
+python code/run_event_kernels.py --dataset lec --min-trials 5 --merge
+python mFC_data/code/run_event_kernels.py --dataset pfc --min-trials 5 --merge
+python code/run_event_kernels.py --compare data/event_kernels/stage1/stage1_lec_kin-strict_mt5_np100.pkl data/event_kernels/stage1/stage1_lec_kin-strict_mt5_np100.v1.pkl
+bash sbatch_files/submit_event_kernels.sh --dataset lec --runner stage2 --min-trials 5
+bash sbatch_files/submit_event_kernels.sh --dataset pfc --runner stage2 --min-trials 5
+python code/run_event_kernels.py --dataset lec --stage2 --merge --min-trials 5
+python mFC_data/code/run_event_kernels.py --dataset pfc --stage2 --merge --min-trials 5
+sbatch --job-name=ek_nb_m3 --time=0-01:00 --mem=32G --cpus-per-task=2 sbatch_files/event_kernels.sbatch -m jupyter nbconvert --to notebook --execute --inplace --ExecutePreprocessor.timeout=3600 code/event_kernels_M3_stage2.ipynb
+```
+
+## 2026-10-12, evening — runner V3: the rank criterion and the first-A `pre` column
+
+User decisions after M2:
+
+- commit and push M2 (d1b81b2);
+- revise the runner before Stage 2;
+- run Stage 2 at >= 5 trials in both datasets;
+- stop after Stage 2.
+
+**Outcome.**
+
+- The first-A artefact from M2 is gone.
+- The new rank check finds no held-out leak through a tested column in any 5-trial shard, under
+  either anchor, in LEC or PFC.
+- Entry-anchor results are unchanged on real data: cpd agrees to 3e-15, and p and every locked
+  call are identical.
+
+### What changed
+
+| file | change |
+|---|---|
+| `event_kernels.py` (+ mirror) | `build_design(first_A_pre=True)`. `False` drops the first-A block's pre-event column, which equals the A block's pre column, plus `kin_missing:pre_A` under `strict`. The default is unchanged. |
+| `event_kernels_pin.py` | Also pins the `strict` default under both anchors, and checks that `first_A_pre=False` removes exactly `ev_first_A:pre`. Passes against HEAD. 57eac39 predates `strict`, so only its `full` rows apply. |
+| `run_event_kernels.py` (+ mirror) | Anchor `first_A` fits with `first_A_pre=False` (stamped `first_A_anchor_pre`). `rank_check` sets aside columns all-zero in training, which take beta 0 in every model. It then flags only null-space directions with a held-out component that touch a tested column (`tested_leak`), and matches duplicates with a 1e-9 tolerance. New `--stage2`, `--gate-stage2` and `--compare` modes. |
+| `submit_event_kernels.sh` | `--runner stage2` |
+
+### Gates (jobs 3755246-49)
+
+- **Stage 1, 19/19 in each dataset.**
+  - The M1 exactness rows still hold: cpd and p max |diff| = 0.
+  - New first-A rows, the anchor never gated in M1. On planted units, noise is locked to
+    `ev_first_A` in 0.00 (binomial p 1.00), entry ramps with tau <= 30 min in 1.0, and
+    A / reward / bump units in 1.0 through A, reward or the joint.
+  - `first_A_pre` False vs True: every block's cpd agrees to <= 2e-15 and p is identical, except
+    the A + reward joint (LEC: up to 0.019, 8 of 80 planted calls change; PFC: 3e-15).
+- **The first pass failed this row.** It assumed one column space. The A + reward joint's reduced
+  model kept the pre-A offset through `ev_first_A:pre`; without that column, the joint carries the
+  pre-A offset, as it always has under anchor `entry`. The check became per block, with the joint
+  reported.
+- **Stage 2 gate** (`--gate-stage2`): the quick planted units through the Stage 2 shard and merge
+  path reproduce the M1 pickle's `stage2` table.
+  - Shape classes are identical, 17/17.
+  - Max relative difference: 1.4e-13 (LEC) and 1.5e-13 (PFC).
+  - The first pass demanded an exact 0 and failed on 1.5e-11 absolute, on deviance sums of
+    about 1e4: M1 ran on another node. The test is now relative at 1e-9 and requires equal NaN
+    patterns.
+- **The rank criterion was tested both ways on real designs.**
+  - ah10_20250618_20250619 first-A with the `pre` column: `tested_leak`, leak 0.11 through
+    `ev_first_A:pre`, `ev_A:pre` and `ev_reward:pre`.
+  - Without it: none, 9e-16.
+  - PFC me11 first-A with it: no leak (6e-16). These were near-duplicates the M2 flag called
+    non-duplicates.
+  - LEC >= 5 ly05_20250620_20250623 entry, with a relation through the whole reward block: no
+    leak (4e-16).
+
+### Real-data equivalence: LEC >= 5, V3 against the V2 merge
+
+Command: `run_event_kernels.py --compare stage1_lec_kin-strict_mt5_np100.pkl ...v1.pkl`.
+
+| fits | max \|cpd diff\| | locked calls changed (of 2851 units) | where |
+|---|---|---|---|
+| anchor `entry`, every block | 2.9e-15 (p identical) | 0 | floating point across nodes |
+| first-A, blocks other than the A + reward joint | <= 1.2e-3 | 0-4 per block | only the 8 recdays with single-session untracked pre-A rows |
+| first-A, A + reward joint | 0.156 | 351: 237 gained, 114 lost; 1260 -> 1383 locked | the joint now carries the pre-A offset |
+
+- The old flag also listed ly05_20250618_20250619 and ly05_20250620_20250623. Neither changes:
+  they were false alarms.
+- No figure or table reads the first-A anchor's A + reward joint. The anchor comparison (F7) uses
+  `ev_first_A`, and Stage 2 uses anchor `entry`.
+- The V2 merge is kept as `stage1_lec_kin-strict_mt5_np100.pkl`, its shards under
+  `shards_superseded/runner_v2_2026-10-12/`. V3 is `.v1`.
+
 ## 2026-10-12 — M2: Stage 1 and the reset test on real data
 
 **Outcome.**

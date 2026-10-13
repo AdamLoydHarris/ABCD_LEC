@@ -262,6 +262,40 @@ Design choices inside `event_kernels.py`, each with its reason:
 
 ## 7. Status
 
+### 2026-10-12, night: M3 part 1 (Stage 2) complete, stopped for review
+
+Details: `code/EVENT_KERNELS.md`, the entries "runner V3" and "M3 part 1".
+
+- Notebook: `code/event_kernels_M3_stage2.ipynb`.
+- Figures F15-F18: `data/figures/event_kernels/M3/`.
+- M2 is committed and pushed as d1b81b2.
+
+- **Runner V3** (user-approved):
+  - `build_design(first_A_pre=False)` for the first-A anchor (engine option, pinned);
+  - a held-out rank criterion;
+  - Stage 2, compare and gate modes.
+  - Gates pass in both datasets: Stage 1 19/19; Stage 2 within 1.5e-13 relative of M1, classes
+    17/17.
+  - Real-data check, LEC >= 5: the entry anchor is unchanged (3e-15, no call changes). First-A
+    changes sit only on the 8 artefact recdays, plus the A + reward joint, which now carries the
+    pre-A offset as under anchor entry.
+- **Stage 2 at >= 5 trials:** LEC 2936 + 750 null units; PFC 1413 + 647. Every job `EXIT=0`.
+- **Correction to M2.**
+  - Entry kernels are mostly ramps with tau a median 320 s, not first-minute transients. Their
+    largest |beta| falls in the first minute because the kernel is relative to a late reference
+    bin.
+  - 85% of entry-locked LEC units are ramps or ramp-like bumps (54% in PFC, 27% `other`).
+  - Reward kernels: bumps at about 1 s and recovery ramps with tau about 2 s.
+  - Reward A: 31-44% of passers gain nothing held out.
+  - No regional difference in tau.
+  - The drift write-up's "transient" reading carries a dated caution.
+- **Decisions to put to the user:**
+  1. Commit the M3 part-1 code and documents?
+  2. M3 part 2: Tsao's stepwise table and Kanter part 2. Kanter part 2 could include the
+     decoding test of whether held-out first-minute decoding is just the ramps' early slope.
+  3. Whether to move the M5 test (entry clock vs leaky reward count) forward. Rising entry ramps
+     with tau of minutes are what a leaky reward count predicts.
+
 ### 2026-10-12, evening: M2 complete, stopped for the M3 go-ahead
 
 Full write-ups:

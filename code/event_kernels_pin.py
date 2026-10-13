@@ -1,9 +1,12 @@
 """Pin: `event_kernels.build_design` with its default `kin='full'` equals a committed version bit
 for bit, on synthetic sessions with tracking gaps; `kin='strict'` changes only `kin_fast` (extra
 columns), `kin_missing` (split by segment, rows summing to the default indicator) and the A /
-reward columns on untracked rows (zeroed).
+reward columns on untracked rows (zeroed). Since 2026-10-12 it also pins the `strict` default
+under both anchors and checks that `first_A_pre=False` removes exactly `ev_first_A:pre`.
 
-    python code/event_kernels_pin.py --against 57eac39        # exit 0 = pinned
+    python code/event_kernels_pin.py --against HEAD           # exit 0 = pinned
+    # 57eac39 predates `strict` (it read any kin but 'none' as 'full'), so against it only the
+    # `full` rows hold and the run exits 1 on the two `strict` rows.
 
 No data is read. The committed module is extracted with `git show` into a temporary tree shaped
 like the repo (it locates its root by the `code/` + `mFC_data/` pair).
@@ -83,6 +86,27 @@ def main(argv=None) -> int:
           f"other default columns unchanged: {kept}; A / reward equal on tracked rows and 0 on "
           f"{int(miss.sum())} untracked: {masked}; missing split sums to the default: {split}")
     ok &= only_kin and kept and masked and split
+
+    # Added 2026-10-12: M2 ran kin='strict', so pin that default too, under both anchors; then
+    # `first_A_pre=False` must remove exactly `ev_first_A:pre` and be a no-op without a first-A event.
+    with tempfile.TemporaryDirectory() as tmp:
+        old = _committed(args.against, tmp)
+        for ev in (('entry', 'A', 'reward'), ('first_A', 'A', 'reward')):
+            a, b = old.build_design(sessions, ev, kin='strict'), new.build_design(sessions, ev, kin='strict')
+            same = (a['X'].shape == b['X'].shape and np.array_equal(a['X'], b['X'], equal_nan=True)
+                    and a['names'] == b['names'] and a['groups'] == b['groups'])
+            print(f"kin='strict' events {ev}: X {a['X'].shape}, identical to {args.against}: {same}")
+            ok &= same
+    for k in ('full', 'strict'):
+        d = new.build_design(sessions, ('first_A', 'A', 'reward'), kin=k)
+        f = new.build_design(sessions, ('first_A', 'A', 'reward'), kin=k, first_A_pre=False)
+        gone = [n for n in d['names'] if n not in f['names']]
+        rest = all(np.array_equal(col(d, n), col(f, n), equal_nan=True) for n in f['names'])
+        noop = np.array_equal(new.build_design(sessions, kin=k)['X'],
+                              new.build_design(sessions, kin=k, first_A_pre=False)['X'], equal_nan=True)
+        print(f"first_A_pre=False, kin='{k}': removed {gone}; every other column identical: {rest}; "
+              f"no-op without a first-A event: {noop}")
+        ok &= gone == ['ev_first_A:pre'] and rest and f['names'] == [n for n in d['names'] if n != 'ev_first_A:pre'] and noop
     print('PIN', 'OK' if ok else 'FAILED')
     return 0 if ok else 1
 

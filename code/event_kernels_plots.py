@@ -127,7 +127,8 @@ def table_run_summary(stage1: dict) -> pd.DataFrame:
             f = s[s['skipped'].isna()]
             rows.append(dict(dataset=ds, anchor=a, recdays=len(s), skipped=int(s['skipped'].notna().sum()),
                              units=int(f['n_units'].sum()), sessions=int(f['n_sessions'].sum()),
-                             rank_only_duplicates=bool(f['rank_benign'].eq(True).all()),
+                             # V3 shards: no held-out leak through a tested column; V2 (M2): only exact duplicates
+                             rank_ok=bool(f['rank_benign'].eq(True).all()),
                              r2_cv_median_of_recdays=float(f['r2_cv_median'].median()),
                              reset_skipped=int(((f['reset'] != 'ok') & (a == 'entry')).sum()),
                              n_perm=M['config']['n_perm'], kin=M['config']['kin'],
@@ -837,6 +838,177 @@ def plot_event_acceleration(drift: dict, out_path=None):
         axes[0].set_ylabel('acceleration z')
         axes[0].legend(frameon=False)
         fig.suptitle('F14. Population trajectory acceleration at events (Kanter boundary shift)')
+    _save(fig, out_path)
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# F15-F18: Stage 2 (kernel shapes and time constants; M3 part 1)
+# ---------------------------------------------------------------------------
+
+STAGE2_DIR = os.path.join(REPO, 'data', 'event_kernels', 'stage2')
+CLASSES = ['ramp_down', 'ramp_up', 'bump', 'other', 'none']
+STAGE2_EVENTS = ('entry', 'A', 'reward')
+SESSION_S = 1800.0             # M1 envelope: tau >= 30 min is "slower than the session", not a number
+
+
+def table_stage2_classes(S2: dict) -> pd.DataFrame:
+    """Per dataset, event, role (locked / null_sample) and mouse: the fraction of units in each shape
+    class (recday mean, then mouse mean)."""
+    rows = []
+    for ds, M in S2.items():
+        T = M['table']
+        for (ev, role), d in T.groupby(['event', 'role']):
+            for c in CLASSES:
+                pm = per_mouse(d.assign(v=(d['shape'] == c).astype(float)), 'v')
+                rows += [dict(dataset=ds, event=ev, role=role, shape=c, mouse=m, fraction=v,
+                              n_units=int((d['mouse'] == m).sum())) for m, v in pm.items()]
+    return pd.DataFrame(rows)
+
+
+def plot_stage2_classes(S2: dict, out_path=None):
+    """F15: shape class of each event's locked units, a point per mouse, bar = mean of mice; the open
+    marker is the null sample's mean (non-locked units through the same Stage 2)."""
+    t = table_stage2_classes(S2)
+    with mpl.rc_context(_rc()):
+        fig, axes = plt.subplots(1, len(STAGE2_EVENTS), figsize=(7.2, 2.6), layout='constrained', sharey=True)
+        w = 0.8 / max(len(S2), 1)
+        for ax, ev in zip(axes, STAGE2_EVENTS):
+            for i, ds in enumerate(S2):
+                for j, c in enumerate(CLASSES):
+                    x = j + (i - (len(S2) - 1) / 2) * w
+                    d = t[(t['dataset'] == ds) & (t['event'] == ev) & (t['role'] == 'locked') & (t['shape'] == c)]
+                    nl = t[(t['dataset'] == ds) & (t['event'] == ev) & (t['role'] == 'null_sample') & (t['shape'] == c)]
+                    if len(d):
+                        ax.bar(x, d['fraction'].mean(), width=w * 0.9, color=DATASET_COLORS[ds], alpha=0.4, lw=0)
+                        ax.scatter(x + _jitter(len(d), w * 0.6), d['fraction'], s=6, color=DATASET_COLORS[ds], lw=0, zorder=3)
+                    if len(nl):
+                        ax.scatter(x, nl['fraction'].mean(), s=14, facecolor='none', edgecolor=INK, lw=0.7, zorder=4)
+            ax.set_xticks(range(len(CLASSES)), [c.replace('_', ' ') for c in CLASSES], rotation=45)
+            ax.set_title(LABEL[ev])
+            ax.set_ylim(0, 1)
+        axes[0].set_ylabel('fraction of locked units')
+        fig.suptitle('F15. Stage 2 shape of each event kernel (a class needs >= 0.5 of the shape-free '
+                     'kernel\'s held-out gain); point = mouse, open circle = null sample')
+    _save(fig, out_path)
+    return fig
+
+
+def table_tau(S2: dict) -> pd.DataFrame:
+    """Ramp-classed locked units: tau (median over folds), at the grid edge, beyond the session."""
+    rows = []
+    for ds, M in S2.items():
+        T = M['table']
+        d = T[(T['role'] == 'locked') & T['shape'].isin(['ramp_down', 'ramp_up'])].copy()
+        d['dataset'] = ds
+        d['beyond_session'] = d['tau_median'] >= SESSION_S
+        rows.append(d)
+    return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
+
+
+def plot_tau_spectrum(S2: dict, out_path=None):
+    """F16: time constants of ramp-classed units. Top: per dataset (thick = pooled, thin = mouse).
+    Bottom: LEC regions, off-boundary units. Shaded: tau >= 30 min, which a 20-min session cannot
+    pin (M1: recovered at 0.13-3.43x of truth there)."""
+    t = table_tau(S2)
+    with mpl.rc_context(_rc()):
+        fig, axes = plt.subplots(2, len(STAGE2_EVENTS), figsize=(7.2, 4.4), layout='constrained')
+        for j, ev in enumerate(STAGE2_EVENTS):
+            for r, (keys, colours) in enumerate(((list(S2), DATASET_COLORS), (REGION_ORDER, REGION_COLORS))):
+                ax = axes[r, j]
+                for k in keys:
+                    if r == 0:
+                        d = t[(t['dataset'] == k) & (t['event'] == ev)]
+                    else:
+                        d = t[(t['dataset'] == 'LEC') & (t['event'] == ev) & (t['group'] == k) & ~t['near_boundary'].astype(bool)]
+                    v = np.sort(d['tau_median'].dropna().to_numpy())
+                    if not len(v):
+                        continue
+                    if r == 0:
+                        for _, dm in d.groupby('mouse'):
+                            vm = np.sort(dm['tau_median'].dropna().to_numpy())
+                            ax.plot(vm, np.arange(1, len(vm) + 1) / len(vm), color=colours[k], lw=0.5, alpha=0.35)
+                    ax.plot(v, np.arange(1, len(v) + 1) / len(v), color=colours[k], lw=1.4,
+                            label=f"{k} {len(v)} ({d['mouse'].nunique()} mice)")
+                ax.set_xscale('log')
+                ax.axvspan(SESSION_S, ax.get_xlim()[1] if ax.get_xlim()[1] > SESSION_S else SESSION_S * 4, color=NULL, alpha=0.3, lw=0)
+                ax.set_title(f'{LABEL[ev]} ramps' + (', LEC regions' if r else ''))
+                ax.legend(frameon=False, loc='lower right', fontsize=5)
+                ax.set_xlabel('tau (s)')
+            axes[0, j].set_ylim(0, 1)
+        axes[0, 0].set_ylabel('fraction of ramp units')
+        axes[1, 0].set_ylabel('fraction of ramp units')
+        fig.suptitle('F16. Time constants of ramp-classed units (ECDF); grey band: tau >= 30 min, '
+                     'slower than the session')
+    _save(fig, out_path)
+    return fig
+
+
+def plot_bump_peaks(S2: dict, out_path=None):
+    """F17: peak lag of bump-classed units per event (gamma bumps, peak grid 2 per octave)."""
+    with mpl.rc_context(_rc()):
+        fig, axes = plt.subplots(1, len(STAGE2_EVENTS), figsize=(7.2, 2.3), layout='constrained')
+        for ax, ev in zip(axes, STAGE2_EVENTS):
+            txt = []
+            for ds, M in S2.items():
+                T = M['table']
+                d = T[(T['role'] == 'locked') & (T['event'] == ev) & (T['shape'] == 'bump')]
+                v = d['peak_median'].dropna().to_numpy()
+                if not len(v):
+                    continue
+                bins = np.geomspace(max(v.min() * 0.8, 0.1), v.max() * 1.25, 20)
+                ax.hist(v, bins=bins, histtype='step', color=DATASET_COLORS[ds], lw=1, label=f'{ds} ({len(v)})')
+                if ev == 'entry':
+                    txt.append(f'{ds}: {np.mean(v < 60):.2f} peak < 1 min')
+            ax.set_xscale('log')
+            ax.set_title(LABEL[ev] + ' bumps' + ('\n' + '; '.join(txt) if txt else ''), fontsize=7)
+            ax.set_xlabel('peak lag (s)')
+            ax.legend(frameon=False, fontsize=5)
+        axes[0].set_ylabel('bump units')
+        fig.suptitle('F17. Where bump kernels peak')
+    _save(fig, out_path)
+    return fig
+
+
+def plot_stage2_examples(S2: dict, S1: dict, ds: str = 'LEC', out_path=None):
+    """F18: per event, the locked unit with the largest held-out gain in each of the ramp and bump
+    classes: its shape-free kernel (points, Stage 1 betas) and the fitted shape scaled onto it by
+    least squares (line), against lag."""
+    import event_kernels as ek
+    T, M1 = S2[ds]['table'], S1[ds]
+    with mpl.rc_context(_rc()):
+        fig, axes = plt.subplots(2, len(STAGE2_EVENTS), figsize=(7.2, 3.8), layout='constrained')
+        for j, ev in enumerate(STAGE2_EVENTS):
+            for r, cls in enumerate((('ramp_down', 'ramp_up'), ('bump',))):
+                ax = axes[r, j]
+                d = T[(T['role'] == 'locked') & (T['event'] == ev) & T['shape'].isin(cls)].sort_values('gain_np', ascending=False)
+                u = None
+                for _, cand in d.iterrows():
+                    # A recday whose all-session null space spans the block has NaN betas there
+                    # (ly05_20250620_20250623's reward block at >= 5 trials): take the next unit.
+                    k = M1['shards']['entry'][cand['recday']]['kernels'][ev]
+                    x = _centres(k['edges_s'])[:-1]
+                    beta = k['beta_hz'][int(cand['unit']), :len(x)].astype(float)
+                    if np.isfinite(beta).sum() >= 5:
+                        u = cand
+                        break
+                if u is None:
+                    ax.axis('off')
+                    continue
+                f = ek.ramp(x, u['tau_median']) if cls[0].startswith('ramp') else ek.bump(x, u['peak_median'], u['k_median'])
+                ok = np.isfinite(beta)
+                A = np.column_stack([np.ones(ok.sum()), f[ok]])
+                coef = np.linalg.lstsq(A, beta[ok], rcond=None)[0]
+                ax.plot(x[ok], beta[ok], 'o', ms=2.5, color=INK)
+                ax.plot(x, coef[0] + coef[1] * f, color=DATASET_COLORS[ds], lw=1.2)
+                ax.set_xscale('log')
+                par = f"tau {u['tau_median']:.3g} s" if cls[0].startswith('ramp') else f"peak {u['peak_median']:.3g} s, k {u['k_median']:.0f}"
+                ax.set_title(f"{LABEL[ev]}: {u['shape'].replace('_', ' ')}, {par}\n{u['recday'][:4]} u{int(u['unit'])} {u['group']}, "
+                             f"ramp {u['frac_ramp']:.2f} / bump {u['frac_bump']:.2f} of the gain", fontsize=6)
+                ax.set_xlabel('lag (s)')
+        for ax in axes[:, 0]:
+            ax.set_ylabel('kernel (Hz)')
+        fig.suptitle(f'F18. {ds}: best ramp and bump fits against the shape-free kernel')
     _save(fig, out_path)
     return fig
 

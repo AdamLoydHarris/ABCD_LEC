@@ -3,6 +3,7 @@
 #
 #   bash sbatch_files/submit_event_kernels.sh --dataset lec                       # Stage 1, both anchors
 #   bash sbatch_files/submit_event_kernels.sh --dataset pfc --runner drift        # population drift
+#   bash sbatch_files/submit_event_kernels.sh --dataset lec --runner stage2 --min-trials 5   # Stage 2
 #   bash sbatch_files/submit_event_kernels.sh --dataset lec --min-trials 5        # the sensitivity arm
 #   bash sbatch_files/submit_event_kernels.sh --dataset lec --n-perm 20 --recdays ah10_20250616_20250617
 #   bash sbatch_files/submit_event_kernels.sh --dataset lec --after 123:124       # start only if those exit 0
@@ -44,8 +45,8 @@ case "$DATASET" in
     *) echo "--dataset lec|pfc is required" >&2; exit 2 ;;
 esac
 case "$RUNNER" in
-    stage1|drift) ;;
-    *) echo "--runner stage1|drift" >&2; exit 2 ;;
+    stage1|drift|stage2) ;;
+    *) echo "--runner stage1|drift|stage2" >&2; exit 2 ;;
 esac
 
 if [ "${#RECDAYS[@]}" -eq 0 ]; then
@@ -78,6 +79,15 @@ for rd in "${RECDAYS[@]}"; do
             echo "  $rd $a -> $jid"
             n=$((n + 1))
         done
+    elif [ "$RUNNER" = stage2 ]; then
+        # ~8 s per unit (M1 G10); the largest recday-event holds ~150 passers.
+        for e in entry A reward; do
+            jid=$("${SB[@]}" --time=0-02:00 --job-name="s2_${DATASET}_mt${MIN_TRIALS}_${e}_${rd}" \
+                  sbatch_files/event_kernels.sbatch "$TREE/run_event_kernels.py" --dataset "$DATASET" \
+                  --stage2 --event "$e" --recday "$rd" --min-trials "$MIN_TRIALS" --n-perm "$N_PERM")
+            echo "  $rd $e -> $jid"
+            n=$((n + 1))
+        done
     else
         jid=$("${SB[@]}" --time=0-00:30 --mem=16G --cpus-per-task=2 --job-name="pd_${DATASET}_mt${MIN_TRIALS}_${rd}" \
               sbatch_files/event_kernels.sbatch "$TREE/run_population_drift.py" --dataset "$DATASET" \
@@ -91,6 +101,8 @@ echo "submitted $n job(s) on $PARTITION (${#RECDAYS[@]} recdays)"
 echo "Read every log to its EXIT= line, then merge:"
 if [ "$RUNNER" = stage1 ]; then
     echo "  python $TREE/run_event_kernels.py --dataset $DATASET --merge --min-trials $MIN_TRIALS --n-perm $N_PERM"
+elif [ "$RUNNER" = stage2 ]; then
+    echo "  python $TREE/run_event_kernels.py --dataset $DATASET --stage2 --merge --min-trials $MIN_TRIALS --n-perm $N_PERM"
 else
     echo "  python $TREE/run_population_drift.py --dataset $DATASET --merge --min-trials $MIN_TRIALS"
 fi

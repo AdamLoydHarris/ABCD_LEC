@@ -6,6 +6,19 @@ from other sessions (locked clock alone), and whether the population trajectory 
 events. Plan, decisions and code map: `docs/handoff/EVENT_KERNELS_HANDOFF.md`. Per-neuron kernels:
 `code/EVENT_KERNELS.md`.
 
+## 2026-10-12, night — a caution on the M2 reading below
+
+M2 read the first-minute concentration of held-out decoding as "mostly an entry transient".
+
+- Stage 2 (`EVENT_KERNELS.md`, M3 part 1) finds the entry-locked units are mostly ramps with tau
+  around 5 min: a median 320 s, the middle half 160-910 s.
+- A bank of such ramps changes fastest at the start, so the first 1-min epoch is the most distinct
+  one across sessions even without any brief transient.
+- So the measurement stands (held-out accuracy 0.25-0.26 in minute 1 against 0.07 later), but
+  "transient" is not established. Whether held-out decoding is just the ramps' early slope needs a
+  test, e.g. decoding on ramp-classed units alone, or on units after regressing out the fitted
+  entry ramps.
+
 ## 2026-10-12 — M2: Kanter part 1 (WP3), both datasets
 
 **Outcome.**
