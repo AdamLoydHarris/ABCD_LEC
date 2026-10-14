@@ -123,6 +123,18 @@ def unit_specs(dataset: str, quick: bool) -> list:
     return U
 
 
+def leaky_specs(dataset: str) -> list:
+    """Planted units for the entry-clock vs leaky-reward-count gate (`run_event_kernels --gate-leaky`):
+    entry ramps and leaky reward counts at matched tau, both signs, and noise. `unit_specs` is
+    untouched, so the M1 gate pickles still reproduce."""
+    U = []
+    for tau in (120, 300, 600, 1200):
+        for sign in ('down', 'up'):
+            U += [('entry_ramp', dict(tau=tau, sign=sign))] * 2
+            U += [('leaky_count', dict(tau=tau, sign=sign))] * 2
+    return U + [('noise', dict())] * 20
+
+
 def planted_log_rate(kind, p, sess, feats, rng):
     """Unit-free modulation f(t) at 25 ms; the rate is BASE_HZ * exp(amp * f)."""
     T = sess['counts'].shape[1]
@@ -158,6 +170,9 @@ def planted_log_rate(kind, p, sess, feats, rng):
         return p['sd'] * _ou(T, p['tau'], rng)
     if kind == 'place':
         return (sess['locs'] == p['node']).astype(float)
+    if kind == 'leaky_count':
+        f = ek.leaky_trace(ek.event_bins(sess, 'reward'), T, p['tau'])   # unnormalised per session
+        return f if p['sign'] == 'up' else -f
     if kind == 'consumption':
         x = np.zeros(T)
         pk = sess.get('pokes')

@@ -636,6 +636,30 @@ def shape_grid(event: str):
     return taus, [(p, k) for p in peaks for k in (2, 4, 8, 16)]
 
 
+#: Scale of a leaky count: a steady 4 events/min reads 1 (LEC sessions ran 3.7-4.0 rewards/min).
+LEAKY_REF_RATE = 4.0 / 60.0 * BIN_S
+
+
+def leaky_trace(event_bins_25ms, T: int, tau_s: float) -> np.ndarray:
+    """(T,) leaky count at 25 ms: (1 - a) * sum over events at or before t of a^(t - t_k),
+    a = exp(-BIN_S / tau), divided by LEAKY_REF_RATE. A superposition, not a reset."""
+    x = np.zeros(T)
+    ev = np.asarray(event_bins_25ms, dtype=np.int64)
+    np.add.at(x, ev[(ev >= 0) & (ev < T)], 1.0)
+    a = np.exp(-BIN_S / tau_s)
+    return lfilter([1 - a], [1, -a], x) / LEAKY_REF_RATE
+
+
+def leaky_bank(sessions: list, taus, event: str = 'reward') -> np.ndarray:
+    """(rows, n_tau) block means of `leaky_trace` per tau, sessions stacked as `build_design` rows:
+    the leaky-reward-count family that M5's entry-clock test sets against the entry ramp."""
+    out = []
+    for s in sessions:
+        T, ev = s['counts'].shape[1], event_bins(s, event)
+        out.append(np.column_stack([block_mean(leaky_trace(ev, T, t)) for t in taus]))
+    return np.vstack(out)
+
+
 def _poisson_newton(y, Z, offset, iters=30, ridge=1e-6):
     """Few-parameter Poisson MLE with offset: (beta, deviance)."""
     beta = np.zeros(Z.shape[1])
@@ -667,12 +691,17 @@ def _heldout_dev(y, offset):
     return _dev(y, np.exp(np.clip(offset + c, -30, 30)))
 
 
-def stage2_unit(D: dict, unit: int, event: str, glm_alpha: float = 1e-4) -> dict:
+def stage2_unit(D: dict, unit: int, event: str, glm_alpha: float = 1e-4, extra: dict | None = None,
+                joint: tuple = ()) -> dict:
     """Held-out (leave one session out) Poisson deviance of: no event-e kernel, the shape-free
     kernel, the best ramp and the best bump, with tau / peak chosen on the training sessions.
 
     The offset is the training-fold full model's linear predictor minus the event block, so
     shared variance stays with the other regressors as in the full model.
+    `extra={name: (grid, bank)}` adds families profiled the same way over the columns of `bank`
+    (rows x len(grid)), e.g. `leaky_bank`; `joint` refits the named families together at each fold's
+    chosen parameters (`dev_joint`), so each family's unique held-out gain can be read off. The
+    defaults leave every output unchanged (pinned by `run_event_kernels --gate-stage2`).
     """
     from glum import GeneralizedLinearRegressor
     y_all = D['FR'][unit]
@@ -714,6 +743,23 @@ def stage2_unit(D: dict, unit: int, event: str, glm_alpha: float = 1e-4) -> dict
             eta_te = off_te + b[1] * k_all[te] + (b[2] * Zpre_te if use_pre else 0.0)
             out[f'dev_{kind}'] += _heldout_dev(y_te, eta_te)
             best[kind] = (g, b[1])
+        for kind, (grid, bank) in (extra or {}).items():
+            fits = []
+            for i in range(len(grid)):
+                cols = [np.ones(tr.sum()), bank[tr, i]] + ([Zpre_tr] if use_pre else [])
+                b, dev = _poisson_newton(y_tr, np.column_stack(cols), off_tr)
+                fits.append((dev, i, b))
+            dev, i, b = min(fits, key=lambda z: z[0])
+            eta_te = off_te + b[1] * bank[te, i] + (b[2] * Zpre_te if use_pre else 0.0)
+            out[f'dev_{kind}'] = out.get(f'dev_{kind}', 0.0) + _heldout_dev(y_te, eta_te)
+            best[kind] = (grid[i], b[1], i)
+        if joint:
+            regs = [ramp(dt_all, best['ramp'][0]) if k == 'ramp' else bump(dt_all, *best['bump'][0]) if k == 'bump'
+                    else extra[k][1][:, best[k][2]] for k in joint]
+            cols = [np.ones(tr.sum())] + [r[tr] for r in regs] + ([Zpre_tr] if use_pre else [])
+            b, _ = _poisson_newton(y_tr, np.column_stack(cols), off_tr)
+            eta_te = off_te + sum(b[1 + j] * r[te] for j, r in enumerate(regs)) + (b[-1] * Zpre_te if use_pre else 0.0)
+            out['dev_joint'] = out.get('dev_joint', 0.0) + _heldout_dev(y_te, eta_te)
         picks.append(best)
     gain_np = out['dev_null'] - out['dev_np']
     out['gain_np'] = gain_np
@@ -737,4 +783,12 @@ def stage2_unit(D: dict, unit: int, event: str, glm_alpha: float = 1e-4) -> dict
     else:
         cls = 'bump'
     out['shape'] = cls
+    for kind, (grid, _) in (extra or {}).items():
+        g = np.array([p[kind][0] for p in picks], float)
+        out[f'frac_{kind}'] = (out['dev_null'] - out[f'dev_{kind}']) / gain_np if gain_np > 0 else np.nan
+        out[f'tau_{kind}_median'] = float(np.median(g))
+        out[f'{kind}_weight_median'] = float(np.median([p[kind][1] for p in picks]))
+        out[f'tau_{kind}_at_edge'] = bool(np.median(g) >= grid[-1] or np.median(g) <= grid[0])
+    if joint:
+        out['frac_joint'] = (out['dev_null'] - out['dev_joint']) / gain_np if gain_np > 0 else np.nan
     return out

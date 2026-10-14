@@ -7,6 +7,9 @@
     python code/run_event_kernels.py --dataset lec --stage2 --merge --min-trials 5
     python code/run_event_kernels.py --dataset lec --gate-stage2    # Stage 2 on planted units, exact vs M1
     python code/run_event_kernels.py --compare <old merged.pkl> <new merged.pkl>
+    python code/run_event_kernels.py --dataset lec --leaky --recday <rd> --min-trials 5   # entry clock vs leaky count
+    python code/run_event_kernels.py --dataset lec --leaky --merge --min-trials 5
+    python code/run_event_kernels.py --dataset lec --gate-leaky     # planted ramps vs counts
 
 Anchor `entry` fits events (entry, A, reward) and the reset test; `first_A` fits (first_A, A,
 reward) on the same rows. Shards: `data/event_kernels/stage1/shards/<arm>/<recday>_<anchor>.pkl`
@@ -56,6 +59,8 @@ STAGE1_DIR = os.path.join(ek.REPO, 'data', 'event_kernels', 'stage1')
 STAGE2_DIR = os.path.join(ek.REPO, 'data', 'event_kernels', 'stage2')
 STAGE2_EVENTS = ('entry', 'A', 'reward')
 N_NULL = 10                    # non-locked units per recday and event: the reference for shape fractions
+LEAKY_DIR = os.path.join(ek.REPO, 'data', 'event_kernels', 'leaky')
+COLLINEARITY_TAUS = (300.0, 1200.0)
 
 
 # ---------------------------------------------------------------------------
@@ -692,6 +697,159 @@ def compare_merged(old_path: str, new_path: str) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
+# M5 brought forward: the entry clock vs a leaky reward count (2026-10-13)
+# ---------------------------------------------------------------------------
+
+def leaky_stamp(dataset, kin, min_trials, n_perm, seed, glm_alpha, synthetic=None) -> dict:
+    return {**stage2_stamp(dataset, kin, min_trials, n_perm, seed, glm_alpha, synthetic),
+            'runner': 'run_event_kernels.leaky', 'leaky_ref_rate': ek.LEAKY_REF_RATE,
+            'count_taus': [float(t) for t in ek.shape_grid('entry')[0]], 'joint': ['ramp', 'count']}
+
+
+def ramp_count_collinearity(D: dict, sessions: list) -> dict:
+    """Per tau: block-level correlation of the entry ramp with the leaky reward count at that tau,
+    both centred within session; how much of the two the behaviour lets apart."""
+    sids = D['session_ids']
+    dt = np.concatenate([b['dt_entry'] for b in D['blocks']])
+    bank = ek.leaky_bank(sessions, COLLINEARITY_TAUS)
+    out = {}
+    for j, t in enumerate(COLLINEARITY_TAUS):
+        a = ek.center_within_sessions(ek.ramp(dt, t)[:, None], sids)[:, 0]
+        b = ek.center_within_sessions(bank[:, [j]], sids)[:, 0]
+        out[t] = float(np.corrcoef(a, b)[0, 1])
+    return out
+
+
+def fit_leaky(dataset, recday, *, kin, min_trials, n_perm, seed, glm_alpha=1e-4, synthetic=None,
+              units=None) -> dict:
+    """`ek.stage2_unit` on the entry block with a leaky-reward-count family and the ramp + count
+    joint, for the entry passers and the same N_NULL null units as Stage 2 (or `units`)."""
+    t0 = time.time()
+    rec = ek.load_recday(recday, dataset)
+    ek.add_day_clock(rec)
+    sessions = ek.analysis_sessions(rec, min_trials)
+    data = dict(recday=recday, dataset=dataset, skipped=None, host=socket.gethostname(),
+                slurm_job_id=os.environ.get('SLURM_JOB_ID'))
+    if synthetic:
+        sessions, truth = syn.make_synthetic(rec, sessions, syn.leaky_specs(dataset), seed=seed)
+        info = synthetic_units(truth, recday)
+    else:
+        T = pd.read_csv(stage1_units_csv(dataset, kin, min_trials, n_perm))
+        T = T[(T['recday'] == recday) & (T['anchor'] == 'entry') & (T['block'] == 'ev_entry')]
+        if T.empty:
+            data['skipped'] = 'no Stage 1 rows: the recday was skipped in Stage 1'
+            data['elapsed_s'] = time.time() - t0
+            return data
+        info = T.drop(columns=['anchor', 'block'])
+        if units is None:
+            lk, nl = T[T['locked'].astype(bool)], T[~T['locked'].astype(bool)]
+            rng = np.random.default_rng([seed, zlib.crc32(f'{recday}_entry'.encode())])   # Stage 2's null units
+            null = nl.iloc[np.sort(rng.choice(len(nl), min(N_NULL, len(nl)), replace=False))] if len(nl) else nl
+            units = [(int(u), 'locked') for u in lk['unit']] + [(int(u), 'null_sample') for u in null['unit']]
+    D = ek.build_design(sessions, STAGE2_EVENTS, kin=kin)
+    if not synthetic:
+        p1 = os.path.join(STAGE1_DIR, 'shards', arm_name(dataset, kin, min_trials, n_perm), f'{recday}_entry.pkl')
+        with open(p1, 'rb') as fh:
+            if pickle.load(fh)['data']['stage1']['col_names'] != D['names']:
+                raise AssertionError(f'{recday}: the design differs from the Stage 1 design')
+    taus = ek.shape_grid('entry')[0]
+    bank = ek.leaky_bank(sessions, taus)
+    rows = [{**ek.stage2_unit(D, u, 'entry', glm_alpha=glm_alpha, extra={'count': (taus, bank)},
+                              joint=('ramp', 'count')), 'role': role} for u, role in units]
+    t = pd.DataFrame(rows)
+    if len(t):
+        cols = [c for c in info.columns if c not in t.columns or c == 'unit']
+        t = t.merge(info[cols].drop_duplicates('unit'), on='unit', how='left')
+    data['rows'] = t
+    data['collinearity'] = ramp_count_collinearity(D, sessions)
+    data['elapsed_s'] = time.time() - t0
+    return data
+
+
+def merge_leaky_dir(shard_dir: str, expect: int) -> dict:
+    cfg, shards = load_shards(shard_dir, key=lambda d: d['recday'])
+    if expect and len(shards) != expect:
+        raise ValueError(f'{len(shards)} shards, expected {expect}; pass --expect-recdays 0 to merge anyway')
+    rows = [d['rows'].assign(recday=d['recday']) for d in shards if not d['skipped'] and len(d['rows'])]
+    summary = pd.DataFrame([dict(recday=d['recday'], skipped=d['skipped'],
+                                 **{f'r_ramp_count_{int(t)}s': (d.get('collinearity') or {}).get(t, np.nan)
+                                    for t in COLLINEARITY_TAUS},
+                                 n_units=len(d['rows']) if not d['skipped'] else 0,
+                                 elapsed_s=d.get('elapsed_s'), slurm_job_id=d.get('slurm_job_id')) for d in shards])
+    return dict(config=cfg, table=pd.concat(rows, ignore_index=True) if rows else pd.DataFrame(),
+                summary=summary.sort_values('recday').reset_index(drop=True))
+
+
+def compare_leaky_stage2(L: pd.DataFrame, S2: pd.DataFrame) -> pd.DataFrame:
+    """The shared outputs of the leaky runs and Stage 2 (entry event), per column: units matched and
+    the max relative difference. Same design, units and solver, so they must agree to rounding."""
+    s = S2[S2['event'] == 'entry']
+    m = L.merge(s, on=['recday', 'unit'], suffixes=('', '_s2'))
+    rows = []
+    for c in ('dev_null', 'dev_np', 'dev_ramp', 'dev_bump', 'tau_median', 'peak_median'):
+        a, b = m[c].to_numpy(float), m[c + '_s2'].to_numpy(float)
+        rows.append(dict(column=c, units=len(m), nan_patterns_equal=bool(np.array_equal(np.isnan(a), np.isnan(b))),
+                         max_rel_diff=float(np.nanmax(np.abs(a - b) / np.maximum(1.0, np.abs(a)))) if len(m) else np.nan))
+    rows.append(dict(column='shape', units=len(m), nan_patterns_equal=True,
+                     max_rel_diff=float(np.mean(m['shape'] != m['shape_s2'])) if len(m) else np.nan))
+    return pd.DataFrame(rows)
+
+
+def gate_leaky(dataset: str, kin: str, seed: int = 0, min_trials: int = 5) -> pd.DataFrame:
+    """Planted entry ramps and leaky reward counts (tau 120-1200 s, both signs) and noise on the gate
+    recday's real behaviour, through `fit_leaky`: can held-out deviance tell a clock from a count?"""
+    rd = syn.DEFAULT_RECDAY[dataset]
+    root = os.path.join(LEAKY_DIR, 'runner_gate', f"{dataset}_{time.strftime('%Y%m%d_%H%M%S')}")
+    print(f'leaky-count gate {dataset} {rd} (>= {min_trials} trials)', flush=True)
+    d = fit_leaky(dataset, rd, kin=kin, min_trials=min_trials, n_perm=20, seed=seed, synthetic='quick',
+                  units=[(u, 'planted') for u in range(len(syn.leaky_specs(dataset)))])
+    write_atomic(os.path.join(root, f'{rd}.pkl'), {'config': leaky_stamp(dataset, kin, min_trials, 20, seed, 1e-4, 'quick'),
+                                                  'data': d})
+    T = d['rows']
+    T['count_better'] = T['dev_count'] < T['dev_ramp']
+    rec = ek.load_recday(rd, dataset)
+    ek.add_day_clock(rec)
+    synth, truth = syn.make_synthetic(rec, ek.analysis_sessions(rec, min_trials), syn.leaky_specs(dataset), seed=seed)
+    s1 = ek.stage1(synth, STAGE2_EVENTS, n_perm=20, seed=seed, kin=kin)
+    T['entry_locked'] = syn.locked(s1, 'ev_entry')[T['unit'].to_numpy()]
+    rows = []
+
+    def add(gid, check, value, ok, must=True):
+        rows.append(dict(gate=gid, check=check, value=value, passed=bool(ok) if must else True))
+        tag = ('PASS' if ok else 'FAIL') if must else 'info'
+        print(f'  [{tag}] {gid} {check}: {value}', flush=True)
+
+    lo = T['tau'] <= 600
+    lc, er, nz = T['kind'] == 'leaky_count', T['kind'] == 'entry_ramp', T['kind'] == 'noise'
+    v1 = float(T.loc[lc & lo, 'count_better'].mean())
+    add('L1', 'leaky counts, tau <= 600 s: count beats ramp held out', v1, v1 >= 0.8)
+    v2 = float((~T.loc[er & lo, 'count_better']).mean())
+    add('L2', 'entry ramps, tau <= 600 s: ramp beats count held out', v2, v2 >= 0.8)
+    add('L1/L2', 'each rule fails on the other kind: counts read as ramps / ramps read as counts',
+        f"{1 - v1:.2f} / {1 - v2:.2f}", (1 - v1) < 0.2 and (1 - v2) < 0.2)
+    for tau in sorted(T['tau'].dropna().unique()):
+        a = T[(T['tau'] == tau) & lc]['count_better'].mean()
+        b = (~T[(T['tau'] == tau) & er]['count_better']).mean()
+        add('L3', f'tau {tau:g} s: counts called counts / ramps called ramps', f'{a:.2f} / {b:.2f}', True, must=False)
+    add('L4', 'noise: fraction where count beats ramp', f"{T.loc[nz, 'count_better'].mean():.2f}", True, must=False)
+    add('L5', 'Stage 1 ev_entry locked: leaky counts / entry ramps / noise',
+        f"{T.loc[lc, 'entry_locked'].mean():.2f} / {T.loc[er, 'entry_locked'].mean():.2f} / {T.loc[nz, 'entry_locked'].mean():.2f}",
+        True, must=False)
+    ok_c = T[lc & T['count_better']]
+    ok_r = T[er & ~T['count_better']]
+    w_c = float(np.mean(np.abs(np.log2(ok_c['tau_count_median'] / ok_c['tau'])) <= 1)) if len(ok_c) else np.nan
+    w_r = float(np.mean(np.abs(np.log2(ok_r['tau_median'] / ok_r['tau'])) <= 1)) if len(ok_r) else np.nan
+    add('L6', 'winning family tau within 2x of truth: counts / ramps', f'{w_c:.2f} / {w_r:.2f}', True, must=False)
+    add('info', 'ramp-count correlation on this behaviour, tau 300 s / 1200 s',
+        f"{d['collinearity'][300.0]:.3f} / {d['collinearity'][1200.0]:.3f}", True, must=False)
+    out = pd.DataFrame(rows)
+    out.to_csv(os.path.join(root, 'leaky_gate.csv'), index=False)
+    T.to_csv(os.path.join(root, 'leaky_gate_units.csv'), index=False)
+    print(f'-> {root}', flush=True)
+    return out
+
+
+# ---------------------------------------------------------------------------
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -711,6 +869,8 @@ def main(argv=None) -> int:
     ap.add_argument('--glm-alpha', type=float, default=1e-4)
     ap.add_argument('--gate-stage2', action='store_true', help='Stage 2 on planted units, exact against M1')
     ap.add_argument('--compare', nargs=2, metavar=('OLD', 'NEW'), help='diff two merged Stage 1 pickles')
+    ap.add_argument('--leaky', action='store_true', help='entry clock vs leaky reward count for --recday (or --merge)')
+    ap.add_argument('--gate-leaky', action='store_true', help='planted ramps vs leaky counts (exit 0 = L1/L2 pass)')
     args = ap.parse_args(argv)
 
     if args.compare:
@@ -722,6 +882,41 @@ def main(argv=None) -> int:
     if args.gate_stage2:
         out = gate_stage2(args.dataset, args.kin, args.seed)
         return 0 if out['passed'].all() else 1
+    if args.gate_leaky:
+        out = gate_leaky(args.dataset, args.kin, args.seed, args.min_trials)
+        return 0 if out['passed'].all() else 1
+    if args.leaky:
+        arm = arm_name(args.dataset, args.kin, args.min_trials, args.n_perm, args.synthetic)
+        if args.merge:
+            M = merge_leaky_dir(os.path.join(LEAKY_DIR, 'shards', arm), expect=args.expect_recdays)
+            S2 = pickle.load(open(_latest_pickle(os.path.join(STAGE2_DIR, f'stage2_{arm}')), 'rb'))['table']
+            M['stage2_equivalence'] = compare_leaky_stage2(M['table'], S2)
+            p = versioned(os.path.join(LEAKY_DIR, f'leaky_{arm}.pkl'))
+            with open(p, 'wb') as fh:
+                pickle.dump(M, fh, protocol=pickle.HIGHEST_PROTOCOL)
+            M['table'].to_csv(p[:-4] + '_units.csv', index=False)
+            M['summary'].to_csv(p[:-4] + '_summary.csv', index=False)
+            print(M['stage2_equivalence'].to_string(index=False))
+            print(f"{len(M['summary'])} shards ({int(M['summary']['skipped'].notna().sum())} skipped) -> {p}")
+            return 0
+        if not args.recday:
+            ap.error('--recday is required for a leaky-count fit')
+        path = os.path.join(LEAKY_DIR, 'shards', arm, f'{args.recday}.pkl')
+        st = leaky_stamp(args.dataset, args.kin, args.min_trials, args.n_perm, args.seed, args.glm_alpha, args.synthetic)
+        if check_or_skip(path, st):
+            print(f'{path} already holds this stamp; nothing to do')
+            return 0
+        d = fit_leaky(args.dataset, args.recday, kin=args.kin, min_trials=args.min_trials, n_perm=args.n_perm,
+                      seed=args.seed, glm_alpha=args.glm_alpha, synthetic=args.synthetic)
+        write_atomic(path, {'config': st, 'data': d})
+        if d['skipped']:
+            print(f"{args.recday}: skipped ({d['skipped']}) -> {path}")
+        else:
+            t = d['rows'][d['rows']['role'] == 'locked']
+            print(f"{args.recday}: {len(t)} entry-locked + {int((d['rows']['role'] == 'null_sample').sum())} null units, "
+                  f"count beats ramp in {np.mean(t['dev_count'] < t['dev_ramp']):.2f} of the locked; ramp-count r "
+                  f"{d['collinearity']}; {d['elapsed_s']:.0f} s -> {path}")
+        return 0
     arm = arm_name(args.dataset, args.kin, args.min_trials, args.n_perm, args.synthetic)
     if args.stage2:
         if args.merge:

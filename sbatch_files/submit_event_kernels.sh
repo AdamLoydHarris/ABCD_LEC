@@ -45,8 +45,8 @@ case "$DATASET" in
     *) echo "--dataset lec|pfc is required" >&2; exit 2 ;;
 esac
 case "$RUNNER" in
-    stage1|drift|stage2) ;;
-    *) echo "--runner stage1|drift|stage2" >&2; exit 2 ;;
+    stage1|drift|stage2|leaky) ;;
+    *) echo "--runner stage1|drift|stage2|leaky" >&2; exit 2 ;;
 esac
 
 if [ "${#RECDAYS[@]}" -eq 0 ]; then
@@ -79,6 +79,13 @@ for rd in "${RECDAYS[@]}"; do
             echo "  $rd $a -> $jid"
             n=$((n + 1))
         done
+    elif [ "$RUNNER" = leaky ]; then
+        # entry clock vs leaky reward count: ~10-15 s per unit, the entry passers + 10 null per recday
+        jid=$("${SB[@]}" --time=0-02:00 --job-name="lk_${DATASET}_mt${MIN_TRIALS}_${rd}" \
+              sbatch_files/event_kernels.sbatch "$TREE/run_event_kernels.py" --dataset "$DATASET" \
+              --leaky --recday "$rd" --min-trials "$MIN_TRIALS" --n-perm "$N_PERM")
+        echo "  $rd -> $jid"
+        n=$((n + 1))
     elif [ "$RUNNER" = stage2 ]; then
         # ~8 s per unit (M1 G10); the largest recday-event holds ~150 passers.
         for e in entry A reward; do
@@ -103,6 +110,8 @@ if [ "$RUNNER" = stage1 ]; then
     echo "  python $TREE/run_event_kernels.py --dataset $DATASET --merge --min-trials $MIN_TRIALS --n-perm $N_PERM"
 elif [ "$RUNNER" = stage2 ]; then
     echo "  python $TREE/run_event_kernels.py --dataset $DATASET --stage2 --merge --min-trials $MIN_TRIALS --n-perm $N_PERM"
+elif [ "$RUNNER" = leaky ]; then
+    echo "  python $TREE/run_event_kernels.py --dataset $DATASET --leaky --merge --min-trials $MIN_TRIALS --n-perm $N_PERM"
 else
     echo "  python $TREE/run_population_drift.py --dataset $DATASET --merge --min-trials $MIN_TRIALS"
 fi

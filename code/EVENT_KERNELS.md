@@ -5,6 +5,130 @@ constants, in LEC and PFC, read as the state of an SSM trace bank. Plan, user de
 rules and code map: `docs/handoff/EVENT_KERNELS_HANDOFF.md`. Population drift (Kanter) results
 are in `code/POPULATION_DRIFT.md`.
 
+## 2026-10-13 — M5's test brought forward: entry clock vs leaky reward count
+
+User decision, 2026-10-13: commit M3 part 1 (90c10d0, pushed), then run this test before M3 part 2.
+
+**Outcome.**
+
+- **In LEC, the slow entry kernel is a clock, not a leaky count of rewards.** Over the 972
+  entry-locked units:
+  - the entry ramp exp(-t/tau) predicts held-out sessions better than the best leaky reward count
+    in 79% (per mouse 71-88%, 5 mice);
+  - the ramp adds unique held-out gain beyond the count in 76%, a median 0.30 of the shape-free
+    kernel's gain;
+  - the count adds none beyond the ramp: positive in 43%, median -0.003. That is the chance
+    split for a quantity with no information.
+- **PFC leans the same way, less decisively** (414 units):
+  - the ramp wins in 60% (per mouse 38-76%, 7 mice);
+  - its unique gain is positive in 51%, median 0.05;
+  - the count's unique gain sits at chance: 46%, median 0.002.
+- **The test separates the two on real behaviour, at strong planted effects.** The gate scores
+  1.0 for both kinds at tau <= 600 s in both datasets, although ramp and count correlate at
+  |r| 0.88-0.99 there.
+- **Stage 1 could not separate them:** it calls 100% of planted leaky counts entry-locked. Only
+  this comparison can.
+
+### What was done
+
+| file | change |
+|---|---|
+| `event_kernels.py` (+ mirror) | `leaky_trace` and `leaky_bank`: the leaky count (1 - a) sum of a^(t - t_k), scaled so 4 rewards/min reads 1. `stage2_unit(extra=, joint=)` adds families profiled like ramp and bump, plus a joint refit. Defaults unchanged. |
+| `event_kernels_synthetics.py` (+ mirror) | kind `leaky_count` and `leaky_specs()`. `unit_specs` is untouched. |
+| `run_event_kernels.py` (+ mirror) | `--leaky` per recday, `--gate-leaky`, `--leaky --merge`, which also checks equivalence with the Stage 2 merge. Per-recday ramp-count collinearity. |
+| `event_kernels_plots.py` (+ mirror) | F19-F21, `table_leaky` |
+| `event_kernels_leaky_count.ipynb` | load mode. Figures in `data/figures/event_kernels/M5_leaky/`. |
+
+- **Units:** the `ev_entry` passers of the V3 Stage 1 table at >= 5 trials (LEC 972, PFC 414),
+  plus the same 10 seeded null units per recday as Stage 2 (LEC 250, PFC 219).
+- **Fit:** `stage2_unit(D, u, 'entry', extra={'count': (taus, leaky_bank)}, joint=('ramp', 'count'))`.
+  Both families use the entry tau grid, 5-7241 s, 2 per octave, chosen on training sessions.
+  Scoring is held-out Poisson deviance with only the session intercept refitted.
+- **Runs:** 25 + 25 jobs, `EXIT=0`; PFC me08_12092021_13092021 skipped (no Stage 1 rows).
+- **Real-data equivalence with Stage 2:** `dev_null`, `dev_np`, `dev_ramp` and `dev_bump` agree to
+  4e-15 (LEC, 1222 units) and 3e-14 relative (PFC, 633). tau, peak and shape are identical.
+
+### Gates (jobs 3764521-26, all `EXIT=0`)
+
+- `--gate`, the Stage 1 M1 reproduction, still 19/19: the synthetics change left the M1 units
+  alone.
+- `--gate-stage2`: within 3.5e-14 (LEC) and 1.5e-13 (PFC) relative of M1. The `stage2_unit`
+  default is unchanged.
+- `--gate-leaky`, planted on the gate recday's real behaviour at >= 5 trials:
+
+  | row | planted | LEC | PFC |
+  |---|---|---|---|
+  | L1 | leaky counts, tau <= 600 s, called counts | 1.00 | 1.00 |
+  | L2 | entry ramps, tau <= 600 s, called ramps | 1.00 | 1.00 |
+  | L1/L2 | each rule on the other kind | 0.00 / 0.00 | 0.00 / 0.00 |
+  | L3 | tau 1200 s: counts / ramps called right | 1.00 / 0.75 | 1.00 / 1.00 |
+  | L4 | noise: count beats ramp | 0.55 | 0.55 |
+  | L5 | Stage 1 `ev_entry` locked: counts / ramps / noise | 1.00 / 1.00 / 0.00 | 1.00 / 1.00 / 0.05 |
+  | L6 | winning family's tau within 2x: counts / ramps | 0.81 / 1.00 | 0.00 / 1.00 |
+  | info | ramp-count correlation, tau 300 / 1200 s | -0.97 / -0.99 | -0.88 / -0.94 |
+
+  PFC's planted counts win as counts but their tau is not recovered. The family call does not
+  depend on it.
+
+### Measured (>= 5 trials; the preference is in units of the shape-free kernel's held-out gain)
+
+| units | n | count beats ramp | median (dev ramp - dev count) / gain | ramp unique gain > 0 | count unique gain > 0 |
+|---|---|---|---|---|---|
+| LEC, entry-locked | 972 | 0.208 | -0.31 | 0.76 (median 0.30) | 0.43 (median -0.003) |
+| LEC, null sample | 250 | 0.492 | -0.73 | 0.20 | 0.12 |
+| PFC, entry-locked | 414 | 0.401 | -0.05 | 0.51 (median 0.05) | 0.46 (median 0.002) |
+| PFC, null sample | 219 | 0.594 | +0.04 | 0.18 | 0.18 |
+
+- **Per mouse,** the fraction of entry-locked units where the count wins (recday mean, then mouse
+  mean): LEC 0.12-0.29 (5 mice, mean 0.20); PFC 0.24-0.62 (7 mice, mean 0.42). ah04, me08, me10
+  and me11 sit near 0.5.
+- **Selection.** Conditioning on "ramp-like" (Stage 2's ramp recovers >= 0.5 of the gain) biases
+  toward the ramp; null ramp-like units also prefer it (LEC 0.14). So the table uses all
+  entry-locked units.
+- **Neutral selection,** where either family recovers >= 0.5 of the gain:
+  - LEC: 846 units, the count wins in 0.17, ramp unique positive 0.82, count unique 0.46;
+  - PFC: 244 units, 0.31, 0.67 and 0.49.
+- **Matched time constants** (F20), where both families fit: the count needs a longer tau than
+  the ramp, often the grid maximum (7241 s), effectively a cumulative count.
+- **Collinearity on real behaviour,** ramp vs count per recday:
+
+  | tau | LEC: median r (range) | PFC: median r (range) |
+  |---|---|---|
+  | 300 s | -0.81 (-0.97 to -0.66) | -0.88 (-0.95 to -0.65) |
+  | 1200 s | -0.89 (-0.99 to -0.83) | -0.94 (-0.99 to -0.87) |
+
+  Real behaviour is no more collinear than the gate recday's, where the test separated perfectly.
+
+### What was NOT established
+
+- **Power at real effect sizes.** Planted units modulate the rate about 3x; real entry kernels
+  are far weaker (median locked cpd about 0.005). Per-unit calls are therefore noisy (noise
+  units split 0.55). The robust evidence is the asymmetry of unique gains, not any single call.
+- **Which clock.** The ramp is time since recording start. The mouse is already in the maze then
+  (M1), so placement, handling or another monotonic session variable is not excluded. The reset
+  test (M2) excludes a day-long trend for 72-82% of entry-locked units. Satiety, if it tracks
+  rewards, is what the cumulative count tests, and it loses.
+- **Trial counts and other event counts.** A leaky count of trials (A) is nearly collinear with
+  the reward count; it was not tested separately. Neither were pokes (LEC) or distance run.
+- **PFC.** About half the units carry no unique information from either family. The clock
+  preference there is weaker and varies by mouse; it is not established per mouse.
+- **No LEC vs PFC contrast was tested.**
+
+### Commands
+
+```
+python code/check_mirror_parity.py                                          # must exit 0
+for ds in lec pfc; do t=code; [ $ds = pfc ] && t=mFC_data/code
+  for mode in gate gate-stage2 gate-leaky; do
+    sbatch --time=0-01:30 --job-name=ek_${mode}_$ds sbatch_files/event_kernels.sbatch $t/run_event_kernels.py --$mode --dataset $ds --min-trials 5
+  done; done
+bash sbatch_files/submit_event_kernels.sh --dataset lec --runner leaky --min-trials 5 --after <gate job ids>
+bash sbatch_files/submit_event_kernels.sh --dataset pfc --runner leaky --min-trials 5 --after <gate job ids>
+python code/run_event_kernels.py --dataset lec --leaky --merge --min-trials 5
+python mFC_data/code/run_event_kernels.py --dataset pfc --leaky --merge --min-trials 5
+sbatch --job-name=ek_nb_leaky --time=0-01:00 --mem=32G --cpus-per-task=2 sbatch_files/event_kernels.sbatch -m jupyter nbconvert --to notebook --execute --inplace --ExecutePreprocessor.timeout=3600 code/event_kernels_leaky_count.ipynb
+```
+
 ## 2026-10-12, night — M3 part 1: Stage 2 shapes and time constants (>= 5 trials, both datasets)
 
 **Outcome.**

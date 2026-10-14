@@ -262,6 +262,51 @@ Design choices inside `event_kernels.py`, each with its reason:
 
 ## 7. Status
 
+### 2026-10-14: user decisions after the leaky test; M3 part 2 approved
+
+- **Commit and push** the leaky step (this entry's commit).
+- **M3 part 2 next**, as planned on 2026-10-02: Tsao's stepwise side table with the Kanter GLM
+  variant, and Kanter part 2. Plan and rationale: `docs/handoff/EVENT_KERNELS_WRITEUP.md`,
+  Part 2.
+- **The ramp test is in.** Is M2's held-out first-minute decoding the slow ramps' early slope, or
+  a fast component locked to bin 0?
+- **Tsao's trial time is time since the last reward.** A leg ends in one reward, as a lap did.
+  Time since A stays as an extra candidate, because Stage 1 locked 316 LEC units to reward A
+  against 1380 to every reward.
+- **The which-clock tests are outstanding, not run.** Reframed in §8.
+- **The clock origin,** from the user:
+  - the first sync pulse marks the task start, when the white noise comes on;
+  - the mouse is placed in the maze up to about a minute before, while the rig is set up. That
+    time is not recorded.
+  - Measured in LEC, bin 0 is the ephys recording start. The task start comes a median 4.6 s
+    later, range 1.5-43 s, over 191 ABCD sessions (`pycontrol_start_bin` in the full-session
+    tables).
+
+### 2026-10-13: entry clock vs leaky reward count (M5's test brought forward), stopped for review
+
+M3 part 1 is committed and pushed as 90c10d0. This step is uncommitted. Details are in
+`code/EVENT_KERNELS.md`, entry 2026-10-13; the notebook is `code/event_kernels_leaky_count.ipynb`
+and the figures are in `data/figures/event_kernels/M5_leaky/`.
+
+- **What was built.**
+  - `stage2_unit(extra=, joint=)` plus `leaky_bank` / `leaky_trace`. Defaults unchanged, pinned by
+    `--gate-stage2`.
+  - The `leaky_count` planted kind and `leaky_specs`.
+  - Runner modes `--leaky`, `--gate-leaky` and `--leaky --merge`; the merge checks equivalence with
+    Stage 2.
+  - F19-F21.
+- **Gates:** every check passes in both datasets. The leaky gate calls planted counts and ramps
+  correctly in 100% at tau <= 600 s. Stage 1 calls 100% of planted counts entry-locked.
+- **Result.**
+  - LEC: the ramp wins in 79% of 972 entry-locked units. It adds unique gain beyond the count in
+    76% (median 0.30 of the kernel gain); the count adds none (43%, median 0).
+  - PFC: the ramp wins in 60%, with weaker unique gains (51% vs 46%).
+  - So the slow entry signal is time since recording start, not integrated reward experience.
+- **Decisions to put to the user:**
+  1. Commit this step?
+  2. Next, either M3 part 2 (Tsao's stepwise table, Kanter part 2) or more clock tests. Which
+     clock: placement vs recording start; leaky counts of trials or distance.
+
 ### 2026-10-12, night: M3 part 1 (Stage 2) complete, stopped for review
 
 Details: `code/EVENT_KERNELS.md`, the entries "runner V3" and "M3 part 1".
@@ -521,6 +566,13 @@ sessions have no ROI file); that is fixed.
 
 ## 8. Open questions and risks
 
+- **Which clock (outstanding, 2026-10-14).**
+  - Placement vs recording start cannot be tested, because placement is not recorded.
+  - It matters little for ramps. Moving an exponential ramp's origin by d multiplies its
+    amplitude by exp(-d/tau) and leaves tau unchanged.
+  - Testable, in LEC only: task start vs recording start, a median 4.6 s apart. It matters only for
+    a transient in the first seconds.
+  - Still untested: leaky counts of trials (A) and of distance run, against the entry ramp.
 - **Day-scale drift passing as an entry ramp.** The reset test is the defence; G7 must pass on
   synthetics before any entry-ramp claim.
 - **Speed-bank start-up.** G8 compares zero vs steady-state initialisation.

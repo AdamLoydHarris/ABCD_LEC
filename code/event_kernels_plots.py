@@ -1014,6 +1014,143 @@ def plot_stage2_examples(S2: dict, S1: dict, ds: str = 'LEC', out_path=None):
 
 
 # ---------------------------------------------------------------------------
+# F19-F21: the entry clock vs a leaky reward count (M5 brought forward)
+# ---------------------------------------------------------------------------
+
+LEAKY_DIR = os.path.join(REPO, 'data', 'event_kernels', 'leaky')
+
+
+def latest_leaky_gate(dataset: str) -> pd.DataFrame:
+    """Per-unit table of the most recent `--gate-leaky` run for a dataset."""
+    runs = sorted(glob.glob(os.path.join(LEAKY_DIR, 'runner_gate', f'{dataset.lower()}_*', 'leaky_gate_units.csv')))
+    if not runs:
+        raise FileNotFoundError(f'no leaky gate run for {dataset}')
+    return pd.read_csv(runs[-1])
+
+
+def table_leaky(L: dict) -> pd.DataFrame:
+    """Per unit: held-out preference and unique gains, in units of the shape-free kernel's gain.
+    pref > 0: the leaky reward count predicts held-out sessions better than the entry ramp."""
+    rows = []
+    for ds, M in L.items():
+        T = M['table'].copy()
+        g = T['dev_null'] - T['dev_np']
+        ok = g > 0
+        T['dataset'] = ds
+        T['count_better'] = T['dev_count'] < T['dev_ramp']
+        T['pref'] = np.where(ok, (T['dev_ramp'] - T['dev_count']) / g, np.nan)
+        T['count_unique'] = np.where(ok, (T['dev_ramp'] - T['dev_joint']) / g, np.nan)
+        T['ramp_unique'] = np.where(ok, (T['dev_count'] - T['dev_joint']) / g, np.nan)
+        T['ramp_like'] = T['shape'].isin(['ramp_up', 'ramp_down']) | ((T['shape'] == 'bump') & (T['frac_ramp'] >= 0.5))
+        rows.append(T)
+    return pd.concat(rows, ignore_index=True)
+
+
+def plot_leaky_preference(L: dict, out_path=None):
+    """F19: left, the held-out preference (dev_ramp - dev_count) / gain of the shape-free kernel for
+    ramp-like entry-locked units and the null sample; right, per mouse, the fraction of
+    entry-locked units where the leaky count beats the ramp, with the gate's planted rates."""
+    t = table_leaky(L)
+    with mpl.rc_context(_rc()):
+        fig, (a1, a2) = plt.subplots(1, 2, figsize=(6.4, 2.6), layout='constrained')
+        bins = np.linspace(-0.5, 0.5, 41)
+        for ds in L:
+            d = t[(t['dataset'] == ds) & (t['role'] == 'locked') & t['ramp_like']]['pref'].clip(-0.5, 0.5)
+            a1.hist(d.dropna(), bins=bins, histtype='step', color=DATASET_COLORS[ds], lw=1.2, label=f'{ds} ({d.notna().sum()})')
+        nl = t[t['role'] == 'null_sample']['pref'].clip(-0.5, 0.5).dropna()
+        a1.hist(nl, bins=bins, histtype='step', color=NULL, lw=1, label=f'null ({len(nl)})')
+        a1.axvline(0, color=INK, lw=0.6)
+        a1.set_xlabel('(dev ramp - dev count) / kernel gain\n> 0: leaky count better (clipped at +/-0.5)')
+        a1.set_ylabel('units')
+        a1.legend(frameon=False)
+        for i, ds in enumerate(L):
+            d = t[(t['dataset'] == ds) & (t['role'] == 'locked')].assign(v=lambda x: x['count_better'].astype(float))
+            pm = per_mouse(d, 'v')
+            a2.bar(i, pm.mean(), color=DATASET_COLORS[ds], alpha=0.4, width=0.6, lw=0)
+            a2.scatter(i + _jitter(len(pm)), pm.values, s=9, color=DATASET_COLORS[ds], lw=0, zorder=3)
+            try:
+                g = latest_leaky_gate(ds)
+                lo = g['tau'] <= 600
+                for kind, ls in (('leaky_count', '-'), ('entry_ramp', '--')):
+                    r = g[lo & (g['kind'] == kind)]['count_better'].mean()
+                    a2.plot([i - 0.35, i + 0.35], [r, r], color=INK, ls=ls, lw=0.8)
+            except FileNotFoundError:
+                pass
+        a2.set_xticks(range(len(L)), list(L))
+        a2.set_ylim(0, 1)
+        a2.set_ylabel('fraction where count beats ramp')
+        a2.set_title('point = mouse; lines: gate, planted counts (solid)\nand planted ramps (dashed), tau <= 600 s', fontsize=6)
+        fig.suptitle('F19. Entry-locked units: entry clock or leaky reward count?')
+    _save(fig, out_path)
+    return fig
+
+
+def plot_leaky_unique(L: dict, out_path=None):
+    """F20: left, each family's unique held-out gain beyond the other (from the joint refit), per
+    entry-locked unit; right, the leaky count's tau against the ramp's tau where both fit."""
+    t = table_leaky(L)
+    t = t[t['role'] == 'locked']
+    with mpl.rc_context(_rc()):
+        fig, (a1, a2) = plt.subplots(1, 2, figsize=(6.4, 2.8), layout='constrained')
+        for ds in L:
+            d = t[t['dataset'] == ds]
+            a1.scatter(d['ramp_unique'].clip(-0.5, 1), d['count_unique'].clip(-0.5, 1), s=3, color=DATASET_COLORS[ds],
+                       alpha=0.6, lw=0, label=ds)
+            e = d[(d['frac_ramp'] >= 0.5) & (d['frac_count'] >= 0.5)]
+            a2.scatter(e['tau_median'], e['tau_count_median'], s=4, color=DATASET_COLORS[ds], alpha=0.6, lw=0,
+                       label=f'{ds} ({len(e)})')
+        a1.axhline(0, color=NULL, lw=0.6)
+        a1.axvline(0, color=NULL, lw=0.6)
+        a1.set_xlabel('ramp: unique gain beyond the count')
+        a1.set_ylabel('count: unique gain beyond the ramp')
+        a1.legend(frameon=False, markerscale=3)
+        lim = [3, 1e4]
+        a2.plot(lim, lim, color=INK, lw=0.5)
+        a2.set_xscale('log')
+        a2.set_yscale('log')
+        a2.set_xlabel('ramp tau (s)')
+        a2.set_ylabel('leaky count tau (s)')
+        a2.legend(frameon=False, markerscale=3)
+        fig.suptitle('F20. Unique gains (fractions of the kernel gain, clipped) and matched time constants')
+    _save(fig, out_path)
+    return fig
+
+
+def plot_leaky_gate(L: dict, out_path=None):
+    """F21: the gate envelope, the fraction of planted units whose own family wins held out, by planted
+    tau; and the real recdays' ramp-count correlation, which sets how separable they are."""
+    with mpl.rc_context(_rc()):
+        fig, axes = plt.subplots(1, 2, figsize=(6.4, 2.6), layout='constrained')
+        for ds in L:
+            try:
+                g = latest_leaky_gate(ds)
+            except FileNotFoundError:
+                continue
+            for kind, ls in (('leaky_count', '-'), ('entry_ramp', '--')):
+                d = g[g['kind'] == kind]
+                correct = d['count_better'] if kind == 'leaky_count' else ~d['count_better'].astype(bool)
+                r = correct.groupby(d['tau']).mean()
+                axes[0].plot(r.index, r.values, ls=ls, marker='o', ms=3, color=DATASET_COLORS[ds],
+                             label=f"{ds} {kind.replace('_', ' ')}")
+        axes[0].axhline(0.8, color=NULL, lw=0.6)
+        axes[0].set_xscale('log')
+        axes[0].set_ylim(0, 1.05)
+        axes[0].set_xlabel('planted tau (s)')
+        axes[0].set_ylabel('own family wins held out')
+        axes[0].legend(frameon=False, fontsize=5)
+        for i, ds in enumerate(L):
+            sm = L[ds]['summary']
+            for j, col in enumerate([c for c in sm.columns if c.startswith('r_ramp_count_')]):
+                v = sm[col].dropna().to_numpy()
+                axes[1].scatter(np.full(len(v), i * 3 + j) + _jitter(len(v), 0.4), v, s=6, color=DATASET_COLORS[ds], lw=0)
+        axes[1].set_xticks([0, 1, 3, 4], ['LEC 300 s', 'LEC 1200 s', 'PFC 300 s', 'PFC 1200 s'], rotation=30)
+        axes[1].set_ylabel('ramp-count correlation per recday')
+        fig.suptitle('F21. Can the behaviour tell a clock from a count? Gate envelope and collinearity')
+    _save(fig, out_path)
+    return fig
+
+
+# ---------------------------------------------------------------------------
 
 def make_all(stage1: dict, stage1_mt5: dict | None, drift: dict, n_perm: int = 100) -> dict:
     """Every figure, saved under FIG_DIR / DRIFT_FIG_DIR; returns {figure id: path stem}."""
