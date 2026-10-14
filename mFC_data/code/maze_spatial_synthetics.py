@@ -17,6 +17,17 @@ spikes from planted rate functions. Run on the cluster for each dataset (one rec
 | M5 | Euclidean- vs geodesic-coded place populations, 5 draws each | cv R2 G+X minus E+X and the diagnostic contrast both higher for the geodesic population; the sign of the R2 difference is reported only (biased towards E) |
 | M6 | place x goal progress (a different field per goal-progress bin) | across-bin plane angle exceeds both within-bin controls |
 | M7 | Poisson noise | stable / spatial / type classes not above 1 % + chance (binomial p >= 0.01) |
+| S1 | M3 population, null sims 2 -> 4 | every earlier number unchanged (max abs diff 0, nothing missing) |
+| MS1 | 1000 synthetic mice under H0, 3 recdays, 100 sims | fraction with mouse p <= 0.05 consistent with 5 % (binomial p >= 0.01) |
+| MS2 | +1 null SD in each of 5 recdays, 200 mice | >= 90 % of mice detected; the legacy mean-of-fractions rate is reported |
+| MS3 | M2 and M3 through merge_tables | mouse p equals the hand count; M2 not a hit, M3 a hit (field shuffle); group tests equal hand values |
+| K1 | real track | travel |turn| at corners >= 1.5x bridges above 10 cm/s; despiked and capped samples < 0.5 % |
+| K2 | real behaviour | the at-port state lies within 1 s of >= 90 % of goal arrivals (reward bins) |
+| K3 | real samples | turn matching off by default; collapsed edges equal speed-only matching exactly |
+| K4 | turn, at-port and slow-speed cells | node/bridge BA and the node/bridge RSA beta inside the kinematic null (p > 0.05) |
+| K5 | node and bridge template cells + place cells | both statistics beyond the kinematic null p95 |
+| K6 | turn cells | speed x turn matching lowers corner/cardinal BA by >= 0.05 where turning separates the types |
+| K7 | guards | port speed above min_speed, non-increasing edges, decode sims > RSA sims raise; 'head' raises on PFC only |
 
 Each check prints `PASS/FAIL name: measured value, n`; the script exits 1 on any failure.
 This file is byte-identical in `code/` and `mFC_data/code/` (`check_mirror_parity.py`).
@@ -134,9 +145,8 @@ def main(argv=None) -> int:
     print(f'{rd}: {len(asm["sessions"])} sessions, T {T}, tasks {asm["n_tasks"]}, lattice resid '
           f'{asm["lattice"]["resid_max_cm"]:.2f} cm; loaded in {time.time() - t0:.0f} s', flush=True)
 
-    def run(R, units_n=None, cfg_=None):
-        """Plant (N, T) Hz into the views (split back per session) and run the real entry point."""
-        spk = rng.poisson(np.clip(R, 0, None) * sc.BIN_S).astype(np.float32)
+    def views_for(spk):
+        """The recday's views with `counts` replaced by (N, T) spikes, split back per session."""
         v2, off = {}, 0
         for p in asm['parts']:
             v = dict(views[p['session']])
@@ -144,8 +154,13 @@ def main(argv=None) -> int:
             v['xy'], v['locs'] = v['xy'][:p['T']], v['locs'][:p['T']]
             v2[p['session']] = v
             off += p['T']
+        return v2
+
+    def run(R, units_n=None, cfg_=None):
+        """Plant (N, T) Hz into the views and run the real entry point."""
+        spk = rng.poisson(np.clip(R, 0, None) * sc.BIN_S).astype(np.float32)
         units = pd.DataFrame(dict(unit=np.arange(R.shape[0]), region='SYN'))
-        return ms.run_maze_recday(v2, rd, units, cfg_ or cfg)
+        return ms.run_maze_recday(views_for(spk), rd, units, cfg_ or cfg)
 
     # ME1 smoother equivalence on real occupancy
     m2 = ms.maps_2d(asm, cfg)
@@ -226,6 +241,8 @@ def main(argv=None) -> int:
     # M2 pure place cells, narrow and wide, continuous in position
     for sig in (6.0, 15.0):
         res = run(place_continuous(n, sig))
+        if sig == 6.0:
+            res_m2 = res
         real_d = res['real']['decided']['rsa'][9]['fit_ED']['beta'][1]
         null_d = np.array([x[9]['fit_ED']['beta'][1] for x in res['nulls']['place']['rsa'] if 9 in x])
         pct = float(np.mean(null_d >= real_d)) if len(null_d) else np.nan
@@ -263,6 +280,7 @@ def main(argv=None) -> int:
     kinds = ('corner', 'cardinal', 'node', 'bridge')
     rates = np.vstack([type_rates(k, 10) for k in kinds] + [place_pop(20, 8.0)])
     res = run(loc_rates_planted(c['loc'], rates))
+    res_m3 = res
     su = res['single']
     for i, k in enumerate(kinds):
         hit = float(np.mean(su['type_class'][k][i * 10:(i + 1) * 10]))
@@ -360,6 +378,177 @@ def main(argv=None) -> int:
         kk = int(np.sum(v))
         p = float(binom.sf(kk - 1, nn, 0.05))
         check(f'M7 noise not {k}', p >= 0.01, f'{kk}/{nn}, binomial p vs 5 % {p:.3f}')
+
+    # S1 more null simulations leave every earlier number unchanged: seeds are drawn per index below
+    # n_sim_rsa, so 100 decode / planes sims keep the 20 / 10 of run 1617859bc6fd as their first ones
+    spk1 = rng.poisson(np.clip(loc_rates_planted(c['loc'], rates), 0, None) * sc.BIN_S).astype(np.float32)
+    units1 = pd.DataFrame(dict(unit=np.arange(spk1.shape[0]), region='SYN'))
+    cfg_a, cfg_b = copy.deepcopy(cfg), copy.deepcopy(cfg)
+    cfg_a['null'].update(n_sim_rsa=4, n_sim_decode=2, n_sim_planes=2)
+    cfg_b['null'].update(n_sim_rsa=4, n_sim_decode=4, n_sim_planes=4)
+    ra = ms.run_maze_recday(views_for(spk1), rd, units1, cfg_a)
+    rb = ms.run_maze_recday(views_for(spk1), rd, units1, cfg_b)
+    keys = ('single', 'maps2d', 'place_models', 'real', 'nulls')
+    cmp1 = sc.compare_tree({k: ra[k] for k in keys}, {k: rb[k] for k in keys})
+    grew = all(len(rb['nulls'][k]['decode']) == 4 for k in cfg_b['null']['kinds']['decode'])
+    check('S1 more decode / planes sims leave every earlier number unchanged',
+          cmp1['max_diff'] == 0 and cmp1['nan_mismatch'] == 0 and not cmp1['missing'] and grew,
+          f"max abs diff {cmp1['max_diff']} over {cmp1['n']} values, NaN mismatches {cmp1['nan_mismatch']}, missing {len(cmp1['missing'])}")
+
+    # MS1 / MS2 the mouse-level test on synthetic tables: calibrated under H0, and more powerful than the
+    # legacy mean of per-recday fractions (one recday's fraction moved by up to 0.45 at 10-20 sims)
+    g = np.random.default_rng(20261012)
+
+    def tables(n_mice, n_rd, shift):
+        prow, srow = [], []
+        for m_ in range(n_mice):
+            for r_ in range(n_rd):
+                name = f'm{m_}_{r_}'
+                srow += [(name, f'm{m_}', 'place_shuffled', 'rsa', i, 'x', v) for i, v in enumerate(g.normal(0, 1, 100))]
+                prow.append(dict(recday=name, mouse=f'm{m_}', recipe='decided', x=shift if shift else g.normal(0, 1)))
+        return pd.DataFrame(prow), pd.DataFrame(srow, columns=['recday', 'mouse', 'null', 'analysis', 'sim', 'stat', 'value'])
+    pop0, sims0 = tables(1000, 3, 0.0)
+    m0 = ms.mouse_null_tests(pop0, sims0, 'x', 'place_shuffled')
+    k0 = int((m0['p'] <= 0.05).sum())
+    from scipy.stats import binomtest
+    p0 = binomtest(k0, len(m0), 0.05).pvalue
+    check('MS1 mouse-level p calibrated under H0', p0 >= 0.01, f'{k0}/{len(m0)} mice with p <= 0.05, binomial p vs 5 % {p0:.3f}')
+    pop1, sims1 = tables(200, 5, 1.0)
+    m1 = ms.mouse_null_tests(pop1, sims1, 'x', 'place_shuffled')
+    leg = sims1.merge(pop1[['recday', 'x']], on='recday').assign(ge=lambda d: d['value'] >= d['x'])
+    leg = leg.groupby(['mouse', 'recday'])['ge'].mean().groupby('mouse').mean()
+    check('MS2 a +1 SD effect in each of 5 recdays is detected per mouse', m1['hit'].mean() >= 0.9,
+          f"new rule {m1['hit'].mean():.2f} of {len(m1)} mice; legacy mean-of-fractions rule {(leg <= 0.05).mean():.2f}")
+
+    # MS3 through the real pipeline: one recday's p equals the hand count; M2 accepted, M3 rejected
+    hits = {}
+    for name, rr in (('M2 place sigma 6', res_m2), ('M3 generalised', res_m3)):
+        tb = ms.merge_tables({rd: rr})
+        m = ms.mouse_null_tests(tb['population'], tb['null_sims'], 'rsa9_ED_X', 'place_shuffled')
+        vals = np.array([x[9]['fit_ED']['beta'][1] for x in rr['nulls']['place_shuffled']['rsa'] if 9 in x], float)
+        vals = vals[np.isfinite(vals)]
+        real_v = rr['real']['decided']['rsa'][9]['fit_ED']['beta'][1]
+        p_hand = (1 + int((vals >= real_v).sum())) / (1 + len(vals))
+        hits[name] = (float(m['p'].iloc[0]), bool(m['hit'].iloc[0]))
+        check(f'MS3 {name}: mouse p from merged tables equals the hand count', abs(hits[name][0] - p_hand) < 1e-12,
+              f'p {hits[name][0]:.4f}, hand {p_hand:.4f}, n {len(vals)}')
+    check('MS3 M2 place cells are not a hit under the field-shuffle null', not hits['M2 place sigma 6'][1],
+          f"p {hits['M2 place sigma 6'][0]:.3f}")
+    check('MS3 M3 generalised cells are a hit under the field-shuffle null', hits['M3 generalised'][1],
+          f"p {hits['M3 generalised'][0]:.3f}")
+    gt = ms.group_tests(pd.DataFrame(dict(p=[0.01, 0.02, 0.5, 0.6, 0.7], hit=[True, True, False, False, False],
+                                          real=[1.0] * 5, null_mean=[0.0] * 5, null_sd=[1.0] * 5)))
+    check('MS3 group tests equal hand values', abs(gt['p_binomial'] - 0.0225925) < 1e-6 and abs(gt['p_signflip'] - 1 / 32) < 1e-12,
+          f"binomial 2 of 5 {gt['p_binomial']:.7f} (hand 0.0225925), sign-flip {gt['p_signflip']:.5f} (hand 0.03125)")
+
+    # K1 / K2 turning and at-port state on the real track
+    kq = ms.kinematics_qc(asm, cfg)
+    med = kq['median_turn_travel']
+    qcs = [x for x in kq['turn'] if x]
+    n_t = max(sum(x['T'] for x in qcs), 1)
+    sp_, cp_ = sum(x['n_spike'] for x in qcs) / n_t, sum(x['n_cap'] for x in qcs) / n_t
+    # 1.5x, not the 2x first written: corners measured 1.81x bridges in mEC, 1.71x in LEC, 1.85x in PFC
+    check('K1 travel turning larger at corners than on bridges (> 10 cm/s); despiked and capped < 0.5 %',
+          med['corner'] >= 1.5 * med['bridge'] and sp_ < 0.005 and cp_ < 0.005,
+          f"median |turn| corner {med['corner']:.0f}, cardinal {med['cardinal']:.0f}, bridge {med['bridge']:.0f} deg/s "
+          f"(corner / bridge {med['corner'] / med['bridge']:.2f}); "
+          f"despiked {sp_:.4f}, capped {cp_:.4f}; head medians {kq['median_turn_head']}")
+    check('K2 at-port state within 1 s of >= 90 % of goal arrivals', kq['reward_coverage'] >= 0.9,
+          f"{kq['reward_coverage']:.3f} of {kq['n_reward_bins']} reward bins; at-port fraction {kq['port_fraction']:.3f}")
+
+    # K3 turn matching off by default: collapsed edges reproduce the 1-D path, and turn is ignored when off
+    base = np.nonzero(c['moving'] & c['intrial'] & (c['loc'] >= 1) & np.isfinite(c['turn_dps']))[0]
+    a3 = ms.speed_matched(base, c['type'], c['speed'], cfg, np.random.default_rng(3))
+    b3 = ms.speed_matched(base, c['type'], c['speed'], cfg, np.random.default_rng(3), turn=c['turn_dps'])
+    cfg3 = copy.deepcopy(cfg)
+    cfg3['speed_match']['turn_edges_dps'] = (0.0, np.inf)
+    c3 = ms.speed_matched(base, c['type'], c['speed'], cfg3, np.random.default_rng(3), turn=c['turn_dps'])
+    check('K3 turn matching off by default and collapsed edges equal speed-only matching',
+          np.array_equal(a3, b3) and np.array_equal(a3, c3), f'{len(a3)} samples')
+
+    # K4 / K5 kinematic null: kinematic cells inside it, node / bridge cells beyond it
+    cfgk = copy.deepcopy(cfg)
+    # 10 decode sims floor p at 1/11 = 0.091 (K5, run 3752832): 20 is the fewest that can reach 0.05
+    cfgk['null'].update(n_sim_rsa=20 if q else 100, n_sim_decode=20 if q else 40, n_sim_planes=0,
+                        kinds=dict(rsa=('speed', 'kinematic'), decode=('speed', 'kinematic'), planes=()))
+    turn_r = np.clip(np.nan_to_num(c['turn_dps']), 0, 360)
+    spd_r = np.nan_to_num(c['speed'])
+
+    def kin_pop(m):
+        out = []
+        for i in range(m):
+            kind = i % 3
+            if kind == 0:
+                out.append(1.0 + rng.uniform(0.03, 0.06) * turn_r)
+            elif kind == 1:
+                out.append(2.0 + rng.uniform(10, 20) * c['port'])
+            else:
+                out.append(1.0 + rng.uniform(8, 15) * np.exp(-spd_r / 5.0))
+        return np.array(out)
+
+    def null_frac(res, kind, stat):
+        real_ = ms.population_row(res['real']['decided']).get(stat, np.nan)
+        vals = np.array([ms.population_row({w: x}).get(stat, np.nan) for w in ('rsa', 'decode')
+                         for x in res['nulls'][kind][w]], float)
+        vals = vals[np.isfinite(vals)]
+        return real_, ((1 + (vals >= real_).sum()) / (1 + len(vals)) if len(vals) else np.nan), vals
+    res4 = run(kin_pop(n), cfg_=cfgk)
+    for stat in ('dec_node_bridge_ba', 'rsa21_ED_X'):
+        r_, pk, _ = null_frac(res4, 'kinematic', stat)
+        _, ps, _ = null_frac(res4, 'speed', stat)
+        check(f'K4 turn / port / slow cells: {stat} inside the kinematic null', pk > 0.05,
+              f'real {r_:.3f}, p vs kinematic {pk:.3f}; vs speed null {ps:.3f} (reported)')
+    tpl_node = np.r_[np.ones(9), np.zeros(12)]
+    node_rates = np.vstack([0.5 + rng.uniform(5, 15) * (tpl_node if i % 2 == 0 else 1 - tpl_node) for i in range(20)]
+                           + [place_pop(20, 8.0)])
+    res5 = run(loc_rates_planted(c['loc'], node_rates), cfg_=cfgk)
+    for stat in ('dec_node_bridge_ba', 'rsa21_ED_X'):
+        r_, pk, vals = null_frac(res5, 'kinematic', stat)
+        check(f'K5 node / bridge cells: {stat} beyond the kinematic null p95', pk <= 0.05,
+              f"real {r_:.3f}, kinematic null p95 {np.nanpercentile(vals, 95) if len(vals) else np.nan:.3f}, p {pk:.3f}")
+
+    # K6 turn matching removes turn-driven corner / cardinal decoding where turning separates the types
+    from sklearn.metrics import roc_auc_score
+    nodes_ = np.isin(c['loc'], [1, 2, 3, 4, 6, 7, 8, 9]) & c['moving'] & c['intrial'] & np.isfinite(c['turn_dps'])
+    auc_t = roc_auc_score(np.isin(c['loc'][nodes_], [1, 3, 7, 9]).astype(int), c['turn_dps'][nodes_])
+    testable = abs(auc_t - 0.5) >= 0.08
+    cfg6 = copy.deepcopy(cfg)
+    cfg6['null'].update(n_sim_rsa=0, n_sim_decode=0, n_sim_planes=0)
+    turn_cells = np.array([1.0 + rng.uniform(0.04, 0.08) * turn_r for _ in range(n)])
+    spk6 = rng.poisson(turn_cells * sc.BIN_S).astype(np.float32)
+    units6 = pd.DataFrame(dict(unit=np.arange(n), region='SYN'))
+    ba6 = {}
+    for edges in (None, (0.0, 22.5, 45.0, 90.0, 180.0, 360.0)):
+        cfg6['speed_match']['turn_edges_dps'] = edges
+        dec = ms.run_maze_recday(views_for(spk6), rd, units6, cfg6)['real']['decided']['decode']
+        ba6[edges is not None] = (dec['corner_cardinal_ba'], np.nanpercentile(dec['corner_cardinal_null'], 95)
+                                  if len(dec['corner_cardinal_null']) else np.nan)
+    check('K6 turn matching lowers turn cells\' corner/cardinal BA by >= 0.05 (where turn-only |AUC - 0.5| >= 0.08)',
+          (not testable) or (ba6[False][0] - ba6[True][0] >= 0.05 and ba6[True][0] <= max(ba6[True][1], 0.5)),
+          f'speed-matched BA {ba6[False][0]:.2f}, speed x turn matched {ba6[True][0]:.2f} (null p95 {ba6[True][1]:.2f}); '
+          f'turn-only AUC {auc_t:.3f}' + ('' if testable else '; untestable on this track'))
+
+    # K7 guards
+    def raises(fn):
+        try:
+            fn()
+            return False
+        except ValueError:
+            return True
+    g_port = copy.deepcopy(cfg)
+    g_port['kinematics']['port_speed_cms'] = cfg['min_speed'] + 1
+    g_edges = copy.deepcopy(cfg)
+    g_edges['speed_match']['turn_edges_dps'] = (0.0, 45.0, 45.0)
+    g_null = copy.deepcopy(cfg)
+    g_null['null'].update(n_sim_decode=g_null['null']['n_sim_rsa'] + 1)
+    g_head = copy.deepcopy(cfg)
+    g_head['kinematics']['turn_source'] = 'head'
+    head_raises = raises(lambda: ms.assemble(views, g_head))
+    check('K7 guards raise', raises(lambda: ms.port_state(c['loc'], c['speed'], g_port))
+          and raises(lambda: ms.speed_matched(base, c['type'], c['speed'], g_edges, np.random.default_rng(0), turn=c['turn_dps']))
+          and raises(lambda: ms._check_null_settings(g_null['null']))
+          and (head_raises == (args.dataset == 'pfc')),
+          f"port speed, equal edges, decode sims > rsa sims; head source raises {head_raises} on {args.dataset}")
 
     failed = [x for x in CHECKS if not x[1]]
     print(f'\n{len(CHECKS) - len(failed)}/{len(CHECKS)} passed in {time.time() - t0:.0f} s', flush=True)

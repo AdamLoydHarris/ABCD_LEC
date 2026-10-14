@@ -54,6 +54,47 @@ def movement_direction(xy: np.ndarray, half: int = 5) -> np.ndarray:
     return out
 
 
+def angular_speed_dps(theta: np.ndarray, sigma_bins: float = 2.0, max_gap_bins: int = 4,
+                      max_dps: float = 2000.0) -> tuple:
+    """(T,) |angular speed| in deg/s of an angle series (radians, 25 ms grid) and a QC dict.
+
+    Single-bin spikes (> 90 deg from both neighbours that agree within 45 deg) are dropped; the angle is
+    unwrapped within tracked segments (gaps longer than max_gap_bins split them, shorter gaps are
+    interpolated), Gaussian-smoothed and differentiated; values above max_dps become NaN. Only |w| is
+    returned: the maze frames are mirrored relative to the arena and PFC's handedness is unknown.
+    """
+    from scipy.ndimage import gaussian_filter1d
+    th = np.asarray(theta, float).copy()
+    T = len(th)
+    n_spike = 0
+    if T >= 3:
+        def ad(a, b):
+            return np.abs(np.angle(np.exp(1j * (a - b))))
+        prev, mid, nxt = th[:-2], th[1:-1], th[2:]
+        with np.errstate(invalid='ignore'):
+            spike = (np.isfinite(prev) & np.isfinite(mid) & np.isfinite(nxt) & (ad(prev, nxt) < np.radians(45))
+                     & (ad(mid, prev) > np.radians(90)) & (ad(mid, nxt) > np.radians(90)))
+        idx = np.nonzero(spike)[0] + 1
+        th[idx] = np.nan
+        n_spike = len(idx)
+    out = np.full(T, np.nan)
+    f_idx = np.nonzero(np.isfinite(th))[0]
+    if len(f_idx) >= 3:
+        cuts = np.nonzero(np.diff(f_idx) > max_gap_bins + 1)[0]
+        for seg in np.split(f_idx, cuts + 1):
+            if len(seg) < 3:
+                continue
+            i0, i1 = seg[0], seg[-1]
+            x = np.arange(i0, i1 + 1)
+            full = np.interp(x, seg, np.unwrap(th[seg]))
+            w = np.degrees(np.abs(np.gradient(gaussian_filter1d(full, sigma_bins, mode='nearest')))) / BIN_S
+            w[~np.isfinite(th[i0:i1 + 1])] = np.nan
+            out[i0:i1 + 1] = w
+    n_cap = int(np.nansum(out > max_dps))
+    out[out > max_dps] = np.nan
+    return out, dict(n_spike=n_spike, n_cap=n_cap, n_finite=int(np.isfinite(out).sum()), T=T)
+
+
 def hd_guard(xy: np.ndarray, hd_rad: np.ndarray, speed: np.ndarray, min_speed: float = 5.0,
              max_offset_deg: float = 15.0, min_r: float = 0.8) -> dict:
     """HD must track movement direction while running; returns offset (deg), R, n and ok."""
@@ -258,8 +299,50 @@ def stamp(engine: str, cfg: dict, code_files: list, dataset: str, data_version: 
     """Provenance stamp written into every shard; the merge refuses shards whose stamps differ."""
     return dict(engine=engine, dataset=dataset, data_version=data_version, cfg=cfg,
                 cfg_hash=config_hash(cfg), code_hash=file_hash(code_files),
-                git_sha=git_sha(HERE), host=socket.gethostname(),
+                git_sha=git_sha(HERE), host=socket.gethostname(), slurm_job_id=os.environ.get('SLURM_JOB_ID', ''),
                 time=time.strftime('%Y-%m-%dT%H:%M:%S'))
+
+
+def compare_tree(a, b, path: str = '', out: dict | None = None) -> dict:
+    """Every number of the old object `a` against the new `b`: dicts by key, lists by index (b may be longer),
+    arrays elementwise, DataFrames by column. -> max_diff, worst path, nan_mismatch, missing paths, n values."""
+    import pandas as pd
+    if out is None:
+        out = dict(max_diff=0.0, worst='', nan_mismatch=0, missing=[], n=0)
+    if isinstance(a, dict):
+        for k, v in a.items():
+            if k not in b:
+                out['missing'].append(f'{path}/{k}')
+            else:
+                compare_tree(v, b[k], f'{path}/{k}', out)
+    elif isinstance(a, (list, tuple)):
+        if len(b) < len(a):
+            out['missing'].append(f'{path} length {len(a)} > {len(b)}')
+        for i, v in enumerate(a[:len(b)]):
+            compare_tree(v, b[i], f'{path}[{i}]', out)
+    elif isinstance(a, pd.DataFrame):
+        for col in a.columns:
+            if col not in b:
+                out['missing'].append(f'{path}.{col}')
+            else:
+                compare_tree(a[col].to_numpy(), b[col].to_numpy(), f'{path}.{col}', out)
+    else:
+        x, y = np.asarray(a), np.asarray(b)
+        if x.dtype.kind in 'fiub' and y.dtype.kind in 'fiub':
+            if x.shape != y.shape:
+                out['missing'].append(f'{path} shape {x.shape} vs {y.shape}')
+                return out
+            xf, yf = x.astype(float), y.astype(float)
+            out['nan_mismatch'] += int((np.isnan(xf) != np.isnan(yf)).sum())
+            ok = ~np.isnan(xf) & ~np.isnan(yf)
+            if ok.any():
+                d = float(np.abs(xf[ok] - yf[ok]).max())
+                if d > out['max_diff']:
+                    out['max_diff'], out['worst'] = d, path
+            out['n'] += x.size
+        elif x.shape != y.shape or not np.array_equal(x.astype(str), y.astype(str)):
+            out['missing'].append(f'{path} (non-numeric differs)')
+    return out
 
 
 def run_tag(cfg: dict, code_files: list) -> str:

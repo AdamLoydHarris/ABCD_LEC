@@ -76,6 +76,7 @@ BYTE_PAIRS = [
     ('code/maze_spatial.py', 'mFC_data/code/maze_spatial.py'),
     ('code/maze_spatial_synthetics.py', 'mFC_data/code/maze_spatial_synthetics.py'),
     ('code/spatial_plots.py', 'mFC_data/code/spatial_plots.py'),
+    ('code/spatial_of_arenas.json', 'mFC_data/code/spatial_of_arenas.json'),
 ]
 
 DEF_PAIRS = [

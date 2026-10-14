@@ -1,0 +1,104 @@
+{
+  "arena_map": {
+    "bigfield": "bigfield",
+    "openfield_box1": "box50",
+    "openfield_box2": "box50"
+  },
+  "arenas": {
+    "bigfield": {
+      "side_cm": 120.0,
+      "border": {
+        "min_area_cm2": 200.0,
+        "max_wall_rms_cm": 1.5
+      },
+      "grid": {
+        "classify": true
+      },
+      "speed": {
+        "hi": 50.0
+      },
+      "pds": {
+        "speed_edges": [
+          2.5,
+          5.0,
+          7.5,
+          10.0,
+          15.0,
+          20.0,
+          30.0,
+          40.0,
+          1000000000.0
+        ],
+        "top_cm_s": 50.0,
+        "min_dwell_s": 0.0
+      },
+      "obj": {
+        "margin_cm": 4.0,
+        "band_cm": 20.0,
+        "virtual_null": true,
+        "radius_norm": "annulus",
+        "radius_ref_cm": [
+          15.0,
+          35.0
+        ],
+        "radius_search_cm": 40.0,
+        "radius_exclude_cm": 0.0
+      },
+      "move": {
+        "enabled": false
+      },
+      "hd": {
+        "guard_r": 0.8,
+        "pxd_pos_cm": 7.5
+      },
+      "sigma_bins": 2.0
+    },
+    "box50": {
+      "side_cm": 50.0,
+      "border": {
+        "min_area_cm2": 50.0,
+        "max_wall_rms_cm": 2.0
+      },
+      "grid": {
+        "classify": false
+      },
+      "speed": {
+        "hi": 25.0
+      },
+      "pds": {
+        "speed_edges": [
+          2.5,
+          5.0,
+          7.5,
+          10.0,
+          12.5,
+          15.0,
+          20.0,
+          1000000000.0
+        ],
+        "top_cm_s": 25.0,
+        "min_dwell_s": 20.0
+      },
+      "obj": {
+        "margin_cm": 2.5,
+        "band_cm": 7.0,
+        "virtual_null": false,
+        "radius_norm": "in_arena",
+        "radius_ref_cm": [
+          10.0,
+          20.0
+        ],
+        "radius_search_cm": 25.0,
+        "radius_exclude_cm": 10.0
+      },
+      "move": {
+        "enabled": true
+      },
+      "hd": {
+        "guard_r": 0.65,
+        "pxd_pos_cm": 5.0
+      },
+      "sigma_bins": 1.0
+    }
+  }
+}

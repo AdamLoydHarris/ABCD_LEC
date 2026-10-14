@@ -22,6 +22,7 @@ import copy
 import itertools
 import os
 import sys
+import time
 import warnings
 
 import numpy as np
@@ -50,7 +51,12 @@ DEFAULT_CFG = dict(
     lattice=dict(spacing_cm=19.0, origin_cm=5.0, margin_cm=8.0, max_resid_cm=4.0),
     maps=dict(bin_cm=1.0, sigmas=(1.5, 3.0), occ_threshold_s=0.1, min_loc_occ_s=1.0),
     stats=dict(n_shifts=500, min_shift_s=20.0, q_unit=99.0, q_stab=95.0, n_label_perm=1000),
-    speed_match=dict(bin_cms=2.5, max_cms=60.0),
+    # turn_edges_dps: off (None) by default; the turn-matched control run sets edges in deg/s
+    speed_match=dict(bin_cms=2.5, max_cms=60.0, turn_edges_dps=None),
+    # turning from the travel direction (identical in all three datasets; PFC has no HD); 'head' is the
+    # mEC/LEC sensitivity. At-port: on a node below port_speed for >= port_min_s (every node has a port)
+    kinematics=dict(turn_source='travel', turn_sigma_bins=2.0, turn_max_gap_bins=4, turn_max_dps=2000.0,
+                    port_speed_cms=2.5, port_min_s=0.3, port_merge_s=0.25),
     rsa=dict(n_perm=1000, max_splits=20, min_samples=10, min_units=3),
     decode=dict(bin_bins=20, C=1.0, min_frac_same_loc=0.8, n_perm=35, match_speed=True),
     # thesis recipe as pfc_rsa / pfc_decoding computed it; px/bin speed cuts converted at ~20 px/cm
@@ -58,13 +64,32 @@ DEFAULT_CFG = dict(
     planes=dict(bin_bins=10, n_lags=20, alpha=0.005, n_reps=5, ks=(2, 3), max_task_splits=4),
     # place_shuffled (user's choice 2026-10-12): the bar for generalisation claims. The fitted null kept
     # 3 of a planted corner cell's 4 corners and absorbed it (gate M3, LEC: degree 0.81 vs p95 0.88)
-    null=dict(n_sim_rsa=200, n_sim_decode=20, n_sim_planes=10, max_fields=3,
-              kinds=dict(rsa=('place', 'place_random', 'place_shuffled', 'speed', 'boundary'),
-                         decode=('place', 'place_random', 'place_shuffled', 'speed', 'boundary'),
-                         planes=('place', 'place_random', 'place_shuffled'))),
+    # decode / planes 100 (were 20 / 10): with 10 sims the planes null mean of PFC ah04 07-12 moved
+    # 45.7 -> 27.2 deg between equivalent runs (1617859bc6fd vs 21c552de331e)
+    null=dict(n_sim_rsa=200, n_sim_decode=100, n_sim_planes=100, max_fields=3,
+              kinds=dict(rsa=('place', 'place_random', 'place_shuffled', 'speed', 'boundary', 'kinematic'),
+                         decode=('place', 'place_random', 'place_shuffled', 'speed', 'boundary', 'kinematic'),
+                         planes=('place', 'place_random', 'place_shuffled')),
+              # node/bridge control (2026-10-12): each unit's mean count over speed x |turn| x at-port cells,
+              # backed off to (speed, port), speed, then the mean where a cell has < min_occ_s of dwell
+              kinematic=dict(speed_bin_cms=5.0, n_speed_bins=12, turn_edges_dps=(0.0, 22.5, 45.0, 90.0, 180.0, 360.0),
+                             min_occ_s=5.0)),
 )
 #: null kinds of run 21c552de331e, seeded first and in this order so their numbers do not change
 V1_NULL_KINDS = ('boundary', 'place', 'place_random', 'speed')
+#: kinds of run 1617859bc6fd in seeding order; kinds added later are seeded after these
+SEED_ORDER = V1_NULL_KINDS + ('place_shuffled',)
+
+
+def _check_null_settings(nl: dict) -> None:
+    """Refuse null settings that would change how many seeds a kind draws, which re-seeds every later kind:
+    seeds are drawn per kind for i < n_sim_rsa, so decode / planes may not exceed it or use other kinds."""
+    for w in ('decode', 'planes'):
+        if nl[f'n_sim_{w}'] > nl['n_sim_rsa']:
+            raise ValueError(f"n_sim_{w} {nl[f'n_sim_{w}']} > n_sim_rsa {nl['n_sim_rsa']}")
+        extra = set(nl['kinds'][w]) - set(nl['kinds']['rsa'])
+        if extra:
+            raise ValueError(f'{w} null kinds {sorted(extra)} are not RSA kinds')
 
 
 # ---------------------------------------------------------------------------
@@ -193,9 +218,22 @@ def assemble(views: dict, cfg: dict) -> dict:
         for r in range(len(tt)):
             trial[int(tt[r, 0]):min(int(tt[r, -1]), T)] = r
         xy = np.asarray(v['xy'][:T], float)
+        speed = sc.speed_cm_s(xy)
+        loc = np.asarray(v['locs'][:T], int)
+        kin = cfg['kinematics']
+        travel = np.where(speed > cfg['min_speed'], sc.movement_direction(xy), np.nan)
+        turn, tqc = sc.angular_speed_dps(travel, kin['turn_sigma_bins'], kin['turn_max_gap_bins'], kin['turn_max_dps'])
+        turn_head, hqc = np.full(T, np.nan), None
+        hd = v.get('hd')
+        if hd is not None:
+            hd = np.asarray(hd[:T], float)
+            if sc.hd_guard(xy, hd, speed)['ok']:
+                turn_head, hqc = sc.angular_speed_dps(hd, kin['turn_sigma_bins'], kin['turn_max_gap_bins'], kin['turn_max_dps'])
         parts.append(dict(session=s, T=T, counts=np.asarray(v['counts'][:, :T], np.float32), xy=xy,
-                          loc=np.asarray(v['locs'][:T], int), speed=sc.speed_cm_s(xy), gp=g_, state=st_,
-                          trial=trial, intrial=intrial & (g_ >= 0), task=v.get('task') or (s,)))
+                          loc=loc, speed=speed, gp=g_, state=st_,
+                          trial=trial, intrial=intrial & (g_ >= 0), task=v.get('task') or (s,),
+                          turn=turn, turn_head=turn_head, port=port_state(loc, speed, cfg), tt=tt,
+                          turn_qc=tqc, turn_head_qc=hqc))
     xy_all = np.vstack([p['xy'] for p in parts])
     loc_all = np.concatenate([p['loc'] for p in parts])
     lat = fit_lattice(xy_all, loc_all, cfg)
@@ -212,18 +250,57 @@ def assemble(views: dict, cfg: dict) -> dict:
                trial=np.concatenate([p['trial'] + 1000 * i for i, p in enumerate(parts)]),
                intrial=np.concatenate([p['intrial'] for p in parts]),
                sess=np.concatenate([np.full(p['T'], i) for i, p in enumerate(parts)]),
-               task=np.concatenate([np.full(p['T'], p['task_id']) for p in parts]))
+               task=np.concatenate([np.full(p['T'], p['task_id']) for p in parts]),
+               turn_travel=np.concatenate([p['turn'] for p in parts]),
+               turn_head=np.concatenate([p['turn_head'] for p in parts]),
+               port=np.concatenate([p['port'] for p in parts]))
+    if cfg['kinematics']['turn_source'] == 'head':
+        if not np.isfinite(cat['turn_head']).any():
+            raise ValueError("turn_source 'head' needs head direction passing the HD guard (PFC has none)")
+        cat['turn_dps'] = cat['turn_head']
+    else:
+        cat['turn_dps'] = cat['turn_travel']
     cat['type'] = loc_type(cat['loc'])
     cat['moving'] = np.isfinite(cat['speed']) & (cat['speed'] > cfg['min_speed'])
     return dict(parts=parts, cat=cat, lattice=lat, n_tasks=len(tasks), sessions=keep,
                 N=cat['counts'].shape[0])
 
 
-def speed_matched(idx: np.ndarray, group: np.ndarray, speed: np.ndarray, cfg: dict, rng) -> np.ndarray:
+def port_state(loc: np.ndarray, speed: np.ndarray, cfg: dict) -> np.ndarray:
+    """(T,) at a port: on a node (Locs 1-9) below port_speed for >= port_min_s, same-node stops merged
+    across gaps <= port_merge_s. Derivable identically in mEC, LEC and PFC; every node has a port."""
+    k = cfg['kinematics']
+    if k['port_speed_cms'] > cfg['min_speed']:
+        raise ValueError('port_speed_cms must not exceed min_speed, so port bins never enter the moving samples')
+    slow = (loc >= 1) & (loc <= 9) & np.isfinite(speed) & (speed < k['port_speed_cms'])
+    out = np.zeros(len(loc), bool)
+    if not slow.any():
+        return out
+    idx = np.nonzero(slow)[0]
+    merge = int(round(k['port_merge_s'] / sc.BIN_S))
+    cuts = np.nonzero((np.diff(idx) > merge + 1) | (np.diff(loc[idx]) != 0))[0]
+    min_len = int(round(k['port_min_s'] / sc.BIN_S))
+    for run in np.split(idx, cuts + 1):
+        if run[-1] - run[0] + 1 >= min_len:
+            out[run[0]:run[-1] + 1] = True
+    return out
+
+
+def speed_matched(idx: np.ndarray, group: np.ndarray, speed: np.ndarray, cfg: dict, rng, turn=None) -> np.ndarray:
     """Subsample `idx` so every group (location type) has the same speed histogram (2.5 cm/s bins):
-    in mEC corners are run 2-3 cm/s slower than cardinals, so speed cells would carry 'corner-ness'."""
+    in mEC corners are run 2-3 cm/s slower than cardinals, so speed cells would carry 'corner-ness'.
+    With speed_match.turn_edges_dps set and `turn` given, the histogram is speed x |turn| and samples
+    without a turn rate are dropped; with it unset, `turn` is ignored and the result is unchanged."""
     sm = cfg['speed_match']
     b = np.floor(np.clip(speed[idx], 0, sm['max_cms'] - 1e-6) / sm['bin_cms']).astype(int)
+    edges = sm.get('turn_edges_dps')
+    if edges is not None and turn is not None:
+        e = np.asarray(edges, float)
+        if len(e) < 2 or np.any(np.diff(e) <= 0):
+            raise ValueError(f'turn edges must increase: {edges}')
+        t = turn[idx]
+        ok = np.isfinite(t)
+        idx, b = idx[ok], b[ok] * len(e) + np.searchsorted(e[1:], t[ok], side='right')
     g = group[idx]
     groups = np.unique(g)
     keep = []
@@ -584,7 +661,7 @@ def decode_samples(counts: np.ndarray, c: dict, cfg: dict) -> dict:
     w = cfg['decode']['bin_bins']
     T = counts.shape[1]
     starts = np.arange(0, T - w + 1, w)
-    X, loc, task, spd = [], [], [], []
+    X, loc, task, spd, trn = [], [], [], [], []
     for s0 in starts:
         sl = slice(s0, s0 + w)
         if c['sess'][s0] != c['sess'][s0 + w - 1] or not c['intrial'][sl].all():
@@ -600,7 +677,9 @@ def decode_samples(counts: np.ndarray, c: dict, cfg: dict) -> dict:
         loc.append(vals[np.argmax(cnt)])
         task.append(c['task'][s0])
         spd.append(v)
-    return dict(X=np.array(X, float), loc=np.array(loc), task=np.array(task), speed=np.array(spd))
+        tw = c['turn_dps'][sl] if 'turn_dps' in c else np.full(w, np.nan)
+        trn.append(float(np.nanmean(tw)) if np.isfinite(tw).sum() >= w // 2 else np.nan)
+    return dict(X=np.array(X, float), loc=np.array(loc), task=np.array(task), speed=np.array(spd), turn=np.array(trn))
 
 
 def _svm(Xtr, ytr, Xte, C):
@@ -637,7 +716,7 @@ def decoders(ds: dict, cfg: dict, rng, matched: bool, n_perm: int) -> dict:
     per = np.isin(loc, CORNER + CARDINAL)
     idx = np.nonzero(per)[0]
     if matched:
-        idx = speed_matched(idx, typ, spd, cfg, rng)
+        idx = speed_matched(idx, typ, spd, cfg, rng, turn=ds.get('turn'))
 
     def cc(label_of_node):
         y = np.array([label_of_node[l] for l in loc[idx]])
@@ -659,7 +738,7 @@ def decoders(ds: dict, cfg: dict, rng, matched: bool, n_perm: int) -> dict:
     # node vs bridge: leave one location out
     idx = np.nonzero(loc >= 1)[0]
     if matched:
-        idx = speed_matched(idx, (loc >= 10).astype(int), spd, cfg, rng)
+        idx = speed_matched(idx, (loc >= 10).astype(int), spd, cfg, rng, turn=ds.get('turn'))
 
     def nb(is_bridge):
         y = is_bridge[loc[idx] - 1]
@@ -681,7 +760,7 @@ def decoders(ds: dict, cfg: dict, rng, matched: bool, n_perm: int) -> dict:
     # 9-way location, leave one task out
     idx = np.nonzero((loc >= 1) & (loc <= 9))[0]
     if matched:
-        idx = speed_matched(idx, typ, spd, cfg, rng)
+        idx = speed_matched(idx, typ, spd, cfg, rng, turn=ds.get('turn'))
     y = loc[idx]
     pred = np.zeros(len(idx), int)
     tasks = np.unique(task[idx])
@@ -966,6 +1045,48 @@ def fit_place_models(asm: dict, maps2d: dict, cfg: dict) -> list:
     return models
 
 
+def fit_kinematic(asm: dict, cfg: dict) -> dict:
+    """Each unit's mean count per speed x |turn| x at-port cell over all bins (no random draws); cells
+    with < min_occ_s of dwell back off to (speed, port), then speed, then the unit's mean.
+    -> dict(rate (N, n_cells) counts per bin, cell (T,), source level per cell, occupancy s per cell)."""
+    c = asm['cat']
+    k = cfg['null']['kinematic']
+    T = c['counts'].shape[1]
+    sb = np.minimum((np.nan_to_num(c['speed']) / k['speed_bin_cms']).astype(int), k['n_speed_bins'] - 1)
+    e = np.asarray(k['turn_edges_dps'], float)
+    t = c['turn_dps']
+    tb = np.where(np.isfinite(t), np.searchsorted(e[1:], np.nan_to_num(t), side='right'), len(e))   # last = undefined
+    nt = len(e) + 1
+    pb = c['port'].astype(int)
+    cell = (sb * nt + tb) * 2 + pb
+    n_cells = k['n_speed_bins'] * nt * 2
+    min_bins = k['min_occ_s'] / sc.BIN_S
+
+    def means(code, n):
+        M = sc.onehot(code, np.ones(T, bool), n)
+        occ = np.asarray(M.sum(axis=0)).ravel()
+        tot = np.asarray((M.T @ c['counts'].T).T)
+        with np.errstate(invalid='ignore', divide='ignore'):
+            return tot / occ[None], occ
+    full, occ_full = means(cell, n_cells)
+    sp, occ_sp = means(sb * 2 + pb, k['n_speed_bins'] * 2)
+    s_only, occ_s = means(sb, k['n_speed_bins'])
+    glob = c['counts'].mean(1, keepdims=True)
+    rate = np.empty_like(full)
+    level = np.zeros(n_cells, int)
+    for j in range(n_cells):
+        s_, p_ = j // (2 * nt), j % 2
+        if occ_full[j] >= min_bins:
+            rate[:, j] = full[:, j]
+        elif occ_sp[s_ * 2 + p_] >= min_bins:
+            rate[:, j], level[j] = sp[:, s_ * 2 + p_], 1
+        elif occ_s[s_] >= min_bins:
+            rate[:, j], level[j] = s_only[:, s_], 2
+        else:
+            rate[:, j], level[j] = glob[:, 0], 3
+    return dict(rate=rate, cell=cell, level=level, occ_s=occ_full * sc.BIN_S)
+
+
 def simulate(asm: dict, kind: str, models: list, rng) -> np.ndarray:
     """(N, T) Poisson counts on the recday's real trajectory under one null family.
 
@@ -997,6 +1118,10 @@ def simulate(asm: dict, kind: str, models: list, rng) -> np.ndarray:
         for u in range(N):
             f = np.array([c['counts'][u, bins == b].mean() if (bins == b).any() else 0 for b in range(12)])
             out[u] = rng.poisson(f[bins])
+    elif kind == 'kinematic':
+        kin = asm['kinematic']
+        for u in range(N):
+            out[u] = rng.poisson(kin['rate'][u, kin['cell']])
     elif kind == 'boundary':
         d = boundary_distance(asm, xy)
         bins = np.minimum((d / 1.5).astype(int), 7)
@@ -1037,8 +1162,8 @@ def population(counts: np.ndarray, asm: dict, cfg: dict, rng, recipe: str, which
     base = np.nonzero(c['moving'] & c['intrial'] & (c['loc'] >= 1))[0]
     if 'rsa' in which:
         if recipe == 'decided':
-            idx9 = speed_matched(base[c['loc'][base] <= 9], c['type'], c['speed'], cfg, rng)
-            idx21 = speed_matched(base, c['type'], c['speed'], cfg, rng)
+            idx9 = speed_matched(base[c['loc'][base] <= 9], c['type'], c['speed'], cfg, rng, turn=c.get('turn_dps'))
+            idx21 = speed_matched(base, c['type'], c['speed'], cfg, rng, turn=c.get('turn_dps'))
             per_gp = rsa_decided(counts, c, {9: idx9, 21: idx21}, cfg, rng)
             out['rsa'] = rsa_summary(per_gp, None, M, cfg, rng)
         else:
@@ -1056,10 +1181,20 @@ def population(counts: np.ndarray, asm: dict, cfg: dict, rng, recipe: str, which
 
 
 def _null_sim(asm: dict, cfg: dict, models: list, kind: str, which: tuple, seed: int) -> dict:
-    """One simulated population under a null family, through the same population pipeline."""
+    """One simulated population under a null family, through the same population pipeline, plus seconds
+    per step in '_secs'. The analyses run one call each in population's own order (rsa, decode, planes)
+    on one generator, so the random stream is the same as one call with all of them."""
     rng = np.random.default_rng(seed)
+    t0 = time.time()
     sim = simulate(asm, kind, models, rng)
-    return population(sim, asm, cfg, rng, 'decided', which=which, n_perm_decode=0)
+    out, secs = {}, {'simulate': time.time() - t0}
+    for w in ('rsa', 'decode', 'planes'):
+        if w in which:
+            t1 = time.time()
+            out.update(population(sim, asm, cfg, rng, 'decided', which=(w,), n_perm_decode=0))
+            secs[w] = time.time() - t1
+    out['_secs'] = secs
+    return out
 
 
 def run_maze_recday(views: dict, recday: str, units, cfg: dict) -> dict:
@@ -1072,9 +1207,12 @@ def run_maze_recday(views: dict, recday: str, units, cfg: dict) -> dict:
     real = {r: population(asm['cat']['counts'], asm, cfg, rng, r) for r in ('decided', 'thesis')}
     models = fit_place_models(asm, m2, cfg)
     nl = cfg['null']
+    if 'kinematic' in set().union(*nl['kinds'].values()):
+        asm['kinematic'] = fit_kinematic(asm, cfg)
+    _check_null_settings(nl)
     jobs = []
     allk = set().union(*nl['kinds'].values())
-    kinds = [k for k in V1_NULL_KINDS if k in allk] + sorted(allk - set(V1_NULL_KINDS))
+    kinds = [k for k in SEED_ORDER if k in allk] + sorted(allk - set(SEED_ORDER))
     for kind in kinds:
         for i in range(max(nl['n_sim_rsa'], nl['n_sim_decode'], nl['n_sim_planes'])):
             which = tuple(w for w, n in (('rsa', nl['n_sim_rsa']), ('decode', nl['n_sim_decode']),
@@ -1088,13 +1226,18 @@ def run_maze_recday(views: dict, recday: str, units, cfg: dict) -> dict:
     else:
         results = [_null_sim(asm, cfg, models, kind, which, seed) for kind, which, seed in jobs]
     nulls = {kind: dict(rsa=[], decode=[], planes=[]) for kind in kinds}
+    timing = {kind: {} for kind in kinds}
     for (kind, which, _), res in zip(jobs, results):
+        for step, sec in res.pop('_secs').items():
+            n, tot = timing[kind].get(step, (0, 0.0))
+            timing[kind][step] = (n + 1, tot + sec)
         for w in which:
             nulls[kind][w].append(res[w])
     lat = asm['lattice']
     return dict(recday=recday, engine=ENGINE, engine_version=ENGINE_VERSION, units=units,
                 sessions=asm['sessions'], n_tasks=asm['n_tasks'], lattice=dict(A=lat['A'], resid_max_cm=lat['resid_max_cm']),
-                single=su, maps2d=m2, real=real, place_models=models, nulls=nulls)
+                single=su, maps2d=m2, real=real, place_models=models, nulls=nulls, null_timing=timing,
+                kinematics=kinematics_qc(asm, cfg))
 
 
 # ---------------------------------------------------------------------------
@@ -1140,10 +1283,38 @@ def population_row(pop: dict) -> dict:
     return row
 
 
+def kinematics_qc(asm: dict, cfg: dict) -> dict:
+    """Turning and at-port QC per recday: despike / cap counts, |turn| medians by location type above
+    10 cm/s, and the share of reward bins (goal arrivals) with an at-port episode within 1 s."""
+    c = asm['cat']
+    out = dict(turn=[p['turn_qc'] for p in asm['parts']], turn_head=[p['turn_head_qc'] for p in asm['parts']])
+    fast = np.nan_to_num(c['speed']) > 10
+    for name, key in (('travel', 'turn_travel'), ('head', 'turn_head')):
+        t = c[key]
+        out[f'median_turn_{name}'] = {typ: float(np.nanmedian(t[fast & (c['type'] == i)])) if np.isfinite(t[fast & (c['type'] == i)]).any() else np.nan
+                                      for i, typ in enumerate(('corner', 'cardinal', 'centre', 'bridge'))}
+    hit, n = 0, 0
+    off = 0
+    for p in asm['parts']:
+        rew = np.unique(p['tt'][:, :-1].ravel())
+        rew = rew[(rew >= 0) & (rew < p['T'])]
+        port = p['port']
+        for r in rew:
+            n += 1
+            hit += bool(port[r:min(r + 40, p['T'])].any())
+        off += p['T']
+    out['reward_coverage'] = hit / n if n else np.nan
+    out['n_reward_bins'] = n
+    out['port_fraction'] = float(c['port'].mean())
+    out['kinematic_backoff'] = (np.bincount(asm['kinematic']['level'], minlength=4).tolist() if 'kinematic' in asm else None)
+    return out
+
+
 def merge_tables(shards: dict) -> dict:
-    """{'units', 'population', 'nulls'} DataFrames from a run's maze shards."""
+    """{'units', 'population', 'nulls', 'null_sims'} DataFrames from a run's maze shards; null_sims is long
+    (recday, mouse, null, analysis, sim, stat, value), the input of the mouse-level tests."""
     import pandas as pd
-    urows, prows, nrows = [], [], []
+    urows, prows, nrows, srows = [], [], [], []
     for rd, sh in sorted(shards.items()):
         mouse = rd.split('_')[0]
         su = sh['single']
@@ -1166,6 +1337,9 @@ def merge_tables(shards: dict) -> dict:
                               lattice_resid_cm=sh['lattice']['resid_max_cm'], **population_row(pop)))
         real = population_row(sh['real']['decided'])
         for kind, sims in sh['nulls'].items():
+            for w, lst in sims.items():
+                for i, x in enumerate(lst):
+                    srows.extend((rd, mouse, kind, w, i, k, v) for k, v in population_row({w: x}).items())
             rows = [population_row({w: x}) for w, lst in sims.items() for x in lst]
             keys = sorted({k for r_ in rows for k in r_})
             for k in keys:
@@ -1176,4 +1350,60 @@ def merge_tables(shards: dict) -> dict:
                                   null_mean=float(np.nanmean(vals)), null_p95=float(np.nanpercentile(vals, 95)),
                                   null_p05=float(np.nanpercentile(vals, 5)),
                                   frac_null_ge_real=float(np.nanmean(vals >= real[k]))))
-    return dict(units=pd.DataFrame(urows), population=pd.DataFrame(prows), nulls=pd.DataFrame(nrows))
+    null_sims = pd.DataFrame(srows, columns=['recday', 'mouse', 'null', 'analysis', 'sim', 'stat', 'value'])
+    return dict(units=pd.DataFrame(urows), population=pd.DataFrame(prows), nulls=pd.DataFrame(nrows),
+                null_sims=null_sims)
+
+
+# ---------------------------------------------------------------------------
+# mouse-level statistics: mice are the replicates
+# ---------------------------------------------------------------------------
+
+def mouse_null_tests(population, null_sims, stat: str, null: str, direction: int = 1, chance=None,
+                     exclude_mice=(), alpha: float = 0.05):
+    """Per mouse: the decided-recipe statistic averaged over the mouse's recdays, against simulation i
+    averaged over the same recdays (simulations are independent between recdays, so this is a draw from
+    the null of the mean). One-sided p = (1 + #null on the far side) / (1 + n). A hit needs p <= alpha and
+    the real mean on the generalisation side of chance (0 when chance is None).
+    Per-recday null fractions moved by up to 0.45 between equivalent runs at 10-20 sims (1617859bc6fd).
+    -> DataFrame: mouse, n_recdays, n_sims, real, null_mean, null_sd, p, side_ok, hit."""
+    import pandas as pd
+    real = population[population['recipe'] == 'decided'][['recday', 'mouse', stat]].dropna()
+    sims = null_sims[(null_sims['null'] == null) & (null_sims['stat'] == stat)]
+    by_rd = {rd: g.sort_values('sim')['value'].to_numpy(float) for rd, g in sims.groupby('recday')}
+    rows = []
+    for mouse, g in real.groupby('mouse'):
+        if mouse in exclude_mice:
+            continue
+        rds = [rd for rd in g['recday'] if rd in by_rd and np.isfinite(by_rd[rd]).any()]
+        vals = [by_rd[rd][np.isfinite(by_rd[rd])] for rd in rds]
+        n_eff = min((len(v) for v in vals), default=0)
+        row = dict(mouse=mouse, n_recdays=len(rds), n_sims=n_eff, real=np.nan, null_mean=np.nan, null_sd=np.nan,
+                   p=np.nan, side_ok=False, hit=False)
+        if n_eff:
+            x = float(g.set_index('recday').loc[rds, stat].mean())
+            y = np.mean([v[:n_eff] for v in vals], axis=0)
+            far = (y >= x) if direction > 0 else (y <= x)
+            ref = 0.0 if chance is None else chance
+            side = (x > ref) if direction > 0 else (x < ref)
+            p = (1 + int(far.sum())) / (1 + n_eff)
+            row.update(real=x, null_mean=float(y.mean()), null_sd=float(y.std()), p=p, side_ok=bool(side),
+                       hit=bool(side and p <= alpha))
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def group_tests(mice, alpha: float = 0.05) -> dict:
+    """Across mice: hits out of M with the binomial tail P(X >= hits | M, alpha); and, for M >= 5, an exact
+    sign-flip test of the mean z = (real - null mean) / null sd (with fewer mice its smallest p, 2^-M,
+    cannot pass)."""
+    from scipy.stats import binom
+    m = mice[np.isfinite(mice['p'])]
+    M, k = len(m), int(m['hit'].sum())
+    out = dict(n_mice=M, hits=k, p_binomial=float(binom.sf(k - 1, M, alpha)) if M else np.nan, p_signflip=np.nan)
+    if M >= 5:
+        z = ((m['real'] - m['null_mean']) / m['null_sd'].where(m['null_sd'] > 0)).to_numpy(float)
+        if np.isfinite(z).all():
+            signs = np.array(list(itertools.product((1, -1), repeat=M)))
+            out['p_signflip'] = float(np.mean((signs * z).mean(1) >= z.mean()))
+    return out

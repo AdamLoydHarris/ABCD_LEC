@@ -40,6 +40,8 @@ def main():
     print(f'per-cell timeout: {args.timeout} s', flush=True)
 
     nb = nbformat.read(nb_path, as_version=4)
+    # the kernel inherits the environment: spatial.sbatch's MPLBACKEND=Agg left executed copies without figures
+    os.environ.pop('MPLBACKEND', None)
     client = NotebookClient(nb, timeout=args.timeout, kernel_name=args.kernel,
                             resources={'metadata': {'path': workdir}},
                             allow_errors=False)

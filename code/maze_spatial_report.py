@@ -2,6 +2,7 @@
 decided recipe against its nulls for mEC, LEC and PFC. Reads merged tables and shards only.
 
     python code/maze_spatial_report.py --tag 1617859bc6fd --equivalent-to 21c552de331e
+    python code/maze_spatial_report.py --tag <B2-head tag> --datasets mec lec      # runs without PFC
 
 The field-shuffle null (`place_shuffled`) is the bar for generalisation claims (user's choice,
 2026-10-12); the fitted and random-centre nulls are reported beside it.
@@ -86,9 +87,14 @@ def thesis_planes(dataset: str, tag: str) -> pd.DataFrame:
 
 
 NULLS = ('place_shuffled', 'place', 'place_random')
+#: every null kind in report order; a run reports the kinds it has (turn-matched runs carry three)
+NULL_ORDER = ('place_shuffled', 'kinematic', 'speed', 'place', 'place_random', 'boundary')
 CLAIMS = [('rsa9_ED_X', 'RSA node-degree beta, E+D, 9 nodes', None), ('dec_node_bridge_ba', 'node/bridge BA', 0.5),
           ('dec_corner_cardinal_ba', 'corner/cardinal BA', 0.5), ('dec_same_type_error_share', 'same-type error share', 3 / 7),
           ('rsa21_contrast', 'E/G diagnostic contrast, 21 locations', None)]
+#: claims tested at mouse level, (stat, label, chance, direction); +1 = generalisation is larger
+MOUSE_CLAIMS = [(c, l, ch, +1) for c, l, ch in CLAIMS] + [('rsa21_ED_X', 'RSA node/bridge beta, E+NB, 21 locations', None, +1)]
+LEGACY_HOSTS = ('gpu-350-', 'gpu-380-')
 UNINFORMATIVE = {'mec': ('bp02',)}          # 17 units over 5 recdays, 0-4 per recday
 
 
@@ -114,13 +120,64 @@ def equivalence(dataset: str, old: str, new: str) -> dict:
     return out
 
 
-def claim_counts(dataset: str, run: dict) -> pd.DataFrame:
-    """Per claim and null: mice beyond the null p95 (<= 5 % of simulations reach the real value, mean over
-    the mouse's recdays) and on the generalisation side of chance."""
+def run_nulls(run: dict) -> tuple:
+    """The run's null kinds in NULL_ORDER."""
+    have = set(run['nulls']['null'])
+    return tuple(k for k in NULL_ORDER if k in have)
+
+
+def mouse_claims(dataset: str, run: dict, nulls=None) -> pd.DataFrame:
+    """Per claim and null: mouse-level tests (maze_spatial.mouse_null_tests) and the group statement across
+    mice (maze_spatial.group_tests). Needs the run's null_sims table (runs after 2026-10-12)."""
+    import maze_spatial as ms
+    if 'null_sims' not in run:
+        raise KeyError('this run has no null_sims table; use legacy_claim_counts')
+    rows = []
+    for stat, label, chance, direction in MOUSE_CLAIMS:
+        for k in (nulls or run_nulls(run)):
+            m = ms.mouse_null_tests(run['population'], run['null_sims'], stat, k, direction, chance,
+                                    exclude_mice=UNINFORMATIVE.get(dataset, ()))
+            g = ms.group_tests(m)
+            rows.append(dict(dataset=dataset, statistic=label, null=k, n_mice=g['n_mice'], hits=g['hits'],
+                             p_binomial=g['p_binomial'], p_signflip=g['p_signflip'],
+                             mice=','.join(m.loc[m['hit'], 'mouse']), min_n_sims=int(m['n_sims'].min()) if len(m) else 0,
+                             range=f"{m['real'].min():.2f} to {m['real'].max():.2f}" if len(m) else ''))
+    return pd.DataFrame(rows)
+
+
+def shard_equivalence(dataset: str, new: str, refs: list, keys=('units', 'single', 'maps2d', 'place_models', 'real', 'nulls')) -> pd.DataFrame:
+    """Per recday: every number of the reference shard against the new shard (old simulations are a prefix of
+    the new lists). The reference is the first run in `refs` whose shard ran on a modern node: legacy nodes
+    differ at 1e-15 (run 1617859bc6fd)."""
+    rows = []
+    for f in sorted(glob.glob(os.path.join(ROOTS[dataset], new, 'shards', '*.pkl'))):
+        b = pickle.load(open(f, 'rb'))
+        rd = b['recday']
+        ref, a = None, None
+        for t in refs:
+            fa = os.path.join(ROOTS[dataset], t, 'shards', f'{rd}.pkl')
+            if os.path.exists(fa):
+                cand = pickle.load(open(fa, 'rb'))
+                if not str(cand['stamp'].get('host', '')).startswith(LEGACY_HOSTS):
+                    ref, a = t, cand
+                    break
+        row = dict(recday=rd, new_host=b['stamp'].get('host', ''), reference=ref or 'none on a modern node')
+        if a is not None:
+            import spatial_common as sc
+            out = sc.compare_tree({k: a[k] for k in keys if k in a}, {k: b[k] for k in keys if k in b})
+            row.update(max_abs_diff=out['max_diff'], worst=out['worst'], nan_mismatch=out['nan_mismatch'],
+                       n_missing=len(out['missing']), first_missing=out['missing'][0] if out['missing'] else '', n_values=out['n'])
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def legacy_claim_counts(dataset: str, run: dict) -> pd.DataFrame:
+    """Superseded by mouse_claims (2026-10-12): per claim and null, mice beyond the null p95 by the mean over
+    recdays of each recday's fraction of simulations >= real, on the generalisation side of chance."""
     rows = []
     for col, label, chance in CLAIMS:
         row = dict(dataset=dataset, statistic=label)
-        for k in NULLS:
+        for k in (k_ for k_ in NULLS if k_ in run_nulls(run)):
             bm = decided_by_mouse(run['population'], run['nulls'], [col], k).set_index('mouse')
             bm = bm.drop(index=[m for m in UNINFORMATIVE.get(dataset, ()) if m in bm.index])
             v = bm[col]
@@ -153,26 +210,39 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     ap.add_argument('--tag', required=True)
     ap.add_argument('--equivalent-to', default='', help='older run whose every number must be unchanged')
+    ap.add_argument('--datasets', nargs='+', default=list(ROOTS), choices=list(ROOTS))
     args = ap.parse_args(argv)
     pd.set_option('display.width', 250)
-    runs = {d: load(d, args.tag) for d in ROOTS}
+    runs = {d: load(d, args.tag) for d in args.datasets}
     cfgs = {d: r['stamp'].get('cfg_hash') for d, r in runs.items()}
     print('config hash per dataset:', cfgs, '| identical:', len(set(cfgs.values())) == 1)
-    print('\n== PFC thesis recipe against the thesis targets')
-    print(thesis_reproduction(runs['pfc']['population']).round(4).to_string(index=False))
-    print('\n== PFC thesis-recipe plane angles by goal-progress bin distance (0 = within-bin halves)')
-    print(thesis_planes('pfc', args.tag).round(2).to_string(index=False))
+    if 'pfc' in runs and (runs['pfc']['population'].recipe == 'thesis').any():
+        print('\n== PFC thesis recipe against the thesis targets')
+        print(thesis_reproduction(runs['pfc']['population']).round(4).to_string(index=False))
+        try:
+            pl = thesis_planes('pfc', args.tag)
+            print('\n== PFC thesis-recipe plane angles by goal-progress bin distance (0 = within-bin halves)')
+            print(pl.round(2).to_string(index=False))
+        except (KeyError, TypeError):
+            print('\n(no thesis planes in this run)')
     key = ['rsa9_ED_E', 'rsa9_ED_X', 'rsa9_GD_G', 'rsa21_cvr2_ED', 'rsa21_cvr2_GD', 'rsa21_contrast',
            'dec_corner_cardinal_ba', 'dec_node_bridge_ba', 'dec_location_acc', 'dec_same_type_error_share',
            'planes_k3_halves_min', 'planes_k3_tasks_min', 'planes_k3_across_min']
     if args.equivalent_to:
         print(f'\n== equivalence with run {args.equivalent_to} (max abs diff over every number of the old run)')
-        for d in ROOTS:
+        for d in runs:
             print(d, equivalence(d, args.equivalent_to, args.tag))
-    print('\n== mice beyond each null p95 and on the generalisation side of chance (decided recipe)')
-    print(pd.concat([claim_counts(d, r) for d, r in runs.items()]).to_string(index=False))
+            eq = shard_equivalence(d, args.tag, [args.equivalent_to])
+            print(f"{d} shards: {len(eq)} recdays, max abs diff {eq['max_abs_diff'].max()}, NaN mismatches "
+                  f"{int(eq['nan_mismatch'].sum())}, missing paths {int(eq['n_missing'].sum())}, "
+                  f"values {eq['n_values'].sum() / 1e6:.1f} M, references {sorted(set(eq['reference']))}")
+    if all('null_sims' in r for r in runs.values()):
+        print('\n== mouse-level claims: hits = mice with p <= 0.05 against the mean-over-recdays null, on the generalisation side')
+        print(pd.concat([mouse_claims(d, r) for d, r in runs.items()]).to_string(index=False))
+    print('\n== legacy counts: mean over recdays of the per-recday null fraction (superseded by the mouse-level claims)')
+    print(pd.concat([legacy_claim_counts(d, r) for d, r in runs.items()]).to_string(index=False))
     for d, r in runs.items():
-        for kind in NULLS:
+        for kind in run_nulls(r):
             print(f'\n== {d} decided recipe by mouse, against the {kind} null (frac_null_ge: fraction of simulations >= real)')
             print(decided_by_mouse(r['population'], r['nulls'], key, kind).round(3).T.to_string())
 

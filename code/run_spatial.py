@@ -24,8 +24,13 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
-ENGINES = {'of': 'spatial_tuning', 'maze': 'maze_spatial'}
+ENGINES = {'of': 'spatial_tuning', 'maze': 'maze_spatial', 'link': 'maze_of_link'}
+# the link engine (mEC only, code/ only) runs the other engines' code too, so it is hashed into its tag
+EXTRA_CODE = {'link': ('spatial_tuning.py', 'maze_spatial.py', 'of_lag_scan.py')}
 UNHASHED = ('n_jobs',)             # changes speed, not results: shifts are drawn before parallelising
+# Haswell / Broadwell nodes: PFC reruns there differed at 1e-15 and flipped BIC field counts for 19 of
+# 1229 units (run 1617859bc6fd), so production runs on the modern families only
+LEGACY_HOSTS = ('gpu-350-', 'gpu-380-')
 
 
 def _merge_cfg(base: dict, over: dict) -> dict:
@@ -56,7 +61,8 @@ def setup(args):
     elif os.environ.get('SLURM_CPUS_PER_TASK'):
         cfg['n_jobs'] = int(os.environ['SLURM_CPUS_PER_TASK'])
     hashed = {k: v for k, v in cfg.items() if k not in UNHASHED}
-    code = [os.path.join(HERE, f) for f in ('spatial_common.py', 'spatial_io.py', ENGINES[args.engine] + '.py')]
+    code = [os.path.join(HERE, f) for f in ('spatial_common.py', 'spatial_io.py', ENGINES[args.engine] + '.py')
+            + EXTRA_CODE.get(args.engine, ())]
     tag = args.run_tag or sc.run_tag(hashed, code)
     out = os.path.join(sio.output_root(args.dataset), args.engine, tag)
     return eng, cfg, hashed, code, out, tag
@@ -67,6 +73,11 @@ def run_recday(args) -> None:
     import spatial_common as sc
     eng, cfg, hashed, code, out, tag = setup(args)
     t0 = time.time()
+    import socket
+    host = socket.gethostname()
+    if host.startswith(LEGACY_HOSTS) and not args.allow_legacy_host:
+        raise RuntimeError(f'{host} is a legacy node (results differ at 1e-15); resubmit with --exclude or pass --allow-legacy-host')
+    code_hash0 = sc.file_hash(code)
     path = os.path.join(out, 'shards', f'{args.recday}.pkl')
     if os.path.exists(path):
         raise FileExistsError(f'{path} exists; pass a new --run-tag')
@@ -75,12 +86,25 @@ def run_recday(args) -> None:
     units = sio.unit_table(args.dataset, args.recday, n_units)
     print(f'{args.recday}: {len(views)} sessions, {n_units} units, run tag {tag}, n_jobs {cfg["n_jobs"]}', flush=True)
     if args.engine == 'of':
-        walls = {s: sio.wall_exclusions(args.dataset, args.recday, s, cfg['border']['max_wall_rms_cm'])
-                 for s, v in views.items() if v.get('session_type') in sio.ARENA_TYPES}
-        res = eng.run_of_recday(views, args.recday, units, cfg, wall_exclusions=walls)
+        # every measured wall; the engine applies each arena block's own limit
+        wall_rms = {s: sio.wall_exclusions(args.dataset, args.recday, s, 0.0)
+                    for s, v in views.items() if v.get('session_type') in sio.ARENA_TYPES}
+        res = eng.run_of_recday(views, args.recday, units, cfg, wall_rms=wall_rms)
+    elif args.engine == 'link':
+        if args.dataset != 'mec':
+            raise ValueError('the link engine is mEC only (PFC has no arena sessions; LEC has no maze-arena pairs in one sort)')
+        import pickle
+        import recday_registry as rr
+        root = sio.output_root(args.dataset)
+        of_shard = pickle.load(open(os.path.join(root, 'of', cfg['of_tag'], 'shards', f'{args.recday}.pkl'), 'rb'))
+        maze_shard = pickle.load(open(os.path.join(root, 'maze', cfg['maze_tag'], 'shards', f'{args.recday}.pkl'), 'rb'))
+        res = eng.run_link_recday(views, args.recday, units, cfg, of_shard, maze_shard, str(rr.DATASETS[args.dataset]['root']))
     else:
         res = eng.run_maze_recday(views, args.recday, units, cfg)
     res['stamp'] = sc.stamp(args.engine, hashed, code, args.dataset, args.data_version)
+    # loky workers import the engine from disk when the null phase starts: an edit during the job would mix code
+    if res['stamp']['code_hash'] != code_hash0:
+        raise RuntimeError('engine code changed while this job ran; nothing written, resubmit')
     res['elapsed_s'] = time.time() - t0
     sc.write_new(path, res)
     print(f'wrote {path} in {res["elapsed_s"]:.0f} s', flush=True)
@@ -124,6 +148,7 @@ def main(argv=None):
     ap.add_argument('--data-version', default='v4')
     ap.add_argument('--n-jobs', type=int, default=0)
     ap.add_argument('--print-tag', action='store_true', help='print the default run tag and exit')
+    ap.add_argument('--allow-legacy-host', action='store_true', help='run on gpu-350/380 nodes anyway')
     args = ap.parse_args(argv)
     if args.print_tag:
         print(setup(args)[5])

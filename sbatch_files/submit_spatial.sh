@@ -12,11 +12,13 @@ PY=/nfs/nhome/live/aharris/.conda/envs/maze_ephys/bin/python
 # SPATIAL_CONFIG, a JSON of overrides (e.g. a grid-annulus sensitivity run), is hashed into the tag
 CFG=()
 [ -n "${SPATIAL_CONFIG:-}" ] && CFG=(--config "$SPATIAL_CONFIG")
+# Haswell/Broadwell nodes differ at 1e-15 (run 1617859bc6fd); node features are (null), so exclude by name
+EXCLUDE=${SPATIAL_EXCLUDE-gpu-350-[01-05],gpu-380-[10-18]}
 python_tag=$($PY $CODE/run_spatial.py --engine "$ENGINE" --dataset "$DATASET" ${CFG[@]+"${CFG[@]}"} --print-tag)
 echo "run tag $python_tag"
 for RD in "$@"; do
   # SBATCH_EXTRA, e.g. "--time=1-00:00 --cpus-per-task=32", passes through to every job
-  sbatch --job-name="sp_${ENGINE}_${RD}" --partition=cpu_backfill ${SBATCH_EXTRA:-} sbatch_files/spatial.sbatch \
+  sbatch --job-name="sp_${ENGINE}_${RD}" --partition=cpu_backfill --exclude="$EXCLUDE" ${SBATCH_EXTRA:-} sbatch_files/spatial.sbatch \
     "$CODE/run_spatial.py" --engine "$ENGINE" --dataset "$DATASET" --recday "$RD" --run-tag "$python_tag" ${CFG[@]+"${CFG[@]}"}
 done
 echo "merge when done:  $PY $CODE/run_spatial.py --engine $ENGINE --dataset $DATASET --merge --expect-recdays $# --run-tag $python_tag ${CFG[@]+"${CFG[@]}"}"

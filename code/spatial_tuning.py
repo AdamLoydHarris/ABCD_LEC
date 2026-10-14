@@ -15,6 +15,8 @@ This file is byte-identical in `code/` and `mFC_data/code/` (`check_mirror_parit
 from __future__ import annotations
 
 import copy
+import itertools
+import json
 import os
 import sys
 
@@ -35,15 +37,22 @@ DEFAULT_CFG = dict(
     bin_cm=2.5, sigma_bins=2.0, min_smoothed_occ_s=0.1, min_speed=2.5,
     n_shifts=1000, min_shift_s=20.0, seed=0, n_jobs=8,
     grid=dict(enabled=True, rmax_frac=0.5, inner_fallback_r=0.1, min_ring_width_bins=2, peak_thr=0.1,
-              peak_min_sep_cm=10.0, min_overlap=20),
+              peak_min_sep_cm=10.0, min_overlap=20, classify=True),
     border=dict(field_thr=0.3, min_area_cm2=200.0, max_area_frac=0.6, min_valid_wall_frac=0.5,
                 max_wall_rms_cm=1.5),
     hd=dict(nbins=36, pxd_pos_cm=7.5, pxd_dir_deg=30.0, pxd_tol=1e-6, pxd_maxit=50,
             guard_offset_deg=15.0, guard_r=0.8, guard_speed=5.0),
     speed=dict(sigma_s=0.25, lo=2.0, hi=50.0),          # Kropff r: descriptive; the class uses speed_f
-    pds=dict(speed_edges=(2.5, 5.0, 7.5, 10.0, 15.0, 20.0, 30.0, 40.0, 1e9), tol=1e-4, maxit=200),
+    pds=dict(speed_edges=(2.5, 5.0, 7.5, 10.0, 15.0, 20.0, 30.0, 40.0, 1e9), tol=1e-4, maxit=200,
+             top_cm_s=50.0, min_dwell_s=0.0),
     obj=dict(margin_cm=4.0, band_cm=20.0, n_sectors=8, n_virtual=200, min_virtual=100, wall_tol_cm=5.0,
-             speed_bin=2.5, radius_default_cm=6.0, radius_search_cm=40.0),
+             speed_bin=2.5, radius_default_cm=6.0, radius_search_cm=40.0, virtual_null=True,
+             radius_norm='annulus', radius_ref_cm=(15.0, 35.0), radius_exclude_cm=0.0),
+    # within-sort object moves (LEC box: no object-free session). Bands r_obj..r_out around each of the
+    # four corner locations; rest = moving samples outside every band, reweighted to each sector's
+    # speed x 45 deg HD mix (the 2026-10-12 plan's per-sector subsample, deterministic and 1000x faster)
+    move=dict(enabled=False, r_out_cm=12.0, match_cm=6.0, min_move_cm=15.0, hd_bins=8, speed_bin=2.5, q_conj=95.0,
+              n_sectors=8, min_band=400, min_rest=400, min_sector=100, min_stratum=20, min_map_bins=10),
     units=dict(narrow_ms=0.4, rate_cut_hz=10.0, min_moving_spikes=100),
     q=dict(pooled=99.0, unit=99.0, stability=95.0),
     rotation=dict(n_perm=1000, n_boot=2000, n_shift_object=200),
@@ -52,14 +61,131 @@ DEFAULT_CFG = dict(
 STATS = ('si', 'stab', 'grid', 'border', 'hd_r', 'pxd_r', 'pxd_split', 'speed_r', 'speed_r1', 'speed_r2',
          'si_p', 'stab_p', 'speed_f', 'speed_f1', 'speed_f2')
 
+# ---------------------------------------------------------------------------
+# per-arena settings: one file, one block per arena kind (user's decision 2026-10-12)
+# ---------------------------------------------------------------------------
+
+ARENA_FILE = os.path.join(HERE, 'spatial_of_arenas.json')
+
+
+def _paths(d: dict, pre: str = '') -> list:
+    out = []
+    for k, v in d.items():
+        out += _paths(v, f'{pre}{k}.') if isinstance(v, dict) else [f'{pre}{k}']
+    return out
+
+
+def _get(d: dict, path: str):
+    for k in path.split('.'):
+        d = d[k]
+    return d
+
+
+def _norm(v):
+    return json.loads(json.dumps(v))
+
+
+def _overlay(base: dict, block: dict, pre: str = '') -> dict:
+    """base with every value of block replaced; a block key that is not an engine setting raises."""
+    out = copy.deepcopy(base)
+    for k, v in block.items():
+        if k not in out:
+            raise KeyError(f'arena setting {pre}{k} is not an engine setting')
+        out[k] = _overlay(out[k], v, f'{pre}{k}.') if isinstance(v, dict) else copy.deepcopy(v)
+    return out
+
+
+def _load_arenas(base: dict) -> dict:
+    """Read the arena file; every block must carry the same keys, and the bigfield block must be a no-op
+    on today's settings (mEC numbers unchanged by construction)."""
+    with open(ARENA_FILE) as fh:
+        a = json.load(fh)
+    keys = {name: sorted(_paths(blk)) for name, blk in a['arenas'].items()}
+    if len({tuple(k) for k in keys.values()}) != 1:
+        raise ValueError(f'arena blocks carry different keys: {keys}')
+    for path in keys['bigfield']:
+        if path != 'side_cm' and _norm(_get(a['arenas']['bigfield'], path)) != _norm(_get(base, path)):
+            raise ValueError(f'bigfield block changes {path}: {_get(a["arenas"]["bigfield"], path)} vs {_get(base, path)}')
+    return a
+
+
+def arena_cfg(cfg: dict, arena: dict) -> dict:
+    """Engine settings for one arena: the base settings overlaid with the arena's block, picked by the
+    arena name and checked against its side. cfg['arenas'] None is the legacy block-free path (gate E4,
+    bigfield only)."""
+    name = (arena or {}).get('name')
+    if cfg.get('arenas') is None:
+        if name != 'bigfield':
+            raise ValueError(f'the block-free path is for the big field only, not {name!r}')
+        out = copy.deepcopy(cfg)
+        out['arena_block'] = 'legacy'
+        return out
+    if name not in cfg['arena_map']:
+        raise ValueError(f'arena {name!r} has no settings block')
+    blk_name = cfg['arena_map'][name]
+    blk = cfg['arenas'][blk_name]
+    side = arena.get('side_cm')
+    if side is None or abs(float(side) - float(blk['side_cm'])) > 1.0:
+        raise ValueError(f'arena {name!r} side {side} does not match block {blk_name!r} ({blk["side_cm"]} cm)')
+    base = {k: v for k, v in cfg.items() if k not in ('arena_map', 'arenas')}
+    out = _overlay(base, {k: v for k, v in blk.items() if k != 'side_cm'})
+    out['arena_block'] = blk_name
+    return out
+
+
+def check_arena_overrides(cfg: dict) -> None:
+    """A top-level value of an arena-block setting that differs from the default would be shadowed by
+    the blocks; refuse it (set it inside the block instead)."""
+    if cfg.get('arenas') is None:
+        return
+    for path in _paths(cfg['arenas']['bigfield']):
+        if path != 'side_cm' and _norm(_get(cfg, path)) != _norm(_get(DEFAULT_CFG, path)):
+            raise ValueError(f'{path} is set per arena: put it in an arenas block, not at the top level')
+
 
 # ---------------------------------------------------------------------------
 # geometry
 # ---------------------------------------------------------------------------
 
-def measure_object_radius(xy: np.ndarray, centre, cfg: dict) -> float:
+def _annulus_area_in_arena(centre, edges: np.ndarray, side: float, others=(), r_excl: float = 0.0) -> np.ndarray:
+    """(len(edges)-1,) area (cm^2) of each annulus inside the square arena and outside the other objects'
+    exclusion discs, on a 0.25 cm grid."""
+    g = np.arange(0.125, side, 0.25)
+    GX, GY = np.meshgrid(g, g, indexing='ij')
+    ok = np.ones(GX.shape, bool)
+    for o in others:
+        ok &= np.hypot(GX - o[0], GY - o[1]) >= r_excl
+    d = np.hypot(GX - centre[0], GY - centre[1])[ok]
+    return np.histogram(d, edges)[0] * 0.0625
+
+
+def measure_object_radius(xy: np.ndarray, centre, cfg: dict, side=None, others=()) -> float:
     """Radius (cm) of the occupancy hole around an object: first 1 cm annulus whose dwell density
-    reaches half the 15-35 cm reference. Clicked radii are a 6 cm default, not a measurement."""
+    reaches half the reference ring's. Clicked radii are a 6 cm default, not a measurement.
+    'annulus' (big field): density per full annulus area, 15-35 cm reference. 'in_arena' (50 cm box):
+    density per annulus area inside the box and away from the other objects, whose samples are
+    dropped; in the box the 15-35 cm ring is cut by two walls and clipped r_obj to 2 cm."""
+    if cfg['obj']['radius_norm'] == 'in_arena':
+        o = cfg['obj']
+        c = np.asarray(centre, float)
+        keep = np.isfinite(xy).all(axis=1)
+        for q in others:
+            keep &= np.hypot(xy[:, 0] - q[0], xy[:, 1] - q[1]) >= o['radius_exclude_cm']
+        d = np.linalg.norm(xy[keep] - c, axis=1)
+        d = d[d < o['radius_search_cm']]
+        if len(d) < 500 or side is None:
+            return float(o['radius_default_cm'])
+        edges = np.arange(0, o['radius_search_cm'] + 1, 1.0)
+        area = _annulus_area_in_arena(c, edges, side, others, o['radius_exclude_cm'])
+        h, _ = np.histogram(d, edges)
+        with np.errstate(invalid='ignore', divide='ignore'):
+            dens = np.where(area > 1.0, h / area, np.nan)
+        lo, hi = o['radius_ref_cm']
+        ref = np.nanmedian(dens[(edges[:-1] >= lo) & (edges[:-1] < hi)])
+        hit = np.nonzero(dens >= 0.5 * ref)[0]
+        if not np.isfinite(ref) or ref <= 0 or not len(hit):
+            return float(o['radius_default_cm'])
+        return float(np.clip(edges[hit[0]], 2.0, 15.0))
     c = np.asarray(centre, float)
     d = np.linalg.norm(xy - c, axis=1)
     d = d[np.isfinite(d) & (d < cfg['obj']['radius_search_cm'])]
@@ -329,6 +455,8 @@ def _factorize3_reference(n, t, tol, maxit):
 
 def _context(view: dict, cfg: dict, excluded_walls: set) -> dict:
     """Arrays shared by the real statistics and every shift of one arena session."""
+    if 'arena_block' not in cfg:
+        cfg = arena_cfg(cfg, view['arena'])
     counts = view['counts']
     xy = view['xy']
     T = min(counts.shape[1], len(xy))
@@ -355,11 +483,13 @@ def _context(view: dict, cfg: dict, excluded_walls: set) -> dict:
     objs = []
     in_mask_t = np.zeros(T, bool)
     valid_bins = np.ones(nb, bool)
+    all_c = [np.asarray(o['xy_cm'], float) for o in (view.get('objects') or [])]
     for o in (view.get('objects') or []):
         c = np.asarray(o['xy_cm'], float)
         if not (np.all(c >= 0) and np.all(c <= side)):
             raise ValueError(f"object {o.get('label', '')} at {c.tolist()} lies outside the {side} cm arena")
-        r_obj = measure_object_radius(xy_c[fin], c, cfg)
+        others = [q for q in all_c if not np.array_equal(q, c)]
+        r_obj = measure_object_radius(xy_c[fin], c, cfg, side=side, others=others)
         r_mask = r_obj + cfg['obj']['margin_cm']
         objs.append(dict(label=o.get('label', ''), xy=c, r_obj=r_obj, r_mask=r_mask))
         in_mask_t |= np.linalg.norm(xy_c - c, axis=1) < r_mask
@@ -370,6 +500,7 @@ def _context(view: dict, cfg: dict, excluded_walls: set) -> dict:
           (('all', moving), ('use', use), ('h1', use & half), ('h2', use & ~half))}
     occ = {k: sc.occupancy_map(M, nb) for k, M in Ms.items()}
     ctx = dict(T=T, counts=counts, xy=xy_c, side=side, speed=speed, moving=moving, use=use, half=half,
+               arena_block=cfg['arena_block'],
                hd=hd, guard=guard, ex=ex, ey=ey, nb=nb, flat=flat, Ms=Ms, occ=occ, objs=objs,
                valid_bins=valid_bins, clipped_frac=float(clipped.sum() / max(fin.sum(), 1)),
                excluded_walls=set(excluded_walls), cfg=cfg,
@@ -416,7 +547,7 @@ def _context(view: dict, cfg: dict, excluded_walls: set) -> dict:
         nd3, d3 = 1, np.zeros(T, int)
     flat3 = np.where(ok3, (pflat3 * nd3 + np.clip(d3, 0, nd3 - 1)) * nsb + np.clip(sbin, 0, nsb - 1), -1)
     ctx['pds_shape'] = (np3 * np3, nd3, nsb)
-    hi_edges = np.r_[se[1:-1], 50.0]
+    hi_edges = np.r_[se[1:-1], pd_['top_cm_s']]
     ctx['speed_logc'] = np.log(np.sqrt(se[:-1] * hi_edges))       # geometric bin centres, last capped at 50
     for k, m in (('all', ok3), ('h1', ok3 & half), ('h2', ok3 & ~half)):
         ctx['M3_' + k] = sc.onehot(flat3, m & (flat3 >= 0), np3 * np3 * nd3 * nsb)
@@ -480,7 +611,7 @@ def session_stats(ctx: dict, counts: np.ndarray, rate_s: np.ndarray, full: bool)
         res3 = factorize3(n3, ctx['t3_' + k], cfg['pds']['tol'], cfg['pds']['maxit'])
         pf[k], sf[k] = res3[0], res3[2]
         # speed factor vs log speed over bins with dwell: tuning beyond position and direction
-        dwell = ctx['t3_' + k].sum((0, 1)) > 0
+        dwell = ctx['t3_' + k].sum((0, 1)) > cfg['pds']['min_dwell_s'] * (1.0 if k == 'all' else 0.5)
         if dwell.sum() >= 3:
             out[{'all': 'speed_f', 'h1': 'speed_f1', 'h2': 'speed_f2'}[k]] = _corr_rows(
                 sf[k][:, dwell], ctx['speed_logc'][dwell])
@@ -603,6 +734,10 @@ def proximal_with_null(ctx: dict, centre, r_obj: float, r_mask: float, rng: np.r
     out = dict(xy=centre, r_obj=r_obj, r_mask=r_mask, stat=real, null=None, n_virtual=0, reason='')
     if real is None:
         out['reason'] = 'too few samples in the band or the rest'
+        return out
+    if not cfg['virtual_null']:
+        out['reason'] = ('not constructible in this arena: wall-distance-matched virtual bands would overlap the '
+                         'other corners (0 candidates in the 50 cm box)')
         return out
     if len(pts) < cfg['min_virtual']:
         out['reason'] = f'{len(pts)} wall-distance-matched virtual positions'
@@ -737,7 +872,9 @@ def classify(real: dict, null: dict, pools: dict, cfg: dict) -> dict:
         b = np.array([thr.get(p, {}).get('border', np.inf) for p in pool_of])
         s = np.array([thr.get(p, {}).get('speed_f', np.inf) for p in pool_of])
         stable = st['stab'] > own['stab']
-        c = dict(grid=(st['grid'] > g) & stable, border=(st['border'] > b) & stable)
+        # grid is scored but not classed in the 50 cm box: the gate could not resolve 20-30 cm grids there
+        grid = (st['grid'] > g) & stable if cfg['grid']['classify'] else np.zeros(N, bool)
+        c = dict(grid=grid, border=(st['border'] > b) & stable)
         c['spatial'] = ((st['si_p'] > own['si_p']) & (st['stab_p'] > own['stab_p'])
                         & ~c['grid'] & ~c['border'])
         c['hd'] = (st['pxd_r'] > own['pxd_r']) & (st['pxd_split'] > own['pxd_split'])
@@ -776,16 +913,30 @@ def unit_pools(units, rates_hz: np.ndarray, moving_spikes: np.ndarray, cfg: dict
     return pools, elig, narrow
 
 
-def run_of_recday(views: dict, recday: str, units, cfg: dict, wall_exclusions=None) -> dict:
-    """Score every arena session of one recday; returns the shard dict (no file I/O here)."""
+def session_wall_exclusions(wall_rms: dict, cfg_s: dict) -> set:
+    """Walls whose straightness RMS (cm) exceeds the session's arena-block limit, border.max_wall_rms_cm."""
+    lim = cfg_s['border']['max_wall_rms_cm']
+    return {w for w, r in (wall_rms or {}).items() if r is not None and r > lim}
+
+
+def run_of_recday(views: dict, recday: str, units, cfg: dict, wall_exclusions=None, wall_rms=None) -> dict:
+    """Score every arena session of one recday; returns the shard dict (no file I/O here). wall_rms
+    (session -> {wall: rms cm}) is filtered by each session's block limit; wall_exclusions is the legacy
+    pre-filtered form."""
     cfg = copy.deepcopy(cfg)
+    check_arena_overrides(cfg)
     rng = np.random.default_rng(cfg['seed'])
     arena_sessions = sorted(s for s, v in views.items() if v.get('session_type') in ('openfield', 'object')
                             and v.get('xy') is not None and v.get('arena') is not None)
     sessions, ctxs = {}, {}
     for s in arena_sessions:
         v = views[s]
-        excl = set((wall_exclusions or {}).get(s, {}).keys())
+        if wall_rms is not None:
+            # each arena's own limit: run_spatial had filtered walls at the top-level 1.5 cm, which shadowed
+            # box50's 2.0 cm and dropped 6 LEC walls of 1.5-1.9 cm (wall-RMS run 7a55445a6eb2 equalled the main run)
+            excl = session_wall_exclusions(wall_rms.get(s, {}), arena_cfg(cfg, v['arena']))
+        else:
+            excl = set((wall_exclusions or {}).get(s, {}).keys())
         ctx = _context(v, cfg, excl)
         ctxs[s] = ctx
         rs = _smoothed_rate(ctx, ctx['counts'])
@@ -795,12 +946,12 @@ def run_of_recday(views: dict, recday: str, units, cfg: dict, wall_exclusions=No
         mov_spk = ctx['counts'][:, ctx['use']].sum(1)
         rate_hz = ctx['counts'].sum(1) / (ctx['T'] * sc.BIN_S)
         pools, elig, narrow = unit_pools(units, rate_hz, mov_spk, cfg)
-        cl = classify(real, null, pools, cfg)
+        cl = classify(real, null, pools, ctx['cfg'])
         objs = object_proximal(ctx, rng) if ctx['objs'] else []
         for o in objs:
             o['proximal'] = (elig & (o['stat'] > o['own_p99'])) if o['null'] is not None else np.zeros(len(elig), bool)
         sessions[s] = dict(
-            session=s, session_type=v['session_type'], side_cm=ctx['side'], T=ctx['T'],
+            session=s, session_type=v['session_type'], side_cm=ctx['side'], T=ctx['T'], arena_block=ctx['arena_block'],
             clipped_frac=ctx['clipped_frac'], hd_guard=ctx['guard'], excluded_walls=sorted(excl),
             moving_frac=float(ctx['moving'].mean()), objects=objs, shifts=shifts,
             real={k: real[k] for k in STATS}, details=real['details'], null=null,
@@ -816,6 +967,11 @@ def run_of_recday(views: dict, recday: str, units, cfg: dict, wall_exclusions=No
                   & a['eligible'] & b['eligible'])
             rot = rotation_test(a, b, ok, cfg, rng, hd_units=a['eligible'] & b['eligible'])
             rot['object_vector'] = object_vector(ctxs, s1, s2, sessions, rot, rng)
+            c1, c2 = ctxs[s1]['cfg'], ctxs[s2]['cfg']
+            if c1['arena_block'] == c2['arena_block'] and c1['move']['enabled'] and ctxs[s1]['objs'] and ctxs[s2]['objs']:
+                mv = object_move(ctxs, sessions, s1, s2, rot)
+                if mv:
+                    rot['object_move'] = mv
             rotations[(s1, s2)] = rot
     return dict(recday=recday, engine=ENGINE, engine_version=ENGINE_VERSION, sessions=sessions,
                 rotations=rotations, units=units)
@@ -889,11 +1045,241 @@ def object_vector(ctxs: dict, s1: int, s2: int, sessions: dict, rot: dict, rng) 
 # merge
 # ---------------------------------------------------------------------------
 
+def _dihedral_images(p, side: float) -> list:
+    x, y = float(p[0]), float(p[1])
+    return [(x, y), (side - x, y), (x, side - y), (side - x, side - y),
+            (y, x), (side - y, x), (y, side - x), (side - y, side - x)]
+
+
+def object_layout(objs_a: list, objs_b: list, side: float, mv: dict) -> dict | None:
+    """The four corner locations of one day-pair: V held in a and empty in b, S held in both by different
+    objects, N empty in a and held in b, E empty in both (the corner none of them uses), with each
+    object's move. None unless the layout is exactly one of each (all 10 LEC day-pairs are)."""
+    locs = []
+    for sess, objs in (('a', objs_a), ('b', objs_b)):
+        for o in objs:
+            xy = np.asarray(o['xy'], float)
+            for L in locs:
+                if np.hypot(*(xy - L['xy'])) <= mv['match_cm']:
+                    L[sess] = o['label']
+                    L['r'].append(o['r_obj'])
+                    break
+            else:
+                L = dict(xy=xy, a=None, b=None, r=[o['r_obj']])
+                L[sess] = o['label']
+                locs.append(L)
+    roles = {}
+    for L in locs:
+        role = 'S' if (L['a'] and L['b']) else 'V' if L['a'] else 'N'
+        if role in roles:
+            return None
+        roles[role] = L
+    if set(roles) != {'V', 'S', 'N'}:
+        return None
+    occ = [roles[k]['xy'] for k in 'VSN']
+    cand = [np.asarray(q) for p_ in occ for q in _dihedral_images(p_, side)]
+    cand = [q for q in cand if min(np.hypot(*(q - o)) for o in occ) > 2 * mv['match_cm']]
+    if not cand:
+        return None
+    E = np.mean(cand, axis=0)
+    if max(np.hypot(*(q - E)) for q in cand) > mv['match_cm']:
+        return None
+    roles['E'] = dict(xy=E, a=None, b=None, r=[float(np.median([r for L in locs for r in L['r']]))])
+    sep = min(np.hypot(*(roles[x]['xy'] - roles[y]['xy'])) for x, y in itertools.combinations('VSNE', 2))
+    r_out = min(mv['r_out_cm'], sep / 2 - 0.5)
+    movers = {}
+    for o in objs_a:
+        ob = [q for q in objs_b if q['label'] == o['label']]
+        if not ob:
+            continue
+        A, B = np.asarray(o['xy'], float), np.asarray(ob[0]['xy'], float)
+        if np.hypot(*(B - A)) >= mv['min_move_cm']:
+            fr = min('VSN', key=lambda k: np.hypot(*(roles[k]['xy'] - A)))
+            to = min('VSN', key=lambda k: np.hypot(*(roles[k]['xy'] - B)))
+            movers[o['label']] = dict(A=A, B=B, frm=fr, to=to, d=B - A)
+    return dict(roles={k: dict(xy=v['xy'], r_in=float(max(v['r'])), a=v['a'], b=v['b']) for k, v in roles.items()},
+                r_out=float(r_out), movers=movers, min_sep_cm=float(sep))
+
+
+def _strata(ctx: dict, mv: dict) -> np.ndarray:
+    """(T,) stratum code: speed bin x 45 deg HD bin (speed only when the session's HD guard failed)."""
+    sb = np.floor(np.nan_to_num(ctx['speed']) / mv['speed_bin']).astype(int)
+    if ctx['hd'] is None:
+        return sb
+    hb = np.floor(np.mod(np.nan_to_num(ctx['hd']), 2 * np.pi) / (2 * np.pi) * mv['hd_bins']).astype(int)
+    return sb * mv['hd_bins'] + np.clip(hb, 0, mv['hd_bins'] - 1)
+
+
+def _location_design(ctx: dict, centre, r_in: float, r_out: float, rest: np.ndarray, code: np.ndarray, mv: dict):
+    """Sparse band-sector indicator (T x n_sectors), rest stratum indicator (T x S) and the sector x stratum
+    weights that reweight the rest to each sector's speed x HD mix; None when the band is thin."""
+    from scipy import sparse
+    xy, T = ctx['xy'], ctx['T']
+    rel = xy - np.asarray(centre, float)
+    d = np.hypot(rel[:, 0], rel[:, 1])
+    ib = np.nonzero(ctx['moving'] & (d >= r_in) & (d < r_out))[0]
+    ir = np.nonzero(rest)[0]
+    if len(ib) < mv['min_band'] or len(ir) < mv['min_rest']:
+        return None
+    ns = mv['n_sectors']
+    sec = (np.floor(np.mod(np.arctan2(rel[ib, 1], rel[ib, 0]), 2 * np.pi) / (2 * np.pi) * ns)).astype(int)
+    sec = np.clip(sec, 0, ns - 1)
+    B = sparse.csr_matrix((np.ones(len(ib)), (ib, sec)), shape=(T, ns))
+    n_band = np.bincount(sec, minlength=ns)
+    S = int(code.max()) + 1
+    R = sparse.csr_matrix((np.ones(len(ir)), (ir, code[ir])), shape=(T, S))
+    n_rest = np.bincount(code[ir], minlength=S)
+    W = np.zeros((ns, S))
+    for k in range(ns):
+        if n_band[k] < mv['min_sector']:
+            continue
+        h = np.bincount(code[ib[sec == k]], minlength=S).astype(float)
+        h[n_rest < mv['min_stratum']] = 0.0
+        if h.sum() > 0:
+            W[k] = h / h.sum()
+    ok = (n_band >= mv['min_sector']) & (W.sum(1) > 0)
+    return dict(B=B, R=R, W=W, n_band=n_band, n_rest=n_rest, ok=ok)
+
+
+def _location_stat(counts: np.ndarray, des: dict, k: int) -> np.ndarray:
+    """(N,) max over sectors of log((band rate + 0.1) / (reweighted rest rate + 0.1)), spikes shifted by k."""
+    if des is None or not des['ok'].any():
+        return np.full(counts.shape[0], np.nan)
+    c = np.roll(counts, int(k), axis=1) if k else counts
+    band = np.asarray(des['B'].T.dot(c.T)).T / np.maximum(des['n_band'], 1)[None] / sc.BIN_S
+    with np.errstate(invalid='ignore', divide='ignore'):
+        rr = np.asarray(des['R'].T.dot(c.T)).T / des['n_rest'][None] / sc.BIN_S
+    rr = np.nan_to_num(rr)
+    matched = rr @ des['W'].T
+    ratio = np.log((band + 0.1) / (matched + 0.1))
+    ratio[:, ~des['ok']] = -np.inf
+    best = ratio.max(1)
+    return np.where(np.isfinite(best), best, np.nan)
+
+
+def _shifted_maps(ctx: dict, k: int) -> np.ndarray:
+    c = np.roll(ctx['counts'], int(k), axis=1) if k else ctx['counts']
+    return _rates(ctx, c, 'use')
+
+
+def _translated_r(ma: np.ndarray, mb: np.ndarray, dij: tuple, min_bins: int) -> np.ndarray:
+    """(N,) r between map a moved by dij bins and map b, over bins finite in both."""
+    di, dj = dij
+    nx, ny = ma.shape[1:]
+    sh = np.full_like(ma, np.nan)
+    xs, xd = (slice(0, nx - di), slice(di, nx)) if di >= 0 else (slice(-di, nx), slice(0, nx + di))
+    ys, yd = (slice(0, ny - dj), slice(dj, ny)) if dj >= 0 else (slice(-dj, ny), slice(0, ny + dj))
+    sh[:, xd, yd] = ma[:, xs, ys]
+    return sc.map_corr(sh, mb, min_bins=min_bins)
+
+
+def object_move(ctxs: dict, sessions: dict, s_a: int, s_b: int, rot: dict | None = None) -> dict:
+    """Within one sort and one box, the four object-move classes per unit against paired circular
+    shifts of both sessions (shift j of a with shift j of b; each unit's own one-sided p99s):
+
+    follow[label]  firing at the object's old corner drops, firing at its new one rises, and the unit fires
+                   significantly at the old corner in a and at the new one in b (each term at move.q_conj)
+    trace          firing appears at the vacated corner V and is significant there afterwards (p99 terms)
+    generic        as follow, from V to the newly occupied corner N
+    vector[label]  the a map moved by the object's displacement matches the b map better than the
+                   unmoved map, with the field outside the band in both sessions
+    Reported: place at V, remapping V -> E, E changes, and arrivals of units that left V.
+    """
+    ca, cb = ctxs[s_a], ctxs[s_b]
+    mv = ca['cfg']['move']
+    lay = object_layout(ca['objs'], cb['objs'], ca['side'], mv)
+    if lay is None:
+        return dict(reason='object layout is not one vacated, one shared and one new corner')
+    roles, r_out = lay['roles'], lay['r_out']
+    q = ca['cfg']['q']['unit']
+    elig = sessions[s_a]['eligible'] & sessions[s_b]['eligible']
+    des, P = {}, {}
+    for s, ctx in ((s_a, ca), (s_b, cb)):
+        code = _strata(ctx, mv)
+        rest = ctx['moving'].copy()
+        for L in roles.values():
+            rest &= np.hypot(ctx['xy'][:, 0] - L['xy'][0], ctx['xy'][:, 1] - L['xy'][1]) >= r_out
+        des[s] = {L: _location_design(ctx, roles[L]['xy'], roles[L]['r_in'], r_out, rest, code, mv) for L in roles}
+    sha, shb = sessions[s_a]['shifts'], sessions[s_b]['shifts']
+    n = min(len(sha), len(shb))
+    keys = [(0, 0)] + [(int(sha[j]), int(shb[j])) for j in range(n)]
+    N = ca['counts'].shape[0]
+    Pa = {L: np.empty((n + 1, N)) for L in roles}
+    Pb = {L: np.empty((n + 1, N)) for L in roles}
+    for j, (ka, kb) in enumerate(keys):
+        for L in roles:
+            Pa[L][j] = _location_stat(ca['counts'], des[s_a][L], ka)
+            Pb[L][j] = _location_stat(cb['counts'], des[s_b][L], kb)
+    D = {L: Pb[L] - Pa[L] for L in roles}
+
+    def over(x, q_=q):
+        """(n+1, N) row 0 real, rows 1.. shifts -> (n+1, N) above each unit's own q_ percentile of the shifts."""
+        thr = np.nanpercentile(x[1:], q_, axis=0)
+        return x > thr[None]
+    up = {L: over(D[L]) for L in roles}
+    down = {L: over(-D[L]) for L in roles}
+    sig_b = {L: over(Pb[L]) for L in roles}
+    sig_a = {L: over(Pa[L]) for L in roles}
+    # four-term classes test each term at q_conj (p95): their old- and new-corner halves are nearly independent
+    # under the null, so a class runs near 0.25 %; at p99 per term generic object cells were found in 0.37-0.45
+    # of 20-30 planted (jobs 3753163, 3755058), at p95 0.95 with every planted negative 0 of 20
+    q4 = mv['q_conj']
+    up4, down4 = {L: over(D[L], q4) for L in roles}, {L: over(-D[L], q4) for L in roles}
+    sig_a4, sig_b4 = {L: over(Pa[L], q4) for L in roles}, {L: over(Pb[L], q4) for L in roles}
+    # a change counts only where the unit fires there: a central place field sits in the rest of the floor,
+    # so occupancy changes moved its band/rest ratio at corners it never fires at (2/10 anchors, run 3752932)
+    cls = dict(trace=up['V'] & sig_b['V'], generic=sig_a4['V'] & down4['V'] & up4['N'] & sig_b4['N'],
+               place_vacated=sig_a['V'] & sig_b['V'] & ~down['V'],
+               remap_E=sig_a4['V'] & down4['V'] & up4['E'] & sig_b4['E'], E_change=over(np.abs(D['E'])))
+    for lab, m_ in lay['movers'].items():
+        cls[f'follow[{lab}]'] = sig_a4[m_['frm']] & down4[m_['frm']] & up4[m_['to']] & sig_b4[m_['to']]
+    # object-vector per moving object: translation of the map by the object's displacement
+    bc = ca['cfg']['bin_cm']
+    nb = ca['nb']
+    cen_x, cen_y = (np.arange(nb[0]) + 0.5) * bc, (np.arange(nb[1]) + 0.5) * bc
+    vec = {}
+    movers = list(lay['movers'].items())
+    dij = {lab: (int(round(m_['d'][0] / bc)), int(round(m_['d'][1] / bc))) for lab, m_ in movers}
+    stat = {lab: np.empty((n + 1, N)) for lab, _ in movers}
+    off = {}
+    for j, (ka, kb) in enumerate(keys):
+        ma, mb = _shifted_maps(ca, ka), _shifted_maps(cb, kb)
+        r_id = sc.map_corr(ma, mb, min_bins=mv['min_map_bins'])
+        for lab, m_ in movers:
+            stat[lab][j] = _translated_r(ma, mb, dij[lab], mv['min_map_bins']) - r_id
+        if j == 0:
+            ia = np.argmax(np.nan_to_num(ma.reshape(N, -1), nan=-np.inf), axis=1)
+            ib_ = np.argmax(np.nan_to_num(mb.reshape(N, -1), nan=-np.inf), axis=1)
+            pa = np.column_stack([cen_x[ia // nb[1]], cen_y[ia % nb[1]]])
+            pb = np.column_stack([cen_x[ib_ // nb[1]], cen_y[ib_ % nb[1]]])
+            for lab, m_ in movers:
+                # the field sits outside the object band in both sessions, or it is object-following
+                off[lab] = (np.hypot(*(pa - m_['A']).T) >= r_out) & (np.hypot(*(pb - m_['B']).T) >= r_out)
+    for lab, _ in movers:
+        cls[f'vector[{lab}]'] = over(stat[lab]) & off[lab][None]
+        vec[lab] = dict(stat=stat[lab][0], p99=np.nanpercentile(stat[lab][1:], q, axis=0), offset_ok=off[lab],
+                        shift_bins=dij[lab])
+    # a trace cell may be silent before the object leaves, so it needs >= min_moving_spikes in b only: planted
+    # trace cells at 0.2 Hz in ly06 s5 (48 % moving) fell under the cut in a (0 of 15 eligible, gate run 3755672)
+    elig_cls = {k: (np.asarray(sessions[s_b]['eligible'], bool) if k == 'trace' else elig) for k in cls}
+    real_cls = {k: v[0] & elig_cls[k] for k, v in cls.items()}
+    chance = {k: v[1:][:, elig_cls[k]].sum(1) for k, v in cls.items()}
+    left = down['V'][0] & elig
+    arrivals = {L: int((left & up[L][0]).sum()) for L in ('S', 'N', 'E')}
+    return dict(layout=lay, n_shifts=n, classes=real_cls, chance=chance, arrivals=arrivals,
+                n_left_V=int((down['V'][0] & elig).sum()), eligible=elig_cls,
+                P_a={L: Pa[L][0] for L in roles}, P_b={L: Pb[L][0] for L in roles},
+                delta={L: D[L][0] for L in roles},
+                delta_p99={L: np.nanpercentile(D[L][1:], q, axis=0) for L in roles},
+                delta_p01={L: np.nanpercentile(D[L][1:], 100 - q, axis=0) for L in roles},
+                vector=vec, map_rotated=bool(rot and rot.get('ok') and rot.get('best') != 'id' and rot.get('p', 1) < 0.01))
+
+
 def merge_tables(shards: dict) -> dict:
     """{'units', 'sessions', 'rotations'} DataFrames from a run's shards. Counts are per recday and
     per pool, each with its measured chance distribution (one shift applied to all units at once)."""
     import pandas as pd
-    urows, srows, rrows = [], [], []
+    urows, srows, rrows, mrows = [], [], [], []
     for rd, sh in sorted(shards.items()):
         units = sh['units'].reset_index(drop=True)
         mouse = rd.split('_')[0]
@@ -951,4 +1337,24 @@ def merge_tables(shards: dict) -> dict:
                 for lab, ov in rot.get('object_vector', {}).items():
                     row[f'object_vector_{lab}'] = int(ov['object_vector'].sum()) if 'object_vector' in ov else ov.get('reason', '')
             rrows.append(row)
-    return dict(units=pd.DataFrame(urows), sessions=pd.DataFrame(srows), rotations=pd.DataFrame(rrows))
+            mvr = rot.get('object_move') if isinstance(rot, dict) else None
+            if mvr and 'classes' in mvr:
+                for k, v in mvr['classes'].items():
+                    ch = np.asarray(mvr['chance'][k])
+                    obs = int(v.sum())
+                    mrows.append(dict(recday=rd, mouse=mouse, s1=s1, s2=s2, cls=k, observed=obs,
+                                      n_eligible=int(np.sum(mvr['eligible'][k])),
+                                      chance_mean=float(ch.mean()), chance_p95=float(np.percentile(ch, 95)),
+                                      p=float((1 + (ch >= obs).sum()) / (1 + len(ch))),
+                                      movers=';'.join(f"{lab}:{m_['frm']}->{m_['to']}" for lab, m_ in mvr['layout']['movers'].items()),
+                                      r_out_cm=mvr['layout']['r_out'], n_left_V=mvr['n_left_V'],
+                                      arrivals=';'.join(f'{L}:{c}' for L, c in mvr['arrivals'].items())))
+            elif mvr:
+                mrows.append(dict(recday=rd, mouse=mouse, s1=s1, s2=s2, cls='', note=mvr.get('reason', '')))
+    out = dict(units=pd.DataFrame(urows), sessions=pd.DataFrame(srows), rotations=pd.DataFrame(rrows))
+    if mrows:
+        out['moves'] = pd.DataFrame(mrows)
+    return out
+
+
+DEFAULT_CFG.update(_load_arenas(DEFAULT_CFG))

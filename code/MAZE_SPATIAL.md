@@ -86,6 +86,97 @@ All are byte-identical in `code/` and `mFC_data/code/`.
 Every population statistic is recomputed on the simulations: RSA 200, decoders 20, planes 10 per
 family.
 
+## 2026-10-12 — round 2, stage A: the final-numbers settings
+
+Plan: `~/.claude/plans/wiggly-finding-moth.md`, round 2, approved 2026-10-12.
+
+- **More null simulations.** Decoders and planes now run 100 simulations per null kind, up from 20 and
+  10. RSA stays at 200.
+  - Why: with 10 simulations, the planes null mean of PFC ah04 07-12 moved from 45.7 to 27.2 deg
+    between equivalent runs. One recday's null fraction moved by up to 0.45.
+  - Seeds are drawn per null kind for every index below the RSA count. So the old 20 and 10
+    simulations are the first 20 and 10 of the new 100, and every earlier number is unchanged. Gate
+    S1 shows this at max abs diff 0.
+  - `_check_null_settings` refuses settings that would re-seed later kinds.
+- **Claims are per mouse.**
+  - For each mouse, the statistic is averaged over its recdays. Its null is simulation i averaged over
+    the same recdays; simulations are independent between recdays, so this is a draw from the null of
+    the mean.
+  - One-sided p = (1 + #null on the far side) / (1 + n).
+  - A mouse is a hit when p <= 0.05 and its mean lies on the generalisation side of chance.
+  - Across mice: hits out of M, with the binomial tail at 0.05. An exact sign-flip test of the mean z
+    is reported when M >= 5.
+  - Functions: `maze_spatial.mouse_null_tests` and `group_tests`. Table: `maze_spatial_report.mouse_claims`.
+  - The earlier mean of per-recday null fractions is kept as `legacy_claim_counts`.
+  - Gate checks MS1 and MS2 cover calibration and power. 1000 null mice give 61 hits, binomial p 0.11.
+    A +1 SD effect in each of 5 recdays is detected in 98 % of mice by the new rule and 0 % by the
+    legacy rule.
+- **Modern nodes only.**
+  - Haswell and Broadwell nodes (`gpu-350`, `gpu-380`) differ at 1e-15, which flipped BIC field counts
+    in run 1617859bc6fd.
+  - `submit_spatial.sh` excludes them (`SPATIAL_EXCLUDE`), and `run_spatial.py` refuses them unless
+    `--allow-legacy-host` is passed.
+  - `run_spatial.py` also refuses to write a shard if the engine code changed during the job; loky
+    workers import the engine from disk.
+- **Provenance.** Shards record `slurm_job_id` and `null_timing` (seconds per analysis). Merges add a
+  long `null_sims` table: recday, mouse, null, analysis, sim, stat, value.
+
+## 2026-10-12 — round 2, stage B: is node/bridge coding behaviour at nodes?
+
+Nodes are where mice slow, turn and poke ports, and every node has a port. Speed was already matched.
+Stage B adds turning and the at-port state, as options inside engine v1. The defaults leave every earlier
+number unchanged, and the new null kind is seeded after the existing ones.
+
+**Turning**, `spatial_common.angular_speed_dps`:
+1. The input angle is the travel direction from XY, NaN at or below 2.5 cm/s. This is identical in all
+   three datasets; PFC has no HD.
+2. Single-bin spikes are dropped: a sample more than 90 deg from both neighbours, where the neighbours
+   agree within 45 deg.
+3. The angle is unwrapped within tracked segments. A gap over 4 bins (100 ms) splits a segment; shorter
+   gaps are interpolated.
+4. Gaussian smoothing, sigma 2 bins (50 ms), then the gradient. Values above 2000 deg/s become NaN.
+5. Only |w| is kept: the maze frames are mirrored relative to the arena, and PFC's handedness is unknown.
+
+Head turning, from HD in sessions passing the HD guard, is the mEC/LEC sensitivity run.
+
+**At-port state**, `maze_spatial.port_state`: on a node, Locs 1-9, below 2.5 cm/s for at least 0.3 s.
+Stops at the same node merge across gaps of up to 0.25 s. It is derived the same way in all three
+datasets.
+
+**Kinematic null**, kind `kinematic`, in the default RSA and decode kinds:
+- Each unit's mean count is computed per cell of 12 speed bins (5 cm/s) x 6 |turn| bins (0, 22.5, 45,
+  90, 180, 360 deg/s, plus undefined) x 2 port states.
+- A cell with under 5 s of dwell backs off to (speed, port), then speed, then the unit's mean.
+- Spikes are Poisson-simulated on the real track, as for the other nulls.
+
+**Turn matching**, option `speed_match.turn_edges_dps`, off by default:
+- Each location type gets the same speed x |turn| histogram. Samples without a turn rate are dropped.
+- Configs: `data/spatial/maze/config_turn_matched.json` (B2, travel turning) and
+  `config_turn_matched_head.json` (B2-head, mEC and LEC).
+- Both run RSA and decoders only, with kinds speed, place_shuffled and kinematic.
+
+**Gate K checks.** Final runs 3755059-61 passed 57/57 on each dataset's gate trajectory.
+
+| check | mEC | LEC | PFC | requirement |
+|---|---|---|---|---|
+| K1 median travel |turn| above 10 cm/s, corner / cardinal / bridge, deg/s | 53 / 29 / 29 | 61 / 50 / 35 | 69 / 46 / 37 | corner >= 1.5x bridge |
+| K1 corner / bridge ratio | 1.81 | 1.71 | 1.85 | |
+| K1 despiked / capped samples | 0 / 0 | 0 / 0 | 0.0031 / 0.0026 | < 0.005 each |
+| K2 goal arrivals with an at-port episode within 1 s | 0.908 of 412 | 0.986 of 776 | 0.984 of 1072 | >= 0.9 |
+| K3 collapsed turn edges equal speed-only matching | exact, 18476 samples | exact, 65900 | exact, 38872 | exact |
+| K4 turn, port and slow cells, p against the kinematic null: decode BA / RSA beta | 0.381 / 0.619 | 0.333 / 0.762 | 0.810 / 0.238 | > 0.05 |
+| K4 the same cells against the speed null (reported): decode / RSA | 0.048 / 0.238 | 0.048 / 0.048 | 0.048 / 0.048 | shows what the kinematic null adds |
+| K5 node and bridge template cells, p against the kinematic null: decode / RSA | 0.048 / 0.048 | 0.048 / 0.048 | 0.048 / 0.048 | <= 0.05 |
+| K5 real vs kinematic null p95: decode BA / RSA beta | 0.949 vs 0.527 / 0.897 vs 0.188 | 0.959 vs 0.584 / 0.896 vs 0.341 | 0.962 vs 0.536 / 0.885 vs 0.254 | |
+| K6 turn cells, corner/cardinal BA: speed-matched -> speed x turn matched | 0.59 -> 0.43 | untestable: turn-only AUC 0.531 | 0.57 -> 0.49 | drop >= 0.05 where the turn-only AUC is >= 0.58 or <= 0.42 |
+| K7 guards | raise | raise | raise; 'head' raises | raise |
+
+- **K1.** It first asked for 2x, a number written before any data, and failed mEC and PFC (runs 3752832, 3752834). It now asks for 1.5x.
+  - Head turning is high everywhere in mEC: corner 103 deg/s, bridge 66. Head scanning on bridges is why travel turning is the primary signal.
+- **K5.** Its decode term had 10 simulations, so p could not go below 1/11 = 0.091. It now runs 20 in the quick gate and 40 in the full; the p values above are the floor of 20.
+- **K4.** Against the speed null, the turn, port and slow cells beat every simulation in 5 of 6 tests. The speed null would pass them; the kinematic null holds them in.
+- **K6, LEC.** On the LEC gate trajectory, turning barely separates corners from cardinals, so turn matching has nothing to remove there.
+
 ## Why the place-code null is needed (2026-10-09 measurements)
 
 | measurement | value |
@@ -281,10 +372,144 @@ Against the bar:
   same-type error share of the thesis does not clear the bar in any mouse.
 - The geodesic-side contrast clears it in LEC 2/5 and PFC 3/7.
 
+### 2026-10-12 — round 2, stage A: run `b705159d8440`, the final maze numbers
+
+**The run.**
+- 61/61 jobs exited 0, all on modern nodes (`gpu-sr670`, `gpu-sr675`, `gpu-xd670`).
+- One config hash, `b70515e621`, and one code hash, `9d84400a3a`, in all three tables.
+- Gates 3751698-700 passed 48/48 on the mEC, LEC and PFC trajectories.
+- Runtime at 32 CPUs: most recdays 36-45 min; the largest (ah04, ah08, ah10) over 1 h.
+- Report: `python code/maze_spatial_report.py --tag b705159d8440`.
+
+**Equivalence.** `maze_spatial_report.shard_equivalence`, against each recday's modern-node reference
+run:
+
+| dataset | reference | recdays | values compared | max abs diff | NaN mismatches | missing |
+|---|---|---|---|---|---|---|
+| mEC | 1617859bc6fd | 12 | 39.8 M | 0 | 0 | 0 |
+| LEC | 1617859bc6fd | 25 | 96.9 M | 0 | 0 | 0 |
+| PFC | 1617859bc6fd (ab03 x3) | 3 | 10.8 M | 0 | 0 | 0 |
+| PFC | 21c552de331e | 21 | 59.9 M | 0 | 0 | 0 |
+
+- Every number of the earlier runs is unchanged; the old simulations are the first 20 / 10 of the new 100.
+- Once off the Haswell/Broadwell nodes, PFC reproduces its earlier modern-node run bit for bit. This
+  confirms that the 1617859bc6fd differences were hardware.
+
+**Mouse-level claims.**
+- Each count is mice with p <= 0.05 on the generalisation side of chance. The per-mouse null is the
+  mean over the mouse's recdays of simulation i.
+- p_binomial is the probability of at least that many hits if each mouse had a 5 % false-positive
+  rate.
+- Field-shuffle null, the bar:
+
+| statistic | mEC, 2 mice | LEC, 5 mice | PFC, 7 mice | legacy count, same null: mEC / LEC / PFC |
+|---|---|---|---|---|
+| RSA node-degree beta, E+D, 9 nodes | 0 | 5, p_binomial 3e-7 | 5: ab03, ah04, ah07, me10, me11; p 6e-6 | 0 / 3 / 2 |
+| node/bridge balanced accuracy | 0 (BA 0.45-0.48) | 4: ah08, ly05, ly06, ly07; p 3e-5 | 7; p 8e-10 | 0 / 4 / 7 |
+| RSA node/bridge beta, E+NB, 21 locations | 2: bp01, bp04; p 0.0025 | 5; p 3e-7 | 7; p 8e-10 | not in the legacy table |
+| corner/cardinal balanced accuracy | 1: bp04, BA 0.50, at chance | 0 (BA 0.20-0.31, below chance) | 4: ah04, ah07, me08, me11; p 2e-4 | 1 / 0 / 3 |
+| same-type share of location-decoder errors | 0 | 0 (share 0.24-0.32) | 4: ah04, ah07, me08, me11; p 2e-4 | 0 / 0 / 1 |
+| E/G diagnostic contrast, 21 locations | 0 | 5; p 3e-7 | 3: ab03, ah04, ah07; p 0.004 | 0 / 2 / 3 |
+
+- **More power.** The mouse-level test finds more than the legacy mean of per-recday fractions because
+  averaging over recdays shrinks the null of the mean. Gate MS2 measured this: 98 % against 0 % for a
+  +1 SD per-recday effect. Its false-positive rate stays at 5 % (MS1).
+- **Fitted and random-centre nulls**, which sit beside the bar in the report:
+  - PFC node degree: 2/7 and 4/7.
+  - LEC node degree: 4/5 and 4/5.
+  - Node/bridge is unchanged across all three nulls.
+- **Not yet established.** Node/bridge coding stands against every place-code null but not yet against
+  behaviour at nodes. Nodes are where mice slow, turn and poke. Stage B adds the kinematic null and turn
+  matching.
+
+### 2026-10-12, later — round 2, stage B: node/bridge coding against behaviour at nodes
+
+Runs, 159 jobs, all exit 0, all on modern nodes (`gpu-sr670`, `gpu-sr675`, `gpu-xd670`), 1 min to 2 h:
+
+| run | tag | config hash | recdays |
+|---|---|---|---|
+| B1, defaults with the kinematic null | `53934257354e` | `53934241d3` | mEC 12, LEC 25, PFC 24 |
+| B2, speed x travel-turn matched | `05fd7f57354e` | `05fd7f412e` | mEC 12, LEC 25, PFC 24 |
+| B2-head, speed x head-turn matched | `09482657354e` | `0948262c95` | mEC 12, LEC 25 |
+
+All three share code hash `57354ee2f3`. Reports: `maze_spatial_report.py --tag <tag>`; B2-head with
+`--datasets mec lec`.
+
+**B1 changes no earlier number.** Against stage A (`b705159d8440`), shard by shard:
+
+| dataset | recdays | values compared | max abs diff | NaN mismatches | missing |
+|---|---|---|---|---|---|
+| mEC | 12 | 40.5 M | 0 | 0 | 0 |
+| LEC | 25 | 98.4 M | 0 | 0 | 0 |
+| PFC | 24 | 85.4 M | 0 | 0 | 0 |
+
+The only additions are the kinematic null's rows: 324 in mEC, 675 in LEC, 648 in PFC.
+
+**Mouse-level claims.** Each cell is the number of mice with p <= 0.05 on the generalisation side, against
+the mean-over-recdays null. The kinematic null simulates each unit from its own speed x |turn| x at-port
+rates.
+
+| statistic | dataset | field shuffle | kinematic, B1 | kinematic, B2 travel-turn matched | kinematic, B2-head |
+|---|---|---|---|---|---|
+| node/bridge decoding BA | PFC | 7/7 | 7/7 | 7/7 | |
+| | LEC | 4/5 | 3/5: ah08, ly05, ly07 | 4/5: ah08, ah10, ly05, ly07 | 4/5: ah08, ly05, ly06, ly07 |
+| | mEC | 0/2 | 0/2 | 0/2 | 0/2 |
+| RSA node/bridge beta, E+NB, 21 locations | PFC | 7/7 | 5/7: ah03, ah04, me08, me10, me11 | 5/7 | |
+| | LEC | 5/5 | 2/5: ah08, ly07 | 2/5 | 2/5 |
+| | mEC | 2/2 | 0/2 | 0/2 | 0/2 |
+| RSA node-degree beta, E+D, 9 nodes | PFC | 5/7 | 6/7 | 6/7 | |
+| | LEC | 5/5 | 5/5 | 5/5 | 4/5 |
+| corner/cardinal BA | PFC | 4/7 | 4/7 | 4/7 | |
+| | LEC | 0/5, BA 0.20-0.31 | 0/5 | 0/5 | 0/5 |
+| same-type share of decoder errors | PFC | 4/7 | 4/7 | 3/7 | |
+| E/G diagnostic contrast | PFC | 3/7 | 3/7 | 2/7 | |
+| | LEC | 5/5 | 4/5 | 4/5 | 3/5 |
+
+- Field-shuffle counts are from B1. B2's field-shuffle counts differ from them by at most one mouse,
+  e.g. LEC node/bridge BA 5/5.
+- The speed null alone gives counts between the field shuffle and the kinematic null. For example,
+  LEC RSA node/bridge is 2/5 against speed and 2/5 against the kinematic null.
+
+What this shows:
+- **PFC.** Node/bridge decoding is beyond the kinematic null in 7/7 mice, with and without turn matching.
+  The RSA node/bridge beta holds in 5/7, node degree in 6/7, and corner/cardinal decoding in 4/7. Speed,
+  turning and pausing at ports do not explain PFC's node/bridge or node-type coding.
+- **LEC.** Node/bridge decoding holds in 3-4 of 5 mice; the RSA node/bridge beta falls from 5/5 to 2/5.
+  Part of LEC's node/bridge structure is behaviour at nodes. The speed-matched decoder keeps most of it.
+  Node degree holds in 4-5/5.
+- **mEC.** Its one stage A claim, RSA node/bridge 2/2, falls to 0/2. With 2 informative mice, mEC maze
+  structure beyond behaviour is not shown.
+
+**The at-port state over all production recdays** (2026-10-13, from the B1 shards). The gate's K2 used one
+recday per dataset; across recdays, the share of goal arrivals with an at-port episode within 1 s is:
+
+| dataset | recdays | range | median | below 0.9 |
+|---|---|---|---|---|
+| LEC | 25 | 0.964-0.998 | 0.988 | 0 |
+| mEC | 12 | 0.882-0.975 | 0.902 | 6 |
+| PFC | 24 | 0.777-0.984 | 0.913 | 11 |
+
+On some PFC and mEC recdays the mice reach the goal without a 0.3 s stop below 2.5 cm/s, so the port term
+misses up to 22 % of reward visits. A kinematic null that misses reward stops is weaker, which favours hits.
+The PFC node/bridge result would need a reward-visit term to rule this out.
+
+**Figures** (2026-10-13), `data/spatial/figures/round2/`, PDF + PNG, from `code/spatial_round2_figures.py`:
+
+| file | shows |
+|---|---|
+| `B1_maze_claims_{mec,lec,pfc}` | per mouse, the real mean of each of the six claims against its field-shuffle, kinematic and speed nulls; * marks mouse p <= 0.05 |
+| `B2_maze_scorecard` | mice beyond each null, per claim and dataset, for B1, B2 and B2-head |
+| `B3_maze_turning_and_ports` | median travel and head turning by location type per recday, and the at-port coverage above |
+
+- The stage A figure is in `maze_spatial.executed.v1.ipynb`: real value against the field-shuffle null per mouse.
+- Per-unit maze galleries are in `<dataset root>/data/spatial/maze/21c552de331e/figures/`. Later runs leave
+  every unit's maps and classes unchanged, so they stand for runs A and B.
+
 ## Not established, maze
 
-- Whether node/bridge decoding beyond both nulls is place type or behaviour at nodes, such as
-  pauses, turns and decisions. Speed is matched; other behaviour is not.
+- Whether node/bridge decoding is place type or behaviour at nodes beyond speed, turning and port
+  stops: decisions and reward expectation are not modelled. Stage B rules out the three measured
+  behaviours for PFC, and in part for LEC.
 - Euclidean against geodesic coding. The two model RDMs correlate at 0.95, and the gate's E vs G
   check needed 5 population draws to be reliable (see Synthetic gate).
 - Power of the fitted place-code null: on the LEC trajectory, planted generalised cells did not clear
@@ -308,3 +533,15 @@ Against the bar:
     python code/run_spatial.py --engine maze --dataset mec --merge --expect-recdays 12 --run-tag 21c552de331e   # lec 25; pfc 24 from mFC_data/code
     python code/maze_spatial_report.py --tag 21c552de331e
     sbatch --job-name=sp_maze_gallery --partition=cpu_backfill --cpus-per-task=2 sbatch_files/spatial.sbatch code/spatial_galleries.py --engine maze --tag 21c552de331e --dataset mec lec pfc
+
+2026-10-12, round 2. Every job excludes the Haswell/Broadwell nodes, which `submit_spatial.sh` does by default.
+
+    # gates, one per dataset (PFC from mFC_data/code)
+    sbatch --job-name=sp_mz_syn_mec --partition=cpu_backfill --exclude='gpu-350-[01-05],gpu-380-[10-18]' --cpus-per-task=32 --mem=96G sbatch_files/spatial.sbatch code/maze_spatial_synthetics.py --dataset mec --quick
+    # B1 (defaults, with the kinematic null), B2 (speed x travel-turn matched), B2-head (mEC, LEC)
+    SBATCH_EXTRA="--cpus-per-task=32 --mem=96G --time=1-00:00" bash sbatch_files/submit_spatial.sh maze mec <recdays>
+    SPATIAL_CONFIG=$PWD/data/spatial/maze/config_turn_matched.json SBATCH_EXTRA=... bash sbatch_files/submit_spatial.sh maze mec <recdays>
+    SPATIAL_CONFIG=$PWD/data/spatial/maze/config_turn_matched_head.json SBATCH_EXTRA=... bash sbatch_files/submit_spatial.sh maze mec <recdays>
+    python code/maze_spatial_report.py --tag 53934257354e --equivalent-to b705159d8440
+    python code/maze_spatial_report.py --tag 05fd7f57354e
+    python code/maze_spatial_report.py --tag 09482657354e --datasets mec lec

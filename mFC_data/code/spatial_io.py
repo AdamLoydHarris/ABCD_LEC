@@ -136,11 +136,13 @@ def _view(dataset: str, recday: str, s: int, sd: dict, aff) -> dict:
     if dataset == 'pfc' and xy is not None:
         xy = _pfc_cm(recday, s, xy, aff)
     hd = sd.get('HD_raw')
+    hd_ear = None
     if hd is not None:
         hd = np.asarray(hd, float)
         if hd.ndim != 2 or hd.shape[1] != 2:
             # The GLM once flattened (T, 2) HD; every HD result before the fix was noise.
             raise ValueError(f'{recday} s{s}: HD_raw shape {hd.shape}, expected (T, 2)')
+        hd_ear = np.deg2rad(hd[:, 1])          # left-to-right ear axis: tells a mirrored frame (maze-OF link)
         hd = np.deg2rad(hd[:, 0])              # back2mid; column 1 is the ear axis (+90 deg)
     locs = sd.get('Locs_raw')
     locs = None if locs is None else _locs_int(locs)
@@ -149,7 +151,7 @@ def _view(dataset: str, recday: str, s: int, sd: dict, aff) -> dict:
     stype = sd.get('session_type', 'ABCD' if dataset == 'pfc' else None)
     task = sd.get('Task')
     task = None if task is None else tuple(int(x) for x in np.asarray(task).ravel()[:4])
-    return dict(recday=recday, session=s, dataset=dataset, counts=counts, T_neural=T, xy=xy, hd=hd,
+    return dict(recday=recday, session=s, dataset=dataset, counts=counts, T_neural=T, xy=xy, hd=hd, hd_ear=hd_ear,
                 locs=locs, trial_times=tt, session_type=stype, task=task,
                 arena=sd.get('arena'), objects=sd.get('objects'))
 
@@ -266,6 +268,42 @@ def _duplicate_partners(sa, ids: np.ndarray, sim_thr: float = 0.9, sync_ratio: f
     return out
 
 
+def versions(path: str) -> list:
+    """The base file, then its .v1, .v2, ... versions in write order (those that exist)."""
+    import glob
+    base, ext = os.path.splitext(path)
+    found = [(0, path)] if os.path.exists(path) else []
+    for f in glob.glob(f'{base}.v*{ext}'):
+        tail = f[len(base) + 2:-len(ext)] if ext else f[len(base) + 2:]
+        if tail.isdigit():
+            found.append((int(tail), f))
+    return [f for _, f in sorted(found)]
+
+
+_WALL_QC = {}
+
+
+def _wall_qc(dataset: str):
+    """Every version of the arena wall QC table, rows without a wall RMS dropped, the latest row per
+    (recday, session). The newest version alone held 4 of 20 LEC sessions (an ah10 s9 add-on), so
+    reading only it left 16 sessions without wall exclusions."""
+    if dataset not in _WALL_QC:
+        import recday_registry as rr
+        root = str(rr.DATASETS[dataset]['root'])
+        files = versions(os.path.join(root, 'data', 'preprocessed', 'sleap', f'openfield_to_xy_qc_{dataset}_v2.csv'))
+        if not files:
+            raise FileNotFoundError(f'no wall QC table for {dataset}')
+        parts = []
+        for i, f in enumerate(files):
+            q = pd.read_csv(f)
+            q['_version'] = i
+            parts.append(q)
+        q = pd.concat(parts, ignore_index=True)
+        q = q[q['wall_rms_cm'].notna() & (q['wall_rms_cm'].astype(str).str.startswith('{'))]
+        _WALL_QC[dataset] = q.sort_values('_version', kind='stable').groupby(['recday', 'session']).tail(1)
+    return _WALL_QC[dataset]
+
+
 def wall_exclusions(dataset: str, recday: str, session: int, max_rms_cm: float) -> dict:
     """{wall: rms_cm} of walls whose occupancy edge bends by more than `max_rms_cm` (excluded from CM).
 
@@ -273,10 +311,7 @@ def wall_exclusions(dataset: str, recday: str, session: int, max_rms_cm: float) 
     top y=side (y-down frame, so 'bottom' is the image top)."""
     if dataset == 'pfc':
         return {}
-    import recday_registry as rr
-    root = str(rr.DATASETS[dataset]['root'])
-    path = latest_versioned(os.path.join(root, 'data', 'preprocessed', 'sleap', f'openfield_to_xy_qc_{dataset}_v2.csv'))
-    qc = pd.read_csv(path)
+    qc = _wall_qc(dataset)
     row = qc[(qc['recday'] == recday) & (qc['session'] == session)]
     if row.empty:
         return {}
