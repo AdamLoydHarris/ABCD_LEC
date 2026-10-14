@@ -66,6 +66,11 @@ BYTE_PAIRS = [
     ('code/run_event_kernels.py', 'mFC_data/code/run_event_kernels.py'),
     ('code/run_population_drift.py', 'mFC_data/code/run_population_drift.py'),
     ('code/event_kernels_plots.py', 'mFC_data/code/event_kernels_plots.py'),
+    # Added 2026-10-14 with M3 part 2 (Tsao's stepwise table, Kanter's single-unit timescales, the
+    # ramp test): both datasets' shards come from these files.
+    ('code/unit_timescales.py', 'mFC_data/code/unit_timescales.py'),
+    ('code/unit_timescales_synthetics.py', 'mFC_data/code/unit_timescales_synthetics.py'),
+    ('code/run_unit_timescales.py', 'mFC_data/code/run_unit_timescales.py'),
     # Added 2026-10-09 with the spatial pipelines: one pipeline for mEC, LEC and PFC (user rule), so
     # every module and its gate must be the same bytes in both trees.
     ('code/spatial_common.py', 'mFC_data/code/spatial_common.py'),

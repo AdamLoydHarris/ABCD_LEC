@@ -6,6 +6,144 @@ from other sessions (locked clock alone), and whether the population trajectory 
 events. Plan, decisions and code map: `docs/handoff/EVENT_KERNELS_HANDOFF.md`. Per-neuron kernels:
 `code/EVENT_KERNELS.md`.
 
+## 2026-10-14 — M3 part 2: Kanter part 2 (boundaries, coding axes, Fano removal), and the ramp test
+
+The ramp test itself is in `EVENT_KERNELS.md`, same date. It answers the caution below. M2's
+held-out first-minute decoding is mostly the slow entry ramps' early slope: dividing out held-out
+ramps with tau >= 240 s removes 55% of the advantage in LEC, against 62% for the whole shape-free
+kernel. The rest sits in units Stage 1 did not call entry-locked.
+
+**Outcome.**
+
+- **Rewards are boundaries in Kanter's sense, but each is stamped by the same ensemble every loop,
+  not a new one.**
+  - Windows run from -3 to +4 s around each arrival at a reward, per reward type, in 1 s bins.
+  - The population shift falls on the change into the 0-1 s bin, in both datasets.
+  - Units prefer that transition at 0.29 in LEC (0.24-0.35 over 5 mice) and 0.37 in PFC
+    (0.28-0.42, 7 mice), against chance 0.167.
+  - Units modulated there correlate across loops more than other units do. Kanter found the
+    opposite.
+
+    | | up-modulated | down-modulated | other units, 25-unit sets |
+    |---|---|---|---|
+    | LEC PV correlation across loops | 0.33 (0.24-0.44) | 0.42 (0.37-0.51) | 0.20 (0.16-0.24) |
+    | PFC | 0.53 (0.33-0.83) | 0.50 (0.38-0.72) | 0.18 (0.00-0.32) |
+
+  - Down-modulated units outnumber up-modulated ones per session: 19.5 vs 12.8 in LEC, 13.1 vs
+    6.4 in PFC. Most reward-locked units dip after the reward (M2, M3).
+- **Loop number decodes from the boundary windows, but drift alone does that.**
+  - Errors are 4.2 loops in LEC and 5.7 in PFC, against shuffles of 6.5 and 8.2.
+  - Planted drift without boundaries decodes it to within 0.2-0.3 loops (gate P8). So this is not
+    evidence of event time stamps.
+- **The within-leg axis and the session axis are stable and near-orthogonal, as Kanter found, but
+  not fully orthogonal.**
+
+  | | leg vs session offset | stability, leg / session | stable sessions |
+  |---|---|---|---|
+  | LEC, 20-unit draws (5 mice) | 71.7° (70.6-72.7) | 7.0° / 10.2° | 0.90 |
+  | LEC, all units | 78.4° (73.1-81.4) | 9.0° / 14.3° | 0.81 |
+  | PFC, 20-unit draws (6 mice) | 69.8° (67.2-71.7) | 7.0° / 10.3° | 0.90 |
+  | PFC, all units (7 mice) | 67.6° (43.0-81.7) | 7.5° / 8.9° | 0.88 |
+
+  - A session counts as stable when both leave-one-out angles are <= 30°.
+  - Noise axes read 81-85°, with stabilities of 50-68° (gate P15). So the real axes are genuine
+    coding axes that share some direction.
+  - The loop axis behaves like the leg axis: loop vs session is 71.4° in LEC and 71.3° in PFC at
+    20 units.
+  - Per reward type, Kanter's place-bound analog, the leg axis is less stable: 20-25° in both.
+  - Multiplexing, units in the top quarter of both axes, is 0.083-0.11 against chance 0.0625.
+- **Part of the drift is carried by the most variable units.**
+  - Drift growth after removing the top 25% of units by Fano, over that after removing a random
+    25%: LEC 0.51-0.62 per mouse, PFC 0.55-0.70.
+  - Planted drift in 25% of units gives 0.00, and drift in every unit 0.77-0.80 (gates P12/P13).
+    The real values lie between.
+
+### What was done
+
+- **`population_drift.py` (+ mirror), new functions only:**
+  - `reward_legs`, `boundary_windows`, `window_speed`, `boundary_responses`, `pv_correlation`,
+    `boundary_ensembles`, `trial_number_decoding`;
+  - `coding_axis` (PCA to 50% of the variance, then LDA; the loadings of the PC contributing most
+    to LD1, as |weight| x PC sd), `axis_offset`, `axis_stability` (up to 30 random leave-one-out
+    groups), `multiplexing`;
+  - `log_fano`, `fano_removal`.
+- **`population_drift_synthetics.py` (+ mirror):** `planted_part2` with populations
+  `fixed_boundary`, `leg_drift`, `shared_axis` and `subset_drift`. `planted` is unchanged.
+- **`run_population_drift.py` (+ mirror):** `--part2` per recday and `--part2 --merge`, with M2's
+  unit sets. Boundaries, decoding and Fano removal run on `all` and `region_full`; axes also on the
+  20-unit draws. `--gate-part2` is new.
+- **Data:** sessions with >= 5 trials; every unit and recday. Tables and figures read the `all`
+  set only where a recday has >= 20 units. PFC me10_20122021_21122021 has one unit, and its loop
+  decoding did worse than its shuffle.
+- **Runs:** 25 + 25 jobs, every one `EXIT=0`.
+
+### Gates (final runs 3766906 LEC and 3766908 PFC, `EXIT=0`)
+
+| row | planted | LEC | PFC |
+|---|---|---|---|
+| P5 | fixed ensemble: shift preferred / PV correlation of up units | 0.394 / 0.863 | 0.351 / 0.962 |
+| P5 | window speed peaks at the burst's onset or offset | 3 | 2 |
+| P6 | a new 20% at each reward: PV correlation of up units | -0.012 | -0.019 |
+| P7 | noise: shift preferred, chance 0.167 | 0.168 | 0.167 |
+| P8 | drift: loop-number error / shuffle (reported) | 0.17 / 8.17 | 0.27 / 10.11 |
+| P9 | noise: loop-number error / shuffle | 8.18 / 8.13 | 9.86 / 9.97 |
+| P10 | leg-locked plus independent drift: offset / stabilities | 76.1 / 2.8 / 13.2 | 70.5 / 3.8 / 14.2 |
+| P11 | one shared axis: offset | 19.3 | 19.3 |
+| P12 | drift in 25% of units: top-25% / random removal | 0.00 | -0.01 |
+| P13 | drift in every unit: same ratio | 0.80 | 0.77 |
+| P14 | noise: median log Fano | -0.009 | -0.019 |
+| P15 | noise fails P10's criterion: offset / stabilities | 84.6 / 68.3 / 68.0 | 81.2 / 50.4 / 63.2 |
+
+**Four rows were revised.** One before any run, three after the first full runs (3766749,
+3766752). The reasons are in the synthetics module's docstring.
+
+0. **P5, before any run:** with 20% of units bursting, the expected preference for the shift is
+   0.2 + 0.8/6 = 2x chance, so the planned 3x could not pass. Now 50% of units are planted, and
+   2x is required.
+1. **P5:** a 1 s burst has equal onset and offset jumps, so the speed peak may fall on either.
+2. **P10/P15:** noise met "offset above both stabilities". In 60 dimensions random axes are
+   near-orthogonal and unstable, so the criterion now requires both stabilities <= 30°. That is
+   twice Kanter's ~15°.
+3. **P13:** ranking by realised Fano picks each session's largest drift excursions even when every
+   unit drifts. The test is the contrast with P12.
+
+The M2 runner gate (`--gate`, 3766750/53) was rerun after these edits:
+
+- every kNN, chance and acceleration value equals the M1 reference exactly;
+- distance curves differ by 1.4e-17 to 5.6e-17;
+- the code M2 uses is byte-identical, since the edits only append functions. So this is
+  node-dependent BLAS rounding, which M2 saw at 6.9e-18.
+
+### What was NOT established
+
+- **Why reward ensembles repeat here but not in Kanter's data.**
+  - Each ABCD reward type sits at one place, and Stage 1 found reward kernels locked across
+    sessions.
+  - Kanter's single figure-eight reward differs in timing and in how often it is visited.
+  - Place and kinematics were not regressed out of the boundary windows.
+- **LEC vs PFC.** No contrast was tested. PFC's per-mouse ranges are wide.
+- **Time stamps of individual events** beyond drift. The decoding measure cannot separate them
+  (P8).
+- **Regions** for the population measures. The region sets are in the merge but not analysed.
+
+### Commands
+
+```
+python code/check_mirror_parity.py                                          # must exit 0
+for ds in lec pfc; do t=code; [ $ds = pfc ] && t=mFC_data/code
+  sbatch --time=0-02:00 --job-name=pd2_gate_$ds sbatch_files/event_kernels.sbatch $t/run_population_drift.py --gate-part2 --dataset $ds --min-trials 5
+  sbatch --time=0-01:30 --job-name=pd_rgate_$ds sbatch_files/event_kernels.sbatch $t/run_population_drift.py --gate --dataset $ds
+done
+bash sbatch_files/submit_event_kernels.sh --dataset lec --runner drift2 --min-trials 5 --after <gate job>
+bash sbatch_files/submit_event_kernels.sh --dataset pfc --runner drift2 --min-trials 5 --after <gate job>
+python code/run_population_drift.py --dataset lec --part2 --merge --min-trials 5
+python mFC_data/code/run_population_drift.py --dataset pfc --part2 --merge --min-trials 5
+```
+
+Outputs: shards in `data/population_drift/part2/shards/<ds>_mt5/`; merged
+`data/population_drift/part2/part2_<ds>_mt5.pkl` with CSVs; figures F26-F28 in
+`data/figures/population_drift/M3_part2/`.
+
 ## 2026-10-12, night — a caution on the M2 reading below
 
 M2 read the first-minute concentration of held-out decoding as "mostly an entry transient".

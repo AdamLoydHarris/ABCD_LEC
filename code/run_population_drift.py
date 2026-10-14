@@ -3,6 +3,9 @@
     python code/run_population_drift.py --dataset lec --recday ah10_20250616_20250617
     python code/run_population_drift.py --dataset lec --merge [--min-trials 10]
     sbatch --cpus-per-task=8 ... run_population_drift.py --dataset lec --gate   # planted populations
+    python code/run_population_drift.py --dataset lec --part2 --recday <rd> --min-trials 5    # M3 part 2
+    python code/run_population_drift.py --dataset lec --part2 --merge --min-trials 5
+    python code/run_population_drift.py --dataset lec --gate-part2               # P5-P15 on planted populations
 
 Per recday: the analysis sessions (the Stage 1 rule) with counts from recording start. Unit sets:
 all units; 20 random units (20 draws); per region, the units >= 50 um from a region boundary, all
@@ -13,6 +16,12 @@ session, with confusion matrices, and trajectory acceleration (1 s bins) at the 
 reward A, every reward and synchrony onsets. Entry is bin 0 and has no pre-window, so no
 acceleration. Shards and merge as `run_event_kernels` (same refusals). The gate needs 8 CPUs, as
 the M1 reference: at 2 BLAS threads two distance curves differed from it by 6.9e-18 (exact at 8).
+
+M3 part 2 (2026-10-14, `--part2`): Kanter's boundary ensembles at each reward type (1 s windows
+-3..+4 s; preferred transition, PV correlation of up / down units vs other units, loop-number
+decoding), coding axes (session: 1-min epochs of 10 s bins; leg: the 6 s before each reward in legs
+>= 8 s, pooled and per reward type; loop: 1 s bins since A, to the fastest loop) with their angles,
+leave-one-out stability and multiplexing, and drift growth without the top 25% of units by Fano.
 
 This file is byte-identical in `code/` and `mFC_data/code/`.
 """
@@ -281,6 +290,212 @@ def gate(dataset: str, seed: int = 0) -> pd.DataFrame:
     return out
 
 
+# ---------------------------------------------------------------------------
+# M3 part 2 (2026-10-14): Kanter part 2
+# ---------------------------------------------------------------------------
+
+PART2_DIR = os.path.join(DRIFT_DIR, 'part2')
+STABLE_DEG = 30.0              # an axis is a coding axis only if leave-one-out moves it <= 30 deg (Kanter ~15); noise
+                               # at 60 units reads offset 81-85 deg with stabilities 50-68 deg (gates 3766749/52)
+PART2 = dict(leg_window_s=6, min_leg_s=8.0, max_leave=30, n_other=25, n_other_draws=50, fano_frac=0.25,
+             fano_draws=50, fano_bin_s=0.5, axes_sets=('all', 'all_n20', 'region_full', 'region'),
+             boundary_sets=('all', 'region_full'), type_axes_sets=('all', 'region_full'))
+
+
+def part2_stamp(dataset, min_trials, seed, synthetic=None) -> dict:
+    return {**stamp(dataset, min_trials, seed, synthetic), 'runner': 'run_population_drift.part2',
+            'part2': {k: list(v) if isinstance(v, tuple) else v for k, v in PART2.items()},
+            'boundary_window_s': [pdft.BOUNDARY_PRE_S, pdft.BOUNDARY_POST_S],
+            'planted_part2': list(pds.PART2_KINDS) if synthetic else None}
+
+
+def _axis_samples(W: np.ndarray):
+    """(X soft-normalised (samples, units), y = bin within the window, groups = window) from
+    (windows, units, bins)."""
+    n, u, b = W.shape
+    X = pdft.soft_normalize(W.transpose(1, 0, 2).reshape(u, n * b)).T
+    return X, np.tile(np.arange(b), n), np.repeat(np.arange(n), b)
+
+
+def session_axes(C: np.ndarray, sess: dict, legs: list, per_type: bool, seed) -> list:
+    """Kanter's coding axes for one unit set and session: session (1-min epochs of 10 s bins), leg
+    (pooled, and per reward type when `per_type`) and loop; each pair's offset, both stabilities
+    and multiplexing."""
+    k = int(round(1.0 / pdft.BIN_S))
+    Xs = pdft.soft_normalize(pdft.rebin(C, KNN['bin_s'])).T
+    ys = pdft.epoch_labels(len(Xs), KNN['bin_s'], KNN['epoch_s'])
+    keep = ys < KNN['max_epochs']
+    axes = {'session': pdft.axis_stability(Xs[keep], ys[keep], ys[keep], PART2['max_leave'], seed)}
+    w, ml = PART2['leg_window_s'], PART2['min_leg_s']
+    for name, rt in [('leg', None)] + ([(f'leg{"ABCD"[r]}', r) for r in range(4)] if per_type else []):
+        ev = [a for a, r, prev in legs if (rt is None or r == rt) and (a - prev) * pdft.BIN_S >= ml]
+        W = pdft.boundary_windows(C, ev, pre_s=w, post_s=0)
+        axes[name] = pdft.axis_stability(*_axis_samples(W), PART2['max_leave'], seed) if len(W) >= 3 else (None, np.nan)
+    tt = sess['trial_times']
+    dur = (tt[:, 4] - tt[:, 0]) * pdft.BIN_S if len(tt) else np.zeros(0)
+    L = int(np.floor(dur.min())) if len(dur) else 0
+    W = pdft.boundary_windows(C, tt[:, 0], pre_s=0, post_s=L) if L >= 2 else np.zeros((0, C.shape[0], 0))
+    axes['loop'] = pdft.axis_stability(*_axis_samples(W), PART2['max_leave'], seed) if len(W) >= 3 else (None, np.nan)
+    rows = []
+    for a, b in [('leg', 'session'), ('loop', 'session'), ('leg', 'loop')] + \
+            ([(f'leg{x}', 'session') for x in 'ABCD'] if per_type else []):
+        (La, sa), (Lb, sb) = axes[a], axes[b]
+        rows.append(dict(pair=f'{a}_{b}', offset=pdft.axis_offset(La, Lb), stab_a=sa, stab_b=sb,
+                         multiplex=pdft.multiplexing(La, Lb), loop_s=L if 'loop' in (a, b) else np.nan))
+    return rows
+
+
+def measure_part2(counts: list, sessions: list, units: pd.DataFrame, seed: int) -> dict:
+    """Every part-2 measure, per unit set and session (sets as `unit_sets`, restricted per measure)."""
+    legs = [pdft.reward_legs(s) for s in sessions]
+    fano = []
+    for i, c in enumerate(counts):
+        c05 = pdft.rebin(c, PART2['fano_bin_s'])
+        fano.append(np.array([pdft.log_fano(c05[u], seed=[seed, u, i]) for u in range(len(c05))]))
+    boundary, decoding, axes, fano_rm, speeds = [], [], [], [], []
+    for name, g, d, idx in unit_sets(units, seed):
+        base = dict(set=name, group=g, draw=d, n_units=len(idx))
+        for i, s in enumerate(sessions):
+            C = counts[i][idx]
+            if name in PART2['boundary_sets']:
+                for r in range(4):
+                    W = pdft.boundary_windows(C, [a for a, rr, _ in legs[i] if rr == r])
+                    if len(W) < 3:
+                        continue
+                    speeds.append(dict(base, order=i, rtype=r, n_events=len(W), speed=pdft.window_speed(W)))
+                    boundary += [dict(base, order=i, rtype=r, n_events=len(W), **row) for row in
+                                 pdft.boundary_ensembles(W, PART2['n_other'], PART2['n_other_draws'], seed=[seed, i, r])]
+                    decoding.append(dict(base, order=i, rtype=r, **pdft.trial_number_decoding(W, seed=[seed, i, r])))
+                fano_rm.append(dict(base, order=i, **pdft.fano_removal(C, fano[i][idx], PART2['fano_frac'],
+                                                                         PART2['fano_draws'], seed=[seed, i])))
+            if name in PART2['axes_sets']:
+                axes += [dict(base, order=i, **row) for row in
+                         session_axes(C, s, legs[i], name in PART2['type_axes_sets'], seed=[seed, i])]
+    return dict(boundary=pd.DataFrame(boundary), decoding=pd.DataFrame(decoding), axes=pd.DataFrame(axes),
+                fano_removal=pd.DataFrame(fano_rm), speeds=speeds, fano=fano)
+
+
+def fit_recday_part2(dataset, recday, *, min_trials, seed, synthetic=None) -> dict:
+    t0 = time.time()
+    rec = ek.load_recday(recday, dataset)
+    sessions = ek.analysis_sessions(rec, min_trials)
+    if synthetic:
+        rng = np.random.default_rng(seed)
+        pops = {k: pds.planted_part2(k, sessions, N_PLANTED, rng) for k in pds.PART2_KINDS}
+        counts = [np.vstack([pops[k][i] for k in pds.PART2_KINDS]) for i in range(len(sessions))]
+        units = pd.DataFrame(dict(unit=np.arange(len(pds.PART2_KINDS) * N_PLANTED),
+                                  group=np.repeat(pds.PART2_KINDS, N_PLANTED), near_boundary=False))
+        units['recday'], units['mouse'] = recday, recday.split('_')[0]
+    else:
+        counts = [s['counts'] for s in sessions]
+        units = rek.unit_table(rec)
+    data = dict(recday=recday, dataset=dataset, units=units, sessions=rek.session_table(sessions), skipped=None,
+                host=socket.gethostname(), slurm_job_id=os.environ.get('SLURM_JOB_ID'))
+    if not sessions:
+        data['skipped'] = f'no analysis session at min_trials {min_trials}'
+    else:
+        data.update(measure_part2(counts, sessions, units, seed))
+    data['elapsed_s'] = time.time() - t0
+    return data
+
+
+def merge_part2_dir(shard_dir: str, expect: int = rek.N_RECDAYS) -> dict:
+    """Long tables per measure with recday and mouse; the window speed profiles; per-unit Fano."""
+    cfg, shards = rek.load_shards(shard_dir, key=lambda d: d['recday'])
+    if expect and len(shards) != expect:
+        raise ValueError(f'{len(shards)} recdays, expected {expect}; pass --expect-recdays 0 to merge anyway')
+    out = {k: [] for k in ('boundary', 'decoding', 'axes', 'fano_removal', 'speeds', 'fano')}
+    for d in shards:
+        if d['skipped']:
+            continue
+        base = dict(recday=d['recday'], mouse=d['recday'].split('_')[0])
+        for k in ('boundary', 'decoding', 'axes', 'fano_removal'):
+            out[k].append(d[k].assign(**base))
+        out['speeds'] += [dict(r, **base) for r in d['speeds']]
+        for i, f in enumerate(d['fano']):
+            out['fano'].append(pd.DataFrame(dict(unit=np.arange(len(f)), order=i, log_fano=f, **base)))
+    cat = lambda x: pd.concat(x, ignore_index=True) if x else pd.DataFrame()
+    M = {k: cat(out[k]) for k in ('boundary', 'decoding', 'axes', 'fano_removal', 'fano')}
+    M['speeds'] = pd.DataFrame(out['speeds'])
+    M['summary'] = pd.DataFrame([dict(recday=d['recday'], n_units=len(d['units']), n_sessions=len(d['sessions']),
+                                      skipped=d['skipped'], elapsed_s=d.get('elapsed_s'),
+                                      slurm_job_id=d.get('slurm_job_id')) for d in shards]).sort_values('recday')
+    M['units'] = {d['recday']: d['units'] for d in shards}
+    M['config'] = cfg
+    return M
+
+
+def shift_transition(speeds: pd.DataFrame, set_name: str = 'all', group=None) -> int:
+    """Kanter's shift: the transition where the reward-aligned window speed peaks, averaged over
+    every session and reward type of the dataset (or of one group)."""
+    s = speeds[(speeds['set'] == set_name) & ((speeds['group'] == group) if group is not None else True)]
+    return int(np.nanargmax(np.nanmean(np.stack(s['speed'].to_numpy()), axis=0)))
+
+
+def gate_part2(dataset: str, seed: int = 0, min_trials: int = 5) -> pd.DataFrame:
+    """P5-P15 on the planted part-2 populations (60 units each, `region_full` = one population)
+    through `fit_recday_part2` and the merge."""
+    rd = pds.DEFAULT_RECDAY[dataset]
+    root = os.path.join(PART2_DIR, 'runner_gate', f"{dataset}_{time.strftime('%Y%m%d_%H%M%S')}")
+    arm = arm_name(dataset, min_trials, synthetic='planted_part2')
+    print(f'part-2 gate {dataset} {rd} (>= {min_trials} trials)', flush=True)
+    data = fit_recday_part2(dataset, rd, min_trials=min_trials, seed=seed, synthetic='planted_part2')
+    rek.write_atomic(os.path.join(root, arm, f'{rd}.pkl'), {'config': part2_stamp(dataset, min_trials, seed, 'planted_part2'),
+                                                          'data': data})
+    M = merge_part2_dir(os.path.join(root, arm), expect=1)
+    rows = []
+
+    def add(gid, check, value, ok, must=True):
+        rows.append(dict(gate=gid, check=check, value=value, passed=bool(ok) if must else True, must=must))
+        print(f"  [{('PASS' if ok else 'FAIL') if must else 'info'}] {gid} {check}: {value}", flush=True)
+
+    def sel(tab, g):
+        return tab[(tab['set'] == 'region_full') & (tab['group'] == g)]
+
+    shift, chance = 2, 1.0 / 6                 # planted bursts fill the 0-1 s bin: the transition from bin -1..0
+    B = M['boundary']
+    b = sel(B, 'fixed_boundary')
+    b = b[b['shift'] == shift]
+    fr, pv = float(b['frac_pref'].mean()), float(b['pv_pos'].mean())
+    add('P5', 'fixed ensemble: shift preferred / PV correlation of up units', f'{fr:.3f} / {pv:.3f}', fr >= 2 * chance and pv >= 0.3)
+    st = shift_transition(M['speeds'], 'region_full', 'fixed_boundary')
+    add('P5', 'fixed ensemble: window speed peaks at the burst onset or offset transition', st, st in (shift, shift + 1))
+    b = sel(B, 'boundary')
+    pv6 = float(b[b['shift'] == shift]['pv_pos'].mean())
+    add('P6', 'changing ensemble: PV correlation of up units', round(pv6, 3), pv6 <= 0.1)
+    b = sel(B, 'noise')
+    f7 = float(b[b['shift'] == shift]['frac_pref'].mean())
+    add('P7', 'noise: shift preferred (chance 1/6)', round(f7, 3), abs(f7 - chance) <= 0.05)
+    Dd = M['decoding']
+    for g, gid, must in (('drift', 'P8', False), ('noise', 'P9', True)):
+        x = sel(Dd, g)
+        e, sh = float(x['error'].mean()), float(x['shuffle'].mean())
+        add(gid, f'{g}: loop-number error / shuffle', f'{e:.2f} / {sh:.2f}', e >= 0.9 * sh if must else True, must=must)
+    A = M['axes']
+    for g, gid in (('leg_drift', 'P10'), ('shared_axis', 'P11'), ('noise', 'P15')):
+        a = sel(A, g)
+        a = a[a['pair'] == 'leg_session'][['offset', 'stab_a', 'stab_b']].mean()
+        crit = a['offset'] >= 60 and max(a['stab_a'], a['stab_b']) <= STABLE_DEG and a['offset'] > max(a['stab_a'], a['stab_b'])
+        ok = crit if gid == 'P10' else (a['offset'] <= 30 if gid == 'P11' else not crit)
+        add(gid, f'{g}: leg vs session offset / stability leg / stability session (deg)',
+            f"{a['offset']:.1f} / {a['stab_a']:.1f} / {a['stab_b']:.1f}", ok)
+    F = M['fano_removal']
+    for g, gid in (('subset_drift', 'P12'), ('drift', 'P13')):
+        f = sel(F, g)[['full', 'top_removed', 'random_removed']].mean()
+        ratio = f['top_removed'] / f['random_removed']
+        ok = ratio <= 0.5 if gid == 'P12' else ratio >= 0.6
+        add(gid, f'{g}: drift growth all / top-25% removed / random removed; ratio',
+            f"{f['full']:.4f} / {f['top_removed']:.4f} / {f['random_removed']:.4f}; {ratio:.2f}", ok)
+    u = M['units'][rd]
+    noise_units = u.loc[u['group'] == 'noise', 'unit'].to_numpy()
+    lf = M['fano'][M['fano']['unit'].isin(noise_units)]['log_fano'].median()
+    add('P14', 'noise: median log Fano', round(float(lf), 3), abs(lf) <= 0.1)
+    out = pd.DataFrame(rows)
+    out.to_csv(os.path.join(root, 'gate_part2.csv'), index=False)
+    print(f'-> {root}', flush=True)
+    return out
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--dataset', choices=('lec', 'pfc'), default='pfc' if IS_PFC else 'lec')
@@ -290,7 +505,42 @@ def main(argv=None) -> int:
     ap.add_argument('--merge', action='store_true')
     ap.add_argument('--expect-recdays', type=int, default=rek.N_RECDAYS)
     ap.add_argument('--gate', action='store_true', help='runner gate on planted populations (exit 0 = all pass)')
+    ap.add_argument('--part2', action='store_true', help='M3 part 2 for --recday (or --merge)')
+    ap.add_argument('--gate-part2', action='store_true', help='P5-P15 on planted populations (exit 0 = all pass)')
     args = ap.parse_args(argv)
+    if args.gate_part2:
+        out = gate_part2(args.dataset, args.seed, args.min_trials)
+        return 0 if out.loc[out['must'], 'passed'].all() else 1
+    if args.part2:
+        arm = arm_name(args.dataset, args.min_trials)
+        if args.merge:
+            M = merge_part2_dir(os.path.join(PART2_DIR, 'shards', arm), expect=args.expect_recdays)
+            p = rek.versioned(os.path.join(PART2_DIR, f'part2_{arm}.pkl'))
+            with open(p, 'wb') as fh:
+                pickle.dump(M, fh, protocol=pickle.HIGHEST_PROTOCOL)
+            for k in ('boundary', 'decoding', 'axes', 'fano_removal', 'fano', 'summary'):
+                M[k].to_csv(f"{p[:-len('.pkl')]}_{k}.csv", index=False)
+            print(M['summary'].to_string(index=False))
+            print(f"{len(M['summary'])} shards -> {p}")
+            return 0
+        if not args.recday:
+            ap.error('--recday is required for a fit')
+        path = os.path.join(PART2_DIR, 'shards', arm, f'{args.recday}.pkl')
+        st = part2_stamp(args.dataset, args.min_trials, args.seed)
+        if rek.check_or_skip(path, st):
+            print(f'{path} already holds this stamp; nothing to do')
+            return 0
+        d = fit_recday_part2(args.dataset, args.recday, min_trials=args.min_trials, seed=args.seed)
+        rek.write_atomic(path, {'config': st, 'data': d})
+        if d['skipped']:
+            print(f"{args.recday}: skipped ({d['skipped']}) -> {path}")
+        else:
+            a = d['axes']
+            a = a[(a['set'] == 'all') & (a['pair'] == 'leg_session')]
+            print(f"{args.recday}: {len(d['sessions'])} sessions, {len(d['units'])} units; leg vs session offset "
+                  f"{a['offset'].mean():.1f} deg (stability {a['stab_a'].mean():.1f} / {a['stab_b'].mean():.1f}); "
+                  f"{d['elapsed_s']:.0f} s -> {path}")
+        return 0
     if args.gate:
         out = gate(args.dataset, args.seed)
         return 0 if out['passed'].all() else 1

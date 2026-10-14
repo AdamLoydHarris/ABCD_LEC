@@ -5,6 +5,258 @@ constants, in LEC and PFC, read as the state of an SSM trace bank. Plan, user de
 rules and code map: `docs/handoff/EVENT_KERNELS_HANDOFF.md`. Population drift (Kanter) results
 are in `code/POPULATION_DRIFT.md`.
 
+## 2026-10-14 — M3 part 2: Tsao's stepwise table, Kanter's single-unit timescales, the ramp test
+
+User decisions, 2026-10-13/14:
+
+- commit the leaky step (9b88256, pushed);
+- run M3 part 2 with the ramp test;
+- Tsao's trial time is time since the last reward, with time since A as an extra candidate;
+- the which-clock tests stay outstanding.
+
+The plan and rationale are in `docs/handoff/EVENT_KERNELS_WRITEUP.md`, Part 2. Kanter's population
+measures are in `POPULATION_DRIFT.md`, same date.
+
+**Outcome.**
+
+- **Tsao's recipe on our units** (in sample, 500 ms bins, adjusted R² +0.01 to enter, -0.005 to
+  leave), as fraction of units, mean of mice with the range over mice:
+
+  | term | LEC, 5 mice, 2851 units | PFC, 7 mice, 1229 units | Tsao, LEC |
+  |---|---|---|---|
+  | day time (his session time) | 0.175 (0.109-0.270) | 0.190 (0.071-0.458) | BW12 0.182, figure-eight 0.057 |
+  | entry time (his BW12 trial time) | 0.166 (0.132-0.235) | 0.174 (0.086-0.320) | BW12 0.062 |
+  | leg time (his figure-eight trial time) | 0.062 (0.006-0.143) | 0.142 (0.076-0.243) | figure-eight 0.357 |
+  | loop time, since A | 0.014 (0-0.033) | 0.029 (0-0.053) | |
+  | task (his wall colour) | 0.629 | 0.699 | |
+  | place | 0.880 | 0.846 | |
+  | day or entry time | 0.292 (0.237-0.393) | 0.327 (0.221-0.523) | |
+
+- **It agrees with held-out Stage 1 only in part.**
+  - In LEC, 70% of the units it gives entry time are Stage 1 entry-locked, against a base rate of
+    34%. But it finds only 33% of the entry-locked units. In PFC: 60% and 22%.
+  - Reward coding goes to place. Leg time is selected in 9% of LEC reward-locked units and 16% of
+    PFC's, while place is selected in 85-88% of all units. Tsao noted that lap time and position
+    covary.
+  - In sample, it calls 33% (LEC) and 58% (PFC) of planted OU-drift units time cells (gate T7).
+- **Its time constants are not comparable with ours.** For entry-time units, f = a e^(bx) gives
+  tau a median 2125 s in LEC (IQR 1225-4202 s, 456 units) and 1951 s in PFC (153), against
+  Stage 2's 320 s. The single-term exponential has no baseline, so a ramp on a baseline rate reads
+  as much slower. It recovers pure exponentials in rate within 1.25x (gate T8).
+- **Kanter's GLM test of elapsed time is not specific.**
+  - It is significant in 76% of unit-sessions: LEC mean of mice 0.759 (0.730-0.781), PFC 0.759
+    (0.594-0.849).
+  - In the gate it also fires for 80-85% of OU-drift units, 61-81% of reward- and A-locked units,
+    17-35% of place cells, and 3% of noise.
+  - Its Wald p ignores rate variance the model does not carry, so any unmodelled slow change
+    passes.
+- **Minute-scale variability is large in both regions.** log10 of the Fano factor over Poisson,
+  median unit, mean of mice:
+  - raw: LEC 1.14 (0.96-1.23), about 14x Poisson; PFC 1.35 (1.11-1.61), about 23x;
+  - against the held-out prediction: LEC 0.96 (0.79-1.12); PFC 1.24 (1.03-1.50).
+  - The PFC excess is not established: log Fano rises with firing rate (LEC rate terciles 0.93,
+    1.26, 1.18), and PFC's median rate is higher, 2.5 vs 1.9 Hz. The comparison is not
+    rate-matched.
+- **Once the held-out model removes locked structure, entry-locked units are not more slowly
+  variable than other units.** Median autocorrelation tail over 30-90 s lags, lag-0 normalised:
+
+  | units | LEC raw / residual | PFC raw / residual |
+  |---|---|---|
+  | Stage 1 entry-locked | 0.0149 / 0.0091 | 0.0081 / 0.0065 |
+  | the rest | 0.0082 / 0.0104 | 0.0056 / 0.0068 |
+
+  - The rise in the rest is the expected inflation: the held-out model carries the average of the
+    training sessions' drifts (gate K4, 1.04-1.36x).
+  - Autocorrelation tau, raw: LEC 34.5 s (28.5-40.8 over mice), PFC 24.7 s (5.0-40.9). Against
+    residuals: 41.1 and 25.5 s. All are biased low by the session length: in 20-min sessions the
+    fit returns 0.75x of tau at 30 s and 0.45x at 120 s (simulation below).
+- **The ramp test: the held-out first-minute decoding is mostly the slow ramps' early slope.**
+  - Held-out accuracy of the first 1-min epoch, 20-unit draws as M2. Raw reproduces M2: 0.248
+    against M2's 0.247, and the per-session check is exact on 3444 rows.
+
+    | input | LEC minute 1 | LEC minutes 2-17 | PFC minute 1 | PFC minutes 2-17 |
+    |---|---|---|---|---|
+    | raw counts | 0.248 | 0.077 | 0.260 | 0.074 |
+    | entry-locked units / held-out shape-free entry kernel | 0.128 | 0.062 | 0.159 | 0.062 |
+    | / held-out slow ramp, tau >= 60 s | 0.136 | 0.065 | 0.178 | 0.065 |
+    | / slow ramp, tau >= 120 s | 0.137 | 0.066 | 0.183 | 0.065 |
+    | / slow ramp, tau >= 240 s | 0.141 | 0.066 | 0.185 | 0.066 |
+
+    Chance is 0.056-0.059.
+  - Fraction of the first-minute advantage over chance removed, against the gate's planted
+    populations (F30):
+
+    | | shape-free | ramp >= 60 s | >= 120 s | >= 240 s |
+    |---|---|---|---|---|
+    | LEC real | 0.62 | 0.58 | 0.58 | 0.55 |
+    | LEC planted slow ramps | 0.97 | 1.04 | 1.04 | 1.02 |
+    | LEC planted 15 s transients | 0.98 | 0.66 | 0.55 | 0.33 |
+    | PFC real | 0.49 | 0.40 | 0.38 | 0.37 |
+    | PFC planted 15 s transients | 0.60 | 0.40 | 0.35 | 0.15 |
+
+    - The real removal stays flat as the floor rises, as planted slow ramps do. A fast transient
+      falls by half to two thirds.
+    - So a response to the white noise at task start, a median 4.6 s after bin 0, is not needed
+      to explain the first-minute decoding.
+    - In PFC, 0.09-0.12 of the advantage needs the shape-free kernel. That fits its 27% `other`
+      entry shapes, but is not resolved.
+  - **40% (LEC) and 51% (PFC) of the advantage survives every division.** It sits in units Stage 1
+    did not call entry-locked:
+    - size-matched non-locked units decode minute 1 held out at 0.164 (LEC, 23 recdays) and
+      0.223 (PFC, 11), against chance 0.056;
+    - the locked units alone decode it at 0.472 and 0.363.
+  - Within-session accuracy barely moves (LEC minutes 2-17: 0.159 raw, 0.151-0.155 divided). The
+    division leaves drift alone.
+- **Regions (LEC)** — ENTl-deep - SUB/ProS, rate-matched, labels shuffled within recday, 10000
+  permutations, 490 units, 4 mice. Three measures differ in all four mice:
+
+  | measure | difference | p | per mouse |
+  |---|---|---|---|
+  | day time selected | -0.126 | 0.006 | ah10 -0.09, ly05 -0.14, ly06 -0.04, ly07 -0.23 |
+  | log10 residual ACF tau | -0.18 | 0.0002 | -0.25, -0.19, -0.08, -0.19 |
+  | residual log Fano | -0.20 | 0.0001 | -0.10, -0.20, -0.21, -0.31 |
+  | entry time selected | +0.049 | 0.27 | +0.11, +0.29, -0.20, -0.01 |
+  | leg time selected | +0.040 | 0.18 | |
+  | GLM elapsed time, fraction of sessions | -0.011 | 0.74 | |
+
+  SUB/ProS carries more slow, session-unique variability than ENTl-deep, and its units select
+  Tsao's day term more often. The first three survive Holm over these six tests.
+- **El-Gaby's rule** moves no LEC number by more than 0.015: day time 0.175 -> 0.170, log Fano
+  1.105 -> 1.120.
+
+Predictions in `EVENT_KERNELS_WRITEUP.md` §2.5:
+
+| prediction | held? |
+|---|---|
+| entry time selected more often than day time | no: 0.166 vs 0.175 (LEC), 0.174 vs 0.190 (PFC). The in-sample day term also takes session-level drift (T7), which the held-out reset test excluded |
+| leg time more often than loop time | yes: 0.062 vs 0.014, 0.142 vs 0.029 |
+| the recipe catches the strongest locked units and adds drifting ones | yes: precision 0.70, recall 0.33 (LEC entry) |
+| leg time catches the slow recovery, not the ~1 s bumps | yes: leg-time tau 15 s (LEC) and 10.6 s (PFC); 9-16% of reward-locked units |
+| exponential tau of the order of Stage 2's 320 s | no: 2125 s, the no-baseline fit |
+| residual tail falls in entry-locked units, not in others | yes |
+| ramp test: advantage falls toward 0.07 under the shape-free division | partly: 0.248 -> 0.128; the slow ramps alone do nearly as much |
+
+### What was done
+
+| file | role |
+|---|---|
+| `code/unit_timescales.py` (+ mirror, new) | `tsao_rows`, `term_blocks`, `stepwise_poisson` (the rules of MATLAB's `stepwiseglm`, Criterion 'adjrsquared'; Newton IRLS equal to statsmodels' GLM to 1e-15 in adjusted R², 14x faster), `exp_fit`, `tsao_unit`, `kanter_glm`, `acf_tau`, `heldout_mu` (the Stage 2 full model's held-out prediction, shape-free entry factor and slow-ramp factors at floors 60, 120, 240 s) |
+| `code/unit_timescales_synthetics.py` (+ mirror, new) | gate populations and rows T1-T8, K1-K5c; task offsets and pure exponentials planted locally, `event_kernels_synthetics.py` untouched |
+| `code/run_unit_timescales.py` (+ mirror, new) | one job per recday; `--merge` with two equivalence checks; `--gate` |
+| `code/population_drift.py` (+ mirror) | `log_fano` and `gauss_smooth` (FFT, equal to `gaussian_filter1d` to 2e-15, 6x faster); the part-2 functions (`POPULATION_DRIFT.md`) |
+| `code/event_kernels_plots.py` (+ mirror) | F22-F30 and their tables, `region_contrast_df`, `unit_measures` |
+| `code/check_mirror_parity.py` | the three new pairs |
+| `sbatch_files/submit_event_kernels.sh` | runners `timescales` and `drift2` |
+| `code/event_kernels_M3_part2.ipynb` | load mode. Figures in `data/figures/{event_kernels,population_drift}/M3_part2/` |
+
+- **Rows.**
+  - Tsao: 500 ms bins over each session's core, first A to the end of the last trial.
+  - Kanter: 0.5 s bins over full sessions from bin 0. The residual versions use Pearson residuals
+    (y - mu) / sqrt(mu) against `heldout_mu`.
+- **Units:** all, in ABCD sessions with >= 5 trials. The entry-locked set is Stage 1's (V3, >= 5
+  trials).
+- **Runs:** 25 + 25 jobs, every one `EXIT=0`. PFC me08_12092021_13092021 was skipped: no tracking.
+- **Equivalences at the merge:**
+  - `heldout_mu`'s held-out deviance equals Stage 2's `dev_np`: LEC 3686 rows (2356 units), max
+    relative difference 2.7e-14; PFC 2060 rows (1126 units), 1.2e-14.
+  - The raw ramp-test kNN equals the M2 drift arm at >= 5 trials: LEC 3444 session rows, max
+    difference 0.0. PFC has no M2 arm at this threshold.
+
+### Gates (planted on the gate recdays' real behaviour, through the runner)
+
+Final runs: 3766905 (LEC) and 3766907 (PFC), `EXIT=0`. The CSVs are in
+`data/event_kernels/timescales/runner_gate/<ds>_full_20261014_1522*/`.
+
+| row | planted | LEC | PFC |
+|---|---|---|---|
+| T1 | entry ramps, tau 300 s: entry time selected | 1.00 | 1.00 |
+| T1 | tau 60 s / 120 s (reported) | 0.00 / 0.50 | 0.50 / 1.00 |
+| T2 | day trends: day time | 1.00 | 1.00 |
+| T3 | reward ramps: leg time or place / leg time alone | 1.00 / 1.00 | 1.00 / 1.00 |
+| T3b | A ramps: loop time | 1.00 | 1.00 |
+| T4 | place cells: place / any time term | 1.00 / 0.00 | 1.00 / 0.00 |
+| T5 | task offsets: task | 1.00 | 1.00 |
+| T6 | noise: any term | 0.00 | 0.00 |
+| T7 | OU drift called a time cell (reported) | 0.33 | 0.58 |
+| T8 | pure exponentials: tau within 1.25x, Tsao / Kanter | 1.00 / 1.00 | 1.00 / 1.00 |
+| K1 | entry ramps: GLM p < 0.05, unit-sessions | 0.95 | 0.95 |
+| K2 | noise: GLM p < 0.05 / median log Fano | 0.025 / -0.010 | 0.030 / -0.044 |
+| K3 | OU drift, ACF tau within 2x at 30 s (median) | 1.00 (26 s) | 1.00 (20 s) |
+| K3 | at 120 s / 300 s (reported, median) | 0.75 (72 s) / 0.50 (144 s) | 0.50 (66 s) / 0.00 (77 s) |
+| K4 | residual / raw ACF tail: ramps / drift | 0.00 / 1.36 | 0.00 / 1.04 |
+| K5 | slow ramps, held out: raw / shape-free / ramp 60 / ramp 120 | 0.277 / 0.054 / 0.054 / 0.054 | 0.308 / 0.060 / 0.070 / 0.070 |
+| K5b | 15 s transient, first-minute advantage: raw / shape-free / ramp 240 | 0.382 / 0.007 / 0.257 | 0.370 / 0.148 / 0.315 |
+| K5c | drift, held out raw / divided; within-session change | 0.069 / 0.053; 0.044 | 0.051 / 0.017; 0.062 |
+
+**Five rows were revised before the final runs.** Each was specified before the recipe was
+measured. None hid a code error. Reasons are in the gate module's docstring.
+
+1. **T1, after the quick gate (LEC 3766694).** One linear term cannot reach adjusted R² +0.01 for a
+   ramp mostly over in 2-3 min of a 20-min session. It found 60 s ramps in 0/2. The row now holds
+   at 300 s, the real median, and the floor is reported.
+2. **K3, before any gate.** Kanter's 1-90 s fit is biased low in finite sessions. Simulated on OU
+   log-rate Poisson trains, 2 Hz, 40 trains:
+
+   | session | tau 30 s | 120 s | 300 s |
+   |---|---|---|---|
+   | 10 min (Kanter) | 0.69x | 0.31x | 0.22x |
+   | 20 min (ours) | 0.75x | 0.45x | 0.32x |
+   | 60 min | 0.92x | 0.78x | 0.52x |
+   | 240 min | 0.95x | 0.86x | 0.83x |
+
+   The row now holds at 30 s only.
+3. **K4, after the quick gate.** Drift's ratio was 1.30 against a 1.25 limit. The held-out model
+   carries the average of the training sessions' independent drifts, about 1/(n-1) of their
+   variance. The window is now 0.75-1.5.
+4. **K5b, after the quick gate.** The shape-free kernel's first lag bin is 10 s, so a 15 s
+   transient is removed only at that resolution. The row now asks for less than half left.
+5. **K5b again, after the full gate (LEC 3766748).** A slow ramp with a 60 s floor still removed 65%
+   of a transient's first-minute advantage, because it weights minute 1 most. Input 3 now runs at
+   floors 60, 120 and 240 s, and the real data are read against that envelope (F30).
+
+### Measured
+
+The outcome above carries the numbers. Tables: `table_tsao`, `table_tsao_tau`, `table_kanter`,
+`table_ramp_test`, `table_ramp_envelope` and `table_m3p2_regions` in `event_kernels_plots.py`, run
+in the notebook.
+
+### What was NOT established
+
+- **That Tsao-style time cells are clocks.** The recipe is in sample. Stage 1's held-out test is
+  the evidence for a locked clock.
+- **Time constants comparable with the papers'.** Tsao's and Kanter's exponentials have no
+  baseline (2125-2584 s here), and ACF taus are biased low by session length. Stage 2's held-out
+  ramp taus remain ours.
+- **LEC vs PFC.** No contrast was tested at mouse level. The Fano difference is not rate-matched.
+- **What carries the 40-51% of first-minute decoding left after division.** It sits in units
+  Stage 1 did not call entry-locked. Sub-threshold entry kernels are the obvious candidate; not
+  tested.
+- **The regional differences** rest on 4 mice. Probe depth and sorting quality differ between
+  ENTl-deep and SUB/ProS and were not examined.
+- **Which clock.** Placement is not recorded, and task start vs recording start was not tested.
+  See the handoff, §8.
+
+### Commands
+
+```
+python code/check_mirror_parity.py                                          # must exit 0
+for ds in lec pfc; do t=code; [ $ds = pfc ] && t=mFC_data/code
+  sbatch --time=0-03:00 --job-name=ut_gate_$ds sbatch_files/event_kernels.sbatch $t/run_unit_timescales.py --gate --dataset $ds
+done
+bash sbatch_files/submit_event_kernels.sh --dataset lec --runner timescales --min-trials 5 --after <gate job>
+bash sbatch_files/submit_event_kernels.sh --dataset pfc --runner timescales --min-trials 5 --after <gate job>
+python code/run_unit_timescales.py --dataset lec --merge --min-trials 5
+python mFC_data/code/run_unit_timescales.py --dataset pfc --merge --min-trials 5
+sbatch --job-name=ek_nb_m3p2 --time=0-02:00 --mem=48G --cpus-per-task=4 sbatch_files/event_kernels.sbatch -m jupyter nbconvert --to notebook --execute --inplace --ExecutePreprocessor.timeout=3600 code/event_kernels_M3_part2.ipynb
+```
+
+Outputs:
+
+- shards: `data/event_kernels/timescales/shards/<ds>_kin-strict_mt5_np100/`; superseded first
+  runs in `shards_superseded/pre_gate_fix_2026-10-14/`;
+- merged: `data/event_kernels/timescales/timescales_<ds>_kin-strict_mt5_np100.pkl` with
+  `_tsao`, `_kanter`, `_heldout`, `_ramp`, `_summary` and `_equivalence` CSVs.
+
 ## 2026-10-13 — M5's test brought forward: entry clock vs leaky reward count
 
 User decision, 2026-10-13: commit M3 part 1 (90c10d0, pushed), then run this test before M3 part 2.

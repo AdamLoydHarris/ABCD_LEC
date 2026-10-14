@@ -182,8 +182,12 @@ waits for M6.
 | `mFC_data/code/pfc_session_index.py` | WP0, PFC. Shard index by exact search, recording index from El-Gaby's `All_session` tokens, per-recday pixel-to-cm affine with `xy_ok`, speed and reward probes (reusing `validate_alignment.speed_probe` / `reward_probe`). |
 | `code/event_kernels.py` (+ mirror) | Loaders: `load_recday(rd, 'lec' / 'pfc')` from per-session files, never the 3.8 GB pickle. Features at 25 ms, blocks of 250 ms, `build_design`, `stage1`, `reset_test`, `stage2_unit`. |
 | `code/event_kernels_synthetics.py` (+ mirror) | WP1 gate, G1-G11: planted units on real behaviour (table in its docstring). |
-| `code/population_drift.py` (+ mirror) | Kanter measures: `distance_vs_lag`, `knn_epochs` (within-session vs held-out session), `event_acceleration`, `synchrony_onsets`, `subsample`. |
-| `code/population_drift_synthetics.py` (+ mirror) | P1-P4: noise, locked clock, OU drift, boundary ensembles. |
+| `code/population_drift.py` (+ mirror) | Kanter measures: `distance_vs_lag`, `knn_epochs` (within-session vs held-out session), `event_acceleration`, `synchrony_onsets`, `subsample`. M3 part 2 (2026-10-14): `boundary_windows` / `boundary_ensembles` / `pv_correlation` / `trial_number_decoding`, `coding_axis` / `axis_offset` / `axis_stability` / `multiplexing`, `log_fano` / `gauss_smooth`, `fano_removal`. |
+| `code/population_drift_synthetics.py` (+ mirror) | P1-P4: noise, locked clock, OU drift, boundary ensembles. `planted_part2` (P5-P15): fixed vs changing boundary ensembles, leg-locked plus drift, a shared axis, drift in 25% of units. |
+| `code/run_population_drift.py` (+ mirror) | M2 runner; `--part2` per recday and `--part2 --merge`, `--gate-part2` (M3 part 2). |
+| `code/unit_timescales.py` (+ mirror) | M3 part 2, single units: Tsao's stepwise GLM (`stepwise_poisson`, MATLAB `stepwiseglm` rules), `exp_fit`, Kanter's `kanter_glm` and `acf_tau`, `heldout_mu` (the Stage 2 full model held out: residuals, and the ramp test's entry factors at slow-ramp floors 60/120/240 s). |
+| `code/unit_timescales_synthetics.py` (+ mirror) | Gate rows T1-T8, K1-K5c; the revisions and why are in its docstring. |
+| `code/run_unit_timescales.py` (+ mirror) | Runner: one job per recday; `--merge` with two equivalence checks (held-out deviance = Stage 2 `dev_np`; raw ramp-test kNN = the M2 drift arm); `--gate`. |
 | `code/event_kernels_checks.py` | LEC only. The loader's core window vs `data_dic_lec_v4.pkl`; shared primitives (block counts, speed, signed accel, time since reward) vs `glm_analysis_v3` on the same sessions. |
 | `sbatch_files/event_kernels.sbatch` | Runs one script from either tree on `gpu_lowp` (8 CPU, 32 GB, 4 h); refuses on mirror drift. |
 
@@ -261,6 +265,53 @@ Design choices inside `event_kernels.py`, each with its reason:
 | `data/event_kernels/synthetics/`, `data/event_kernels/checks/` | synthetic and check pickles / CSVs, versioned |
 
 ## 7. Status
+
+### 2026-10-14, evening: M3 part 2 complete, stopped for review
+
+Details: `code/EVENT_KERNELS.md` and `code/POPULATION_DRIFT.md`, entries 2026-10-14. Notebook:
+`code/event_kernels_M3_part2.ipynb`. Figures F22-F30: `data/figures/{event_kernels,population_drift}/M3_part2/`.
+Uncommitted.
+
+- **Runs.** 100 production jobs, every one `EXIT=0`. Gates pass in both datasets after nine documented row
+  revisions: five in the unit gate, four in the part-2 gate. Equivalences at merge:
+  - held-out deviance = Stage 2 `dev_np` to 2.7e-14;
+  - raw ramp-test kNN = the M2 drift arm, exactly.
+- **The ramp test.** M2's held-out first-minute decoding is mostly the slow entry ramps' early
+  slope, not a fast transient at task start.
+  - LEC: dividing out held-out ramps with tau >= 240 s removes 55% of the advantage, against 62%
+    for the shape-free kernel.
+  - That removal stays flat across floors, as planted slow ramps do; planted 15 s transients fall
+    to 33%.
+  - The remaining ~40% sits in units Stage 1 did not call entry-locked.
+- **Tsao's recipe** gives 17.5% day-time units in LEC (his BW12 session time: 18.2%) and 16.6%
+  entry-time units (his trial time: 6.2%).
+  - It is in sample: its entry-time units are 70% Stage 1 entry-locked, but it finds a third of
+    them, and it calls 33-58% of planted drift time cells.
+  - Reward timing goes to place.
+- **Kanter's single-unit measures.** His GLM test fires for anything slow (planted drift 80-85%).
+  Minute-scale variability is 14-23x Poisson.
+  - Once locked structure is removed, entry-locked units are no more slowly variable than others.
+  - His ACF fit is biased low by session length: 0.45x at 120 s for our 20-min sessions, 0.31x for
+    his 10-min ones.
+- **Kanter part 2.**
+  - Rewards are boundaries, but stamped by the same ensemble every loop: PV correlation 0.33-0.53
+    vs 0.18-0.20 for other units, the opposite of Kanter.
+  - The leg and session axes are stable (7-14°) and near-orthogonal (70-78°), short of noise's
+    81-85°.
+  - The 25% most variable units carry part of the drift.
+  - Loop-number decoding is no evidence of time stamps: drift alone does it.
+- **Regions (LEC, 4 mice, every mouse the same sign):** SUB/ProS has longer residual ACF tau, more
+  residual minute-scale variability and more day-time units than ENTl-deep.
+- **Decisions to put to the user:**
+  1. Commit M3 part 2? That is the code, both trees, the notebook, the write-ups and the handoff,
+     plus `docs/handoff/EVENT_KERNELS_WRITEUP.md`.
+  2. Next: M4 (rest), or a follow-up. Candidates:
+     - what carries the 40-51% of first-minute decoding left in non-locked units;
+     - the region differences;
+     - the reward-ensemble contrast with Kanter.
+     The which-clock tests stay outstanding (§8).
+- **User decisions, 2026-10-14 evening:** commit and push M3 part 2; next is M4 (rest). The three
+  follow-ups stay outstanding (§8).
 
 ### 2026-10-14: user decisions after the leaky test; M3 part 2 approved
 
@@ -566,6 +617,17 @@ sessions have no ROI file); that is fixed.
 
 ## 8. Open questions and risks
 
+- **Outstanding follow-ups from M3 part 2 (user, 2026-10-14).** Not run; M4 comes first.
+  1. What carries the 40% (LEC) and 51% (PFC) of M2's held-out first-minute decoding left after
+     dividing out the entry-locked units' kernels? Size-matched non-locked units decode minute 1 at
+     0.164 (LEC) and 0.223 (PFC), against chance 0.056. Sub-threshold entry kernels are the
+     candidate.
+  2. SUB/ProS vs ENTl-deep: in all four LEC mice, SUB/ProS has the longer residual ACF tau, the
+     higher residual Fano and the more day-time units. Check against probe depth and sorting quality
+     before reading it as anatomy.
+  3. Reward ensembles repeat across loops: PV correlation 0.33-0.53 vs 0.18-0.20 for other units.
+     Kanter found boundary units less consistent than others. Test with place and kinematics
+     regressed out of the boundary windows, and per reward type.
 - **Which clock (outstanding, 2026-10-14).**
   - Placement vs recording start cannot be tested, because placement is not recorded.
   - It matters little for ramps. Moving an exponential ramp's origin by d multiplies its

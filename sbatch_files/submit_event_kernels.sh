@@ -4,6 +4,8 @@
 #   bash sbatch_files/submit_event_kernels.sh --dataset lec                       # Stage 1, both anchors
 #   bash sbatch_files/submit_event_kernels.sh --dataset pfc --runner drift        # population drift
 #   bash sbatch_files/submit_event_kernels.sh --dataset lec --runner stage2 --min-trials 5   # Stage 2
+#   bash sbatch_files/submit_event_kernels.sh --dataset lec --runner timescales --min-trials 5   # M3 part 2: Tsao, Kanter units, ramp test
+#   bash sbatch_files/submit_event_kernels.sh --dataset lec --runner drift2 --min-trials 5       # M3 part 2: Kanter population
 #   bash sbatch_files/submit_event_kernels.sh --dataset lec --min-trials 5        # the sensitivity arm
 #   bash sbatch_files/submit_event_kernels.sh --dataset lec --n-perm 20 --recdays ah10_20250616_20250617
 #   bash sbatch_files/submit_event_kernels.sh --dataset lec --after 123:124       # start only if those exit 0
@@ -45,8 +47,8 @@ case "$DATASET" in
     *) echo "--dataset lec|pfc is required" >&2; exit 2 ;;
 esac
 case "$RUNNER" in
-    stage1|drift|stage2|leaky) ;;
-    *) echo "--runner stage1|drift|stage2|leaky" >&2; exit 2 ;;
+    stage1|drift|stage2|leaky|timescales|drift2) ;;
+    *) echo "--runner stage1|drift|stage2|leaky|timescales|drift2" >&2; exit 2 ;;
 esac
 
 if [ "${#RECDAYS[@]}" -eq 0 ]; then
@@ -86,6 +88,19 @@ for rd in "${RECDAYS[@]}"; do
               --leaky --recday "$rd" --min-trials "$MIN_TRIALS" --n-perm "$N_PERM")
         echo "  $rd -> $jid"
         n=$((n + 1))
+    elif [ "$RUNNER" = timescales ]; then
+        # every unit: ~1 s Tsao + ~10 s held-out glum + ~2 s Kanter per unit; the largest recday ~190 units
+        jid=$("${SB[@]}" --time=0-04:00 --job-name="ut_${DATASET}_mt${MIN_TRIALS}_${rd}" \
+              sbatch_files/event_kernels.sbatch "$TREE/run_unit_timescales.py" --dataset "$DATASET" \
+              --recday "$rd" --min-trials "$MIN_TRIALS" --n-perm "$N_PERM")
+        echo "  $rd -> $jid"
+        n=$((n + 1))
+    elif [ "$RUNNER" = drift2 ]; then
+        jid=$("${SB[@]}" --time=0-02:00 --job-name="pd2_${DATASET}_mt${MIN_TRIALS}_${rd}" \
+              sbatch_files/event_kernels.sbatch "$TREE/run_population_drift.py" --dataset "$DATASET" \
+              --part2 --recday "$rd" --min-trials "$MIN_TRIALS")
+        echo "  $rd -> $jid"
+        n=$((n + 1))
     elif [ "$RUNNER" = stage2 ]; then
         # ~8 s per unit (M1 G10); the largest recday-event holds ~150 passers.
         for e in entry A reward; do
@@ -112,6 +127,10 @@ elif [ "$RUNNER" = stage2 ]; then
     echo "  python $TREE/run_event_kernels.py --dataset $DATASET --stage2 --merge --min-trials $MIN_TRIALS --n-perm $N_PERM"
 elif [ "$RUNNER" = leaky ]; then
     echo "  python $TREE/run_event_kernels.py --dataset $DATASET --leaky --merge --min-trials $MIN_TRIALS --n-perm $N_PERM"
+elif [ "$RUNNER" = timescales ]; then
+    echo "  python $TREE/run_unit_timescales.py --dataset $DATASET --merge --min-trials $MIN_TRIALS --n-perm $N_PERM"
+elif [ "$RUNNER" = drift2 ]; then
+    echo "  python $TREE/run_population_drift.py --dataset $DATASET --part2 --merge --min-trials $MIN_TRIALS"
 else
     echo "  python $TREE/run_population_drift.py --dataset $DATASET --merge --min-trials $MIN_TRIALS"
 fi

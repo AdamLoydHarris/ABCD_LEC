@@ -1,4 +1,5 @@
-"""Figures F1-F14 and their tables for the event-kernel M2 report, from the merged pickles.
+"""Figures and tables for the event-kernel reports, from the merged pickles: F1-F14 (M2), F15-F18
+(M3 part 1, Stage 2), F19-F21 (entry clock vs leaky reward count), F22-F30 (M3 part 2).
 
 Inputs are what `run_event_kernels.py --merge` and `run_population_drift.py --merge` write
 (`load_latest` finds the highest `.vN`). Every summary is per mouse: recday mean first, then the
@@ -1146,6 +1147,599 @@ def plot_leaky_gate(L: dict, out_path=None):
         axes[1].set_xticks([0, 1, 3, 4], ['LEC 300 s', 'LEC 1200 s', 'PFC 300 s', 'PFC 1200 s'], rotation=30)
         axes[1].set_ylabel('ramp-count correlation per recday')
         fig.suptitle('F21. Can the behaviour tell a clock from a count? Gate envelope and collinearity')
+    _save(fig, out_path)
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# F22-F30: M3 part 2 (Tsao's stepwise table, Kanter's single-unit timescales and part 2, the ramp test)
+# ---------------------------------------------------------------------------
+
+TS_DIR = os.path.join(REPO, 'data', 'event_kernels', 'timescales')
+PART2_DIR = os.path.join(DRIFT_DIR, 'part2')
+M3P2_FIG_DIR = os.path.join(REPO, 'data', 'figures', 'event_kernels', 'M3_part2')
+M3P2_DRIFT_FIG_DIR = os.path.join(REPO, 'data', 'figures', 'population_drift', 'M3_part2')
+TSAO_TERMS = ['day_time', 'entry_time', 'leg_time', 'loop_time', 'task', 'place']
+TSAO_REF = {'day_time': (0.182, 0.057), 'entry_time': (0.062, None), 'leg_time': (None, 0.357)}   # (BW12, figure-eight)
+LEG_S, LOOP_S = 9.3, 43.6                      # LEC median leg and loop, 2026-10-14
+MIN_UNITS_ALL = 20                             # population measures on the 'all' set need M2's matched size; a 1-unit
+                                               # recday (PFC me10_20122021_21122021) decodes worse than its shuffle
+STABLE_DEG = 30.0                              # as run_population_drift: an axis whose leave-one-out angle exceeds this is not a coding axis
+RAMP_INPUT_COLORS = {'raw': '#2C2C2A', 'div_entry': '#6B3FA0', 'div_ramp60': '#FFA500', 'div_ramp120': '#C46A00',
+                     'div_ramp240': '#7A4100'}
+TERM_LABEL = {'day_time': 'day time\n(Tsao session)', 'entry_time': 'entry time\n(BW12 trial)',
+              'leg_time': 'leg time\n(fig-8 trial)', 'loop_time': 'loop time\n(since A)', 'task': 'task\n(wall colour)',
+              'place': 'place'}
+
+
+def _unit_info(M: dict) -> pd.DataFrame:
+    """Unit table of every recday of a timescales or part-2 merge: region, boundary, rate, El-Gaby flag."""
+    rows = []
+    for rd, u in M['units'].items():
+        u = u.copy()
+        u['recday'], u['mouse'] = rd, rd.split('_')[0]
+        rows.append(u)
+    return pd.concat(rows, ignore_index=True)
+
+
+def _stage1_calls(ds: str) -> pd.DataFrame:
+    """Per unit: the Stage 1 (>= 5 trials, anchor entry) locked calls for entry, reward A and reward."""
+    T = pd.read_csv(load_latest(os.path.join(STAGE1_DIR, f'stage1_{ds.lower()}_kin-strict_mt5_np100'))['_path'][:-4] + '_units.csv')
+    T = T[(T['anchor'] == 'entry') & T['block'].isin(['ev_entry', 'ev_A', 'ev_reward'])]
+    return T.pivot_table(index=['recday', 'unit'], columns='block', values='locked', aggfunc='first').astype(bool).reset_index()
+
+
+def table_tsao(TS: dict) -> pd.DataFrame:
+    """Per dataset and term: fraction of units selecting it (mean of mice, range), and its overlap
+    with Stage 1's held-out calls."""
+    rows = []
+    for ds, M in TS.items():
+        t = M['tsao'].merge(_stage1_calls(ds), on=['recday', 'unit'], how='left')
+        for term in TSAO_TERMS:
+            t['v'] = t[f'has_{term}'].astype(float)
+            pm = per_mouse(t, 'v')
+            row = dict(dataset=ds, term=term, units=len(t), mean_of_mice=pm.mean(), lo=pm.min(), hi=pm.max(),
+                       pooled=t['v'].mean())
+            for blk, tm in (('ev_entry', 'entry_time'), ('ev_reward', 'leg_time'), ('ev_A', 'loop_time')):
+                if term == tm and blk in t:
+                    s1 = t[blk].fillna(False).astype(bool)
+                    sel = t[f'has_{term}'].astype(bool)
+                    row.update(stage1_block=blk, p_stage1_given_tsao=s1[sel].mean(), p_tsao_given_stage1=sel[s1].mean(),
+                               p_stage1_overall=s1.mean())
+            rows.append(row)
+        t['time_cell'] = t[['has_day_time', 'has_entry_time']].any(axis=1).astype(float)
+        pm = per_mouse(t, 'time_cell')
+        rows.append(dict(dataset=ds, term='day or entry time', units=len(t), mean_of_mice=pm.mean(), lo=pm.min(),
+                         hi=pm.max(), pooled=t['time_cell'].mean()))
+    return pd.DataFrame(rows)
+
+
+def plot_tsao_table(TS: dict, out_path=None):
+    """F22: left, the fraction of units selecting each term (bar = mean of mice, point = mouse), with
+    Tsao's LEC fractions marked; right, how Tsao's in-sample time terms overlap Stage 1's held-out
+    calls (P(Stage 1 locked | term selected) and P(term selected | Stage 1 locked))."""
+    t = table_tsao(TS)
+    with mpl.rc_context(_rc()):
+        fig, (a1, a2) = plt.subplots(1, 2, figsize=(7.0, 2.8), layout='constrained', width_ratios=[2.2, 1])
+        x = np.arange(len(TSAO_TERMS))
+        for j, ds in enumerate(TS):
+            d = TS[ds]['tsao']
+            for i, term in enumerate(TSAO_TERMS):
+                pm = per_mouse(d.assign(v=d[f'has_{term}'].astype(float)), 'v')
+                xx = i + (j - 0.5) * 0.36
+                a1.bar(xx, pm.mean(), width=0.34, color=DATASET_COLORS[ds], alpha=0.4, lw=0, label=ds if i == 0 else None)
+                a1.scatter(xx + _jitter(len(pm), 0.2), pm.values, s=7, color=DATASET_COLORS[ds], lw=0, zorder=3)
+        for i, term in enumerate(TSAO_TERMS):
+            bw, f8 = TSAO_REF.get(term, (None, None))
+            if bw is not None:
+                a1.plot([i - 0.4, i + 0.4], [bw, bw], color=INK, lw=0.9, ls='-')
+            if f8 is not None:
+                a1.plot([i - 0.4, i + 0.4], [f8, f8], color=INK, lw=0.9, ls=':')
+        a1.set_xticks(x, [TERM_LABEL[t_] for t_ in TSAO_TERMS])
+        a1.set_ylabel('fraction of units selecting the term')
+        a1.set_ylim(0, 1)
+        a1.legend(frameon=False, loc='upper left')
+        a1.set_title('Tsao LEC: solid = BW12, dotted = figure-eight (session or mixed / trial or mixed)', fontsize=6)
+        c = t.dropna(subset=['p_stage1_given_tsao'])
+        for j, ds in enumerate(TS):
+            cc = c[c['dataset'] == ds]
+            for i, r in enumerate(cc.itertuples()):
+                a2.scatter(i + (j - 0.5) * 0.3, r.p_stage1_given_tsao, marker='o', s=14, color=DATASET_COLORS[ds], lw=0)
+                a2.scatter(i + (j - 0.5) * 0.3, r.p_tsao_given_stage1, marker='^', s=14, color=DATASET_COLORS[ds], lw=0)
+                a2.plot([i + (j - 0.5) * 0.3 - 0.1, i + (j - 0.5) * 0.3 + 0.1], [r.p_stage1_overall] * 2, color=NULL, lw=0.8)
+        terms = list(dict.fromkeys(c['term']))
+        a2.set_xticks(range(len(terms)), [f"{tm.replace('_', ' ')}\nvs {LABEL[b]}" for tm, b in
+                                          dict.fromkeys(zip(c['term'], c['stage1_block']))])
+        a2.set_ylim(0, 1)
+        a2.set_ylabel('overlap, pooled units')
+        a2.set_title('o P(Stage 1 locked | selected), ^ P(selected | locked)\ngrey: Stage 1 base rate', fontsize=6)
+        fig.suptitle("F22. Tsao's in-sample stepwise GLM on our units (500 ms bins, adjusted R² +0.01 / -0.005)")
+    _save(fig, out_path)
+    return fig
+
+
+def table_tsao_tau(TS: dict, S2: dict) -> pd.DataFrame:
+    """Tsao's exponential tau per selected time term (fits flagged ok), and for entry time against
+    Stage 2's entry-ramp tau of the same unit."""
+    rows = []
+    for ds, M in TS.items():
+        t = M['tsao']
+        for term in ('day_time', 'entry_time', 'leg_time', 'loop_time'):
+            if f'{term}_tau_s' not in t:
+                continue
+            d = t[t[f'has_{term}'].astype(bool) & t[f'{term}_ok'].fillna(False).astype(bool)]
+            rows.append(dict(dataset=ds, term=term, n=len(d), median_tau_s=d[f'{term}_tau_s'].median(),
+                             q25=d[f'{term}_tau_s'].quantile(0.25), q75=d[f'{term}_tau_s'].quantile(0.75),
+                             frac_rising=float((d[f'{term}_sign'] > 0).mean()) if len(d) else np.nan))
+    return pd.DataFrame(rows)
+
+
+def plot_tsao_tau(TS: dict, S2: dict, out_path=None):
+    """F23: left, Tsao's exponential time constants per term (fits that resolve, tau <= 10x the fitted
+    range); right, entry time: Tsao's tau against Stage 2's ramp tau for the same units."""
+    with mpl.rc_context(_rc()):
+        fig, (a1, a2) = plt.subplots(1, 2, figsize=(6.6, 2.7), layout='constrained')
+        terms = ['entry_time', 'leg_time', 'loop_time', 'day_time']
+        for j, ds in enumerate(TS):
+            t = TS[ds]['tsao']
+            for i, term in enumerate(terms):
+                if f'{term}_tau_s' not in t:
+                    continue
+                d = t[t[f'has_{term}'].astype(bool) & t[f'{term}_ok'].fillna(False).astype(bool)][f'{term}_tau_s']
+                if len(d):
+                    y = np.log10(d.to_numpy())
+                    a1.scatter(i + (j - 0.5) * 0.35 + _jitter(len(y), 0.25), y, s=2, color=DATASET_COLORS[ds], alpha=0.5, lw=0)
+                    a1.plot([i + (j - 0.5) * 0.35 - 0.12, i + (j - 0.5) * 0.35 + 0.12], [np.median(y)] * 2, color=INK, lw=1.2)
+            s2 = S2[ds]['table']
+            s2 = s2[(s2['event'] == 'entry') & s2['shape'].isin(['ramp_up', 'ramp_down'])][['recday', 'unit', 'tau_median']]
+            m = t.merge(s2, on=['recday', 'unit'])
+            if 'entry_time_tau_s' in m:
+                m = m[m['has_entry_time'].astype(bool) & m['entry_time_ok'].fillna(False).astype(bool)]
+                a2.scatter(m['tau_median'], m['entry_time_tau_s'], s=5, color=DATASET_COLORS[ds], lw=0, alpha=0.7,
+                           label=f'{ds} ({len(m)})')
+        a1.set_xticks(range(len(terms)), [TERM_LABEL[t_].split('\n')[0] for t_ in terms])
+        a1.set_ylabel('log10 tau (s)')
+        lim = [10, 1e5]
+        a2.plot(lim, lim, color=INK, lw=0.5)
+        a2.set_xscale('log')
+        a2.set_yscale('log')
+        a2.set_xlabel('Stage 2 entry-ramp tau (s), held out')
+        a2.set_ylabel("Tsao's entry-time tau (s), in sample")
+        a2.legend(frameon=False, markerscale=2)
+        fig.suptitle("F23. Tsao's exponential time constants (f = a e^bx; tau = 1/|b|)")
+    _save(fig, out_path)
+    return fig
+
+
+def _unit_medians(K: pd.DataFrame, cols) -> pd.DataFrame:
+    return K.groupby(['mouse', 'recday', 'unit'])[cols].median().reset_index()
+
+
+def table_kanter(TS: dict) -> pd.DataFrame:
+    """Per dataset: Kanter's GLM elapsed-time fraction (unit-sessions with p < 0.05), its tau, and
+    the ACF and Fano measures raw and against the held-out prediction (per-unit medians over
+    sessions, then mean of mice)."""
+    rows = []
+    for ds, M in TS.items():
+        K = M['kanter'].copy()
+        K['sig'] = (K['glm_p'] < 0.05).astype(float)
+        U = _unit_medians(K, ['sig', 'acf_tau_s', 'res_acf_tau_s', 'acf_tail', 'res_acf_tail', 'log_fano', 'res_log_fano'])
+        r = dict(dataset=ds, unit_sessions=len(K), units=len(U))
+        for c in ('sig', 'acf_tau_s', 'res_acf_tau_s', 'acf_tail', 'res_acf_tail', 'log_fano', 'res_log_fano'):
+            pm = U.groupby(['mouse', 'recday'])[c].median().groupby('mouse').mean()
+            r[c] = pm.mean()
+            r[c + '_range'] = f'{pm.min():.3g}-{pm.max():.3g}'
+        g = K[(K['glm_p'] < 0.05) & K['glm_exp_ok'].astype(bool)]
+        r['glm_tau_median_s'] = g['glm_tau_s'].median()
+        r['glm_frac_rising'] = float((g['glm_sign'] > 0).mean())
+        rows.append(r)
+    return pd.DataFrame(rows)
+
+
+def plot_kanter_units(TS: dict, out_path=None):
+    """F24: left, the fraction of unit-sessions where elapsed time is significant in Kanter's GLM
+    (per mouse) and its tau; right, the autocorrelation tau of each unit, raw against residual
+    (medians over sessions)."""
+    with mpl.rc_context(_rc()):
+        fig, (a1, a2, a3) = plt.subplots(1, 3, figsize=(7.2, 2.5), layout='constrained')
+        for i, (ds, M) in enumerate(TS.items()):
+            K = M['kanter'].assign(sig=lambda x: (x['glm_p'] < 0.05).astype(float))
+            pm = per_mouse(K, 'sig')
+            a1.bar(i, pm.mean(), color=DATASET_COLORS[ds], alpha=0.4, width=0.6, lw=0)
+            a1.scatter(i + _jitter(len(pm)), pm.values, s=9, color=DATASET_COLORS[ds], lw=0, zorder=3)
+            g = K[(K['glm_p'] < 0.05) & K['glm_exp_ok'].astype(bool)]['glm_tau_s']
+            a2.hist(np.log10(g.dropna()), bins=40, histtype='step', color=DATASET_COLORS[ds], label=f'{ds} ({len(g)})')
+            U = _unit_medians(K, ['acf_tau_s', 'res_acf_tau_s'])
+            a3.scatter(U['acf_tau_s'], U['res_acf_tau_s'], s=2, color=DATASET_COLORS[ds], alpha=0.5, lw=0, label=ds)
+        a1.axhline(0.05, color=NULL, lw=0.6)
+        a1.set_xticks(range(len(TS)), list(TS))
+        a1.set_ylim(0, 1)
+        a1.set_ylabel('unit-sessions with elapsed time p < 0.05')
+        a2.set_xlabel('log10 GLM tau (s)')
+        a2.set_ylabel('unit-sessions')
+        a2.legend(frameon=False)
+        lim = [0.5, 1e3]
+        a3.plot(lim, lim, color=INK, lw=0.5)
+        a3.set_xscale('log')
+        a3.set_yscale('log')
+        a3.set_xlabel('ACF tau, raw counts (s)')
+        a3.set_ylabel('ACF tau, held-out residuals (s)')
+        a3.legend(frameon=False, markerscale=3)
+        fig.suptitle("F24. Kanter's single-unit time constants: GLM of elapsed time + population rate; ACF decay 1-90 s")
+    _save(fig, out_path)
+    return fig
+
+
+def plot_acf_curves(TS: dict, out_path=None):
+    """F25: median autocorrelation (lag-0 normalised) over units, raw counts vs held-out Pearson
+    residuals, with the leg and loop periods marked; band = interquartile range of unit medians."""
+    with mpl.rc_context(_rc()):
+        fig, axes = plt.subplots(1, len(TS), figsize=(3.2 * len(TS), 2.5), layout='constrained', squeeze=False)
+        for ax, (ds, M) in zip(axes[0], TS.items()):
+            raw = np.concatenate([np.nanmedian(v[0], axis=1) for v in M['acf'].values()])
+            res = np.concatenate([np.nanmedian(v[1], axis=1) for v in M['acf'].values()])
+            lags = (np.arange(raw.shape[1]) + 1) * 0.5
+            for arr, col, lab in ((raw, DATASET_COLORS[ds], 'raw counts'), (res, INK, 'held-out residuals')):
+                q = np.nanpercentile(arr, [25, 50, 75], axis=0)
+                ax.fill_between(lags, q[0], q[2], color=col, alpha=0.2, lw=0)
+                ax.plot(lags, q[1], color=col, lw=1, label=lab)
+            for p in (LEG_S, LOOP_S, 2 * LOOP_S):
+                ax.axvline(p, color=NULL, lw=0.6, ls=':')
+            ax.axhline(0, color=NULL, lw=0.5)
+            ax.set_xscale('log')
+            ax.set_xlabel('lag (s); dotted: median leg, loop, 2 loops')
+            ax.set_ylabel('autocorrelation')
+            ax.set_title(f'{ds}: {raw.shape[0]} units', fontsize=7)
+            ax.legend(frameon=False)
+        fig.suptitle('F25. Autocorrelation of 0.5 s counts, raw and held-out Pearson residuals (median unit, IQR)')
+    _save(fig, out_path)
+    return fig
+
+
+def plot_fano(TS: dict, P2: dict, out_path=None):
+    """F26: left, log10 Fano of the 30 s-smoothed rate over Poisson trains, raw and against the
+    held-out prediction (per mouse); right, drift growth after removing the top 25% of units by
+    Fano, over that after removing a random 25% (set 'all', per mouse)."""
+    with mpl.rc_context(_rc()):
+        fig, (a1, a2) = plt.subplots(1, 2, figsize=(6.0, 2.6), layout='constrained')
+        for i, (ds, M) in enumerate(TS.items()):
+            U = _unit_medians(M['kanter'], ['log_fano', 'res_log_fano'])
+            for j, c in enumerate(('log_fano', 'res_log_fano')):
+                pm = U.groupby(['mouse', 'recday'])[c].median().groupby('mouse').mean()
+                x = i * 2.5 + j
+                a1.bar(x, pm.mean(), color=DATASET_COLORS[ds], alpha=0.4 if j == 0 else 0.15, width=0.8, lw=0)
+                a1.scatter(x + _jitter(len(pm)), pm.values, s=9, color=DATASET_COLORS[ds], lw=0, zorder=3)
+            if ds in P2:
+                F = _all_set(P2[ds]['fano_removal']).assign(ratio=lambda x: x['top_removed'] / x['random_removed'])
+                pm = per_mouse(F, 'ratio')
+                a2.bar(i, pm.mean(), color=DATASET_COLORS[ds], alpha=0.4, width=0.6, lw=0)
+                a2.scatter(i + _jitter(len(pm)), pm.values, s=9, color=DATASET_COLORS[ds], lw=0, zorder=3)
+        a1.axhline(0, color=INK, lw=0.6)
+        a1.set_xticks([0, 1, 2.5, 3.5][:2 * len(TS)], ['raw', 'residual', 'raw', 'residual'][:2 * len(TS)])
+        a1.set_ylabel('log10 Fano / Poisson (median unit)')
+        a1.set_title(' / '.join(TS), fontsize=7)
+        a2.axhline(1, color=INK, lw=0.6)
+        a2.set_xticks(range(len(TS)), list(TS))
+        a2.set_ylabel('drift growth: top-25% removed / random removed')
+        fig.suptitle('F26. Minute-scale variability (Kanter Fig 5): Fano factors and removing the most variable units')
+    _save(fig, out_path)
+    return fig
+
+
+def _all_set(tab: pd.DataFrame) -> pd.DataFrame:
+    """Rows of the 'all' unit set from recdays with at least MIN_UNITS_ALL units."""
+    return tab[(tab['set'] == 'all') & (tab['n_units'] >= MIN_UNITS_ALL)]
+
+
+def shift_transitions(P2: dict) -> dict:
+    """Per dataset: Kanter's shift, the transition where the reward-aligned window speed (set
+    'all') peaks, averaged over every recday, session and reward type."""
+    out = {}
+    for ds, P in P2.items():
+        s = _all_set(P['speeds'])
+        out[ds] = int(np.nanargmax(np.nanmean(np.stack(s['speed'].to_numpy()), axis=0)))
+    return out
+
+
+TRANSITION_LABEL = ['-3>-2', '-2>-1', '-1>0', '0>1', '1>2', '2>3']      # into the 1 s bin starting at the right edge
+
+
+def table_boundaries(P2: dict) -> pd.DataFrame:
+    """Per dataset at its shift transition: fraction of units preferring it, PV correlation of up /
+    down / other units, and loop-number decoding error vs shuffle (set 'all', mean of mice)."""
+    sh = shift_transitions(P2)
+    rows = []
+    for ds, P in P2.items():
+        B = _all_set(P['boundary'])
+        B = B[B['shift'] == sh[ds]]
+        D = _all_set(P['decoding'])
+        r = dict(dataset=ds, shift=TRANSITION_LABEL[sh[ds]], chance=1 / 6)
+        for c in ('frac_pref', 'pv_pos', 'pv_neg', 'pv_other', 'n_pos', 'n_neg'):
+            pm = per_mouse(B, c)
+            r[c], r[c + '_range'] = pm.mean(), f'{pm.min():.3g}-{pm.max():.3g}'
+        for c in ('error', 'shuffle'):
+            r['decode_' + c] = per_mouse(D, c).mean()
+        rows.append(r)
+    return pd.DataFrame(rows)
+
+
+def plot_boundaries(P2: dict, out_path=None):
+    """F27: left, the fraction of units whose largest change falls on each 1 s transition around
+    the reward (mean of mice; chance 1/6); middle, PV correlation across loops of up- and down-
+    modulated units at the shift vs other units; right, loop-number decoding error vs shuffle."""
+    sh = shift_transitions(P2)
+    with mpl.rc_context(_rc()):
+        fig, (a1, a2, a3) = plt.subplots(1, 3, figsize=(7.4, 2.5), layout='constrained')
+        for i, (ds, P) in enumerate(P2.items()):
+            B = _all_set(P['boundary'])
+            fr = B.groupby(['mouse', 'recday', 'shift'])['frac_pref'].mean().groupby(['mouse', 'shift']).mean().unstack()
+            a1.plot(range(6), fr.mean().to_numpy(), marker='o', ms=3, color=DATASET_COLORS[ds], label=f'{ds} (shift {TRANSITION_LABEL[sh[ds]]} s)')
+            b = B[B['shift'] == sh[ds]]
+            for j, c in enumerate(('pv_pos', 'pv_neg', 'pv_other')):
+                pm = per_mouse(b, c)
+                x = i * 4 + j
+                a2.bar(x, pm.mean(), color=DATASET_COLORS[ds], alpha=0.4 if c != 'pv_other' else 0.15, width=0.8, lw=0)
+                a2.scatter(x + _jitter(len(pm)), pm.values, s=8, color=DATASET_COLORS[ds], lw=0, zorder=3)
+            D = _all_set(P['decoding'])
+            e, s = per_mouse(D, 'error'), per_mouse(D, 'shuffle')
+            for m in e.index:
+                a3.plot([i * 3, i * 3 + 1], [e[m], s[m]], color=DATASET_COLORS[ds], lw=0.6, marker='o', ms=3)
+        a1.axhline(1 / 6, color=NULL, lw=0.6)
+        a1.set_xticks(range(6), TRANSITION_LABEL, rotation=30)
+        a1.set_xlabel('transition (s from reward arrival)')
+        a1.set_ylabel('fraction of units preferring')
+        a1.legend(frameon=False)
+        a2.axhline(0, color=INK, lw=0.5)
+        a2.set_xticks([0, 1, 2, 4, 5, 6][:3 * len(P2)], ['up', 'down', 'other'] * len(P2))
+        a2.set_ylabel('PV correlation across loops at the shift')
+        a3.set_xticks([0, 1, 3, 4][:2 * len(P2)], ['decoded', 'shuffled'] * len(P2))
+        a3.set_ylabel('loop-number error (loops)')
+        a3.set_title('lines: mice; ' + ' / '.join(P2), fontsize=6)
+        fig.suptitle('F27. Reward boundaries (Kanter Fig 6): which transition, which ensemble, and time stamps')
+    _save(fig, out_path)
+    return fig
+
+
+AXIS_PAIRS = ['leg_session', 'legA_session', 'legB_session', 'legC_session', 'legD_session', 'loop_session', 'leg_loop']
+
+
+def table_axes(P2: dict, sets=('all', 'all_n20')) -> pd.DataFrame:
+    """Per dataset, unit set and pair: offset and the two stabilities (deg) and multiplexing,
+    session mean per recday, then mouse mean."""
+    rows = []
+    for ds, P in P2.items():
+        A = P['axes']
+        for st in sets:
+            for pair in AXIS_PAIRS:
+                a = A[(A['set'] == st) & (A['pair'] == pair)]
+                if not len(a):
+                    continue
+                a = a.assign(stable=lambda x: ((x['stab_a'] <= STABLE_DEG) & (x['stab_b'] <= STABLE_DEG)).astype(float))
+                r = dict(dataset=ds, set=st, pair=pair, mice=a['mouse'].nunique())
+                for c in ('offset', 'stab_a', 'stab_b', 'multiplex', 'stable'):
+                    pm = per_mouse(a, c)
+                    r[c], r[c + '_range'] = pm.mean(), f'{pm.min():.3g}-{pm.max():.3g}'
+                rows.append(r)
+    return pd.DataFrame(rows)
+
+
+def plot_axes(P2: dict, out_path=None):
+    """F28: angle between coding axes (Kanter Fig 4G) per pair, against each axis's leave-one-out
+    stability, at 20 matched units (mean of draws per recday, then mouse); right, multiplexing."""
+    t = table_axes(P2, sets=('all_n20',))
+    with mpl.rc_context(_rc()):
+        fig, (a1, a2) = plt.subplots(1, 2, figsize=(7.0, 2.6), layout='constrained', width_ratios=[2.4, 1])
+        pairs = [p for p in AXIS_PAIRS if p in set(t['pair'])]
+        for j, ds in enumerate(P2):
+            A = P2[ds]['axes']
+            A = A[A['set'] == 'all_n20']
+            for i, pair in enumerate(pairs):
+                a = A[A['pair'] == pair]
+                if not len(a):
+                    continue
+                x = i + (j - 0.5) * 0.36
+                for c, mk in (('offset', 'o'), ('stab_a', '_'), ('stab_b', '_')):
+                    pm = per_mouse(a, c)
+                    a1.scatter(x + _jitter(len(pm), 0.15), pm.values, s=10 if c == 'offset' else 18, marker=mk,
+                               color=DATASET_COLORS[ds] if c == 'offset' else INK, lw=0.8 if mk == '_' else 0)
+                pm = per_mouse(a, 'multiplex')
+                if pair == 'leg_session':
+                    a2.scatter(j + _jitter(len(pm)), pm.values, s=9, color=DATASET_COLORS[ds], lw=0)
+        a1.axhline(90, color=NULL, lw=0.6)
+        a1.axhline(STABLE_DEG, color=NULL, lw=0.6, ls=':')
+        a1.set_xticks(range(len(pairs)), [p.replace('_', ' vs ') for p in pairs], rotation=30)
+        a1.set_ylabel('angle (deg): o offset, - stabilities\n(dotted: stability limit 30 deg)')
+        a1.set_ylim(0, 95)
+        a2.axhline(1 / 16, color=NULL, lw=0.6)
+        a2.set_xticks(range(len(P2)), list(P2))
+        a2.set_ylabel('multiplexing, leg vs session')
+        fig.suptitle('F28. Orthogonal coding axes (Kanter Fig 4G), 20-unit draws')
+    _save(fig, out_path)
+    return fig
+
+
+def table_ramp_test(TS: dict, set_name: str = 'all_n20') -> pd.DataFrame:
+    """Held-out and within-session accuracy by input: first minute, minutes 2-17, pooled over
+    recdays, draws and sessions, bins weighting (as M2's F13)."""
+    rows = []
+    for ds, M in TS.items():
+        R = M['ramp']
+        R = R[R['set'] == set_name]
+        for inp, r in R.groupby('input'):
+            for lab, m in (('minute 1', r['epoch'] == 0), ('minutes 2-17', r['epoch'] > 0)):
+                rr = r[m]
+                w = rr['n_bins']
+                rows.append(dict(dataset=ds, set=set_name, input=inp, epochs=lab, n_bins=int(w.sum()),
+                                 within=float(np.average(rr['within'], weights=w)),
+                                 across=float(np.average(rr['across'].fillna(0), weights=w * rr['across'].notna())),
+                                 chance=float(rr['chance'].mean())))
+    return pd.DataFrame(rows)
+
+
+def plot_ramp_test(TS: dict, out_path=None):
+    """F29: accuracy by true epoch, held out (solid) and within session (dashed), for raw counts and
+    with the entry-locked units divided by their held-out shape-free entry kernel or slow ramp
+    (20-unit draws, pooled); right, the entry-locked units alone vs size-matched non-locked units."""
+    cols = RAMP_INPUT_COLORS
+    with mpl.rc_context(_rc()):
+        fig, axes = plt.subplots(1, len(TS) + 1, figsize=(3.0 * (len(TS) + 1), 2.6), layout='constrained', squeeze=False)
+        for ax, (ds, M) in zip(axes[0], TS.items()):
+            R = M['ramp']
+            R = R[R['set'] == 'all_n20']
+            for inp in [i for i in RAMP_INPUT_COLORS if i in set(R['input'])]:
+                r = R[R['input'] == inp]
+                g = r.groupby('epoch').apply(lambda x: pd.Series(dict(
+                    within=np.average(x['within'], weights=x['n_bins']),
+                    across=np.average(x['across'].fillna(0), weights=x['n_bins'] * x['across'].notna()))))
+                ax.plot(g.index, g['across'], color=cols.get(inp, NULL), lw=1, label=inp)
+                ax.plot(g.index, g['within'], color=cols.get(inp, NULL), lw=0.8, ls='--')
+            ax.axhline(1 / 18, color=NULL, lw=0.6)
+            ax.set_xticks(range(0, 18, 3))
+            ax.set_xlabel('true 1-min epoch')
+            ax.set_ylabel('accuracy')
+            ax.set_title(ds, fontsize=7)
+            ax.legend(frameon=False)
+        ax = axes[0][-1]
+        for j, (ds, M) in enumerate(TS.items()):
+            R = M['ramp']
+            for k, st in enumerate(('locked_only', 'nonlocked_matched')):
+                r = R[(R['set'] == st) & (R['epoch'] == 0)]
+                if not len(r):
+                    continue
+                pm = r.groupby(['mouse', 'recday']).apply(lambda x: np.average(x['across'].fillna(0), weights=x['n_bins'] * x['across'].notna())).groupby('mouse').mean()
+                x = j * 2.5 + k
+                ax.bar(x, pm.mean(), color=DATASET_COLORS[ds], alpha=0.4 if k == 0 else 0.15, width=0.8, lw=0)
+                ax.scatter(x + _jitter(len(pm)), pm.values, s=8, color=DATASET_COLORS[ds], lw=0, zorder=3)
+        ax.axhline(1 / 18, color=NULL, lw=0.6)
+        ax.set_xticks([0, 1, 2.5, 3.5][:2 * len(TS)], ['locked', 'other'] * len(TS))
+        ax.set_ylabel('held-out accuracy, first minute')
+        fig.suptitle('F29. The ramp test: does dividing out the entry kernels remove the held-out first-minute decoding?')
+    _save(fig, out_path)
+    return fig
+
+
+def latest_gate_csv(root: str, name: str, dataset: str, tag: str = '') -> pd.DataFrame:
+    runs = sorted(glob.glob(os.path.join(root, 'runner_gate', f'{dataset.lower()}_{tag}*', name)))
+    if not runs:
+        raise FileNotFoundError(f'{name} for {dataset}')
+    return pd.read_csv(runs[-1])
+
+
+def table_m3p2_gates(datasets=('LEC', 'PFC')) -> pd.DataFrame:
+    rows = []
+    for ds in datasets:
+        for root, name, tag in ((TS_DIR, 'gate.csv', 'full'), (PART2_DIR, 'gate_part2.csv', '')):
+            try:
+                g = latest_gate_csv(root, name, ds, tag)
+            except FileNotFoundError:
+                continue
+            rows.append(g.assign(dataset=ds))
+    return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
+
+
+def region_contrast_df(d: pd.DataFrame, value: str, a='ENTl-deep', b='SUB/ProS', n_perm: int = 10000,
+                       seed: int = 0) -> dict:
+    """`region_contrast` for any per-unit table (recday, mouse, group, near_boundary, rate_hz and
+    `value`): rate-matched, off-boundary, mouse-level difference on the within-recday null."""
+    asp = _asp()
+    d = d[~d['near_boundary'].astype(bool) & d['group'].isin([a, b])].dropna(subset=[value]).reset_index(drop=True)
+    rm = asp.rate_match(d, 'rate_hz', a, b, seed=seed).reset_index(drop=True)
+    ref = asp.within_recday_permutation(rm, value, a, b, n_perm=200, seed=seed)
+    o200, _, p200 = _within_recday_null(rm, value, a, b, 200, seed)
+    if not (np.isclose(o200, ref['observed'], equal_nan=True) and np.isclose(p200, ref['p_perm'])):
+        raise AssertionError('replicated permutation differs from anatomy_split.within_recday_permutation')
+    obs, null, p = _within_recday_null(rm, value, a, b, n_perm, seed)
+    pm = rm.groupby(['mouse', 'recday', 'group'])[value].mean().groupby(['mouse', 'group']).mean().unstack()
+    return dict(contrast=f'{a} - {b}', value=value, observed=obs, p_perm=p, n_perm=n_perm, n_units=len(rm),
+                mice=sorted(pm.dropna().index), per_mouse=pm)
+
+
+def unit_measures(M: dict) -> pd.DataFrame:
+    """One row per unit of a timescales merge: the unit table, Tsao's flags, and Kanter's per-unit
+    medians over sessions (fraction of sessions with a significant elapsed-time term)."""
+    U = _unit_info(M)
+    t = M['tsao'][['recday', 'unit'] + [c for c in M['tsao'] if c.startswith('has_')]]
+    K = M['kanter'].assign(glm_sig=lambda x: (x['glm_p'] < 0.05).astype(float))
+    k = K.groupby(['recday', 'unit'])[['glm_sig', 'acf_tau_s', 'res_acf_tau_s', 'log_fano', 'res_log_fano']].median().reset_index()
+    out = U.merge(t, on=['recday', 'unit'], how='left').merge(k, on=['recday', 'unit'], how='left')
+    for c in [c for c in out if c.startswith('has_')]:
+        out[c] = out[c].astype(float)
+    out['log_res_acf_tau'] = np.log10(out['res_acf_tau_s'])
+    return out
+
+
+M3P2_CONTRAST_VALUES = ('has_entry_time', 'has_leg_time', 'has_day_time', 'glm_sig', 'log_res_acf_tau', 'res_log_fano')
+
+
+def table_m3p2_regions(M_lec: dict, n_perm: int = 10000) -> pd.DataFrame:
+    """ENTl-deep - SUB/ProS for each single-unit measure, as M2's region contrasts."""
+    U = unit_measures(M_lec)
+    rows = []
+    for v in M3P2_CONTRAST_VALUES:
+        r = region_contrast_df(U, v, n_perm=n_perm)
+        rows.append(dict(value=v, contrast=r['contrast'], observed=r['observed'], p_perm=r['p_perm'],
+                         n_units=r['n_units'], mice=len(r['mice']),
+                         per_mouse=' '.join(f"{m}:{x:+.3f}" for m, x in (r['per_mouse']['ENTl-deep'] - r['per_mouse']['SUB/ProS']).dropna().items())))
+    return pd.DataFrame(rows)
+
+
+RAMP_INPUTS = ['div_entry', 'div_ramp60', 'div_ramp120', 'div_ramp240']
+
+
+def _removed(acc0: dict, chance: float) -> dict:
+    """Fraction of the first-minute held-out advantage over chance removed by each input."""
+    adv = acc0['raw'] - chance
+    return {i: (1.0 - (acc0[i] - chance) / adv) if adv > 0 and i in acc0 else np.nan for i in RAMP_INPUTS}
+
+
+def table_ramp_envelope(TS: dict, set_name: str = 'all_n20') -> pd.DataFrame:
+    """Fraction of the first-minute held-out advantage removed per input: real data (pooled bins,
+    and per mouse) against the gate's planted slow ramps and 15 s transients (set 'all')."""
+    rows = []
+    for ds, M in TS.items():
+        R = M['ramp']
+        R = R[(R['set'] == set_name) & (R['epoch'] == 0)]
+        acc0 = {i: float(np.average(r['across'].fillna(0), weights=r['n_bins'] * r['across'].notna())) for i, r in R.groupby('input')}
+        rows.append(dict(source=f'{ds} real', mouse='pooled', **_removed(acc0, 1 / 18)))
+        for (mouse,), r in R.groupby(['mouse']):
+            a = {i: float(np.average(x['across'].fillna(0), weights=x['n_bins'] * x['across'].notna())) for i, x in r.groupby('input')}
+            rows.append(dict(source=f'{ds} real', mouse=mouse, **_removed(a, 1 / 18)))
+        for which, lab in (('ramp', 'planted slow ramps'), ('transient', 'planted 15 s transients')):
+            try:
+                g = latest_gate_csv(TS_DIR, f'{which}_ramp_summary.csv', ds, 'full').set_index('input')
+            except FileNotFoundError:
+                continue
+            rows.append(dict(source=f'{ds} {lab}', mouse='gate', **_removed(g['across_e0'].to_dict(), float(g['chance'].iloc[0]))))
+    return pd.DataFrame(rows)
+
+
+def plot_ramp_envelope(TS: dict, out_path=None):
+    """F30: how much of the first-minute held-out advantage each division removes, for the real
+    data (pooled line, mouse points) and for the gate's planted slow ramps and 15 s transients:
+    the real data's profile over the slow-ramp floors says which of the two it resembles."""
+    t = table_ramp_envelope(TS)
+    x = np.arange(len(RAMP_INPUTS))
+    with mpl.rc_context(_rc()):
+        fig, axes = plt.subplots(1, len(TS), figsize=(3.3 * len(TS), 2.7), layout='constrained', squeeze=False)
+        for ax, ds in zip(axes[0], TS):
+            for src, ls, col in ((f'{ds} planted slow ramps', '--', NULL), (f'{ds} planted 15 s transients', ':', NULL)):
+                r = t[t['source'] == src]
+                if len(r):
+                    ax.plot(x, r[RAMP_INPUTS].to_numpy()[0], ls=ls, color=INK, lw=0.9, marker='s', ms=3,
+                            label=src.split(' ', 1)[1])
+            real = t[t['source'] == f'{ds} real']
+            pooled = real[real['mouse'] == 'pooled']
+            ax.plot(x, pooled[RAMP_INPUTS].to_numpy()[0], color=DATASET_COLORS[ds], lw=1.4, marker='o', ms=4, label='real, pooled')
+            pm = real[real['mouse'] != 'pooled']
+            for _, r in pm.iterrows():
+                ax.scatter(x + _jitter(len(x), 0.0), r[RAMP_INPUTS].to_numpy(float), s=6, color=DATASET_COLORS[ds], alpha=0.5, lw=0)
+            ax.axhline(0, color=NULL, lw=0.5)
+            ax.axhline(1, color=NULL, lw=0.5)
+            ax.set_xticks(x, ['shape-free', 'ramp >= 60 s', '>= 120 s', '>= 240 s'], rotation=20)
+            ax.set_ylabel('first-minute held-out advantage removed')
+            ax.set_title(ds, fontsize=7)
+            ax.legend(frameon=False, fontsize=5)
+        fig.suptitle('F30. The ramp test against its gate: slow ramps vs a fast transient locked to bin 0')
     _save(fig, out_path)
     return fig
 
