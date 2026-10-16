@@ -5,6 +5,201 @@ constants, in LEC and PFC, read as the state of an SSM trace bank. Plan, user de
 rules and code map: `docs/handoff/EVENT_KERNELS_HANDOFF.md`. Population drift (Kanter) results
 are in `code/POPULATION_DRIFT.md`.
 
+## 2026-10-16 — M4 part 1: rest-entry kernels and intrinsic timescales in rest
+
+User decisions, 2026-10-15 and 2026-10-16: continuous state terms only, with no binary SWS flag; a
+population-rate term, applied by division; then the PFC end-of-recording check. Plan:
+`~/.claude/plans/please-read-this-handoff-crystalline-pinwheel.md`. Rest drift is in
+`POPULATION_DRIFT.md`, same date.
+
+**Outcome.**
+
+- **After rest entry, the LEC population rate falls in every mouse.** The rate in minutes 15-20 over
+  minutes 0-2, median block per mouse, is 0.79-0.84 (5 mice). In PFC it is 0.74-1.31 (7 mice). The
+  design divides this shared change out.
+- **LEC mice rarely reach DOWN-rich states in rest.** High-DOWN windows, at least 10% of a 10 s
+  window in DOWN states, are 0.4-3.9% of windows per mouse; in PFC 9-38%. The LFP check agrees
+  that LEC rests hold little SWS (2026-10-15).
+- **Relative to the population, many units still lock to rest entry,** held out by rest block,
+  beyond the state terms. Mean of mice, range over mice:
+
+  | | LEC, 5 mice | PFC, 5 mice with a fit |
+  |---|---|---|
+  | units locked to rest entry | 0.289 (0.137-0.349) | 0.132 (0.036-0.323) |
+  | units locked to the state terms | 0.647 (0.463-0.734) | 0.687 (0.548-0.811) |
+  | rest entry beats a linear day trend, of rest-entry-locked units | 0.60 (0.34-0.73), 845 units | 0.74, 138 units |
+
+  - Stage 2: 70% of LEC rest-entry-locked units are ramps, up 0.37 and down 0.33. Their median tau
+    is 1280 s, IQR 453-10240 s; 47% are at 30 min or slower and 29% sit at the grid edge. PFC: 59%
+    ramps, median tau 905 s.
+  - Units locked to the state terms lock to rest entry more often: 0.33 against 0.24 in LEC, pooled
+    units. Unit-specific state dependence is a candidate source, and the gate does not plant it.
+- **The maze-entry clock does not restart at rest entry, unit by unit.**
+  - Maze-entry-locked units are not more often rest-entry locked. Per mouse, LEC 0.29-0.35 against
+    0.30-0.36 for the other units, with ly07 0.13 against 0.14; PFC the same.
+  - Of 107 LEC units that ramp after both entries, 0.59 share the sign. Rest taus run a median
+    1280 s against 320 s after maze entry, and the two are unrelated.
+- **Intrinsic timescales.**
+
+  | | LEC | PFC |
+  |---|---|---|
+  | slow ACF tau, low-DOWN rest over task: median ratio; Spearman across units | 1.26; 0.14 (2851 units) | 1.14; 0.26 (1128) |
+  | Murray tau, low-DOWN rest over task: median ratio; Spearman | 0.66; 0.47 (2263) | 0.91; 0.50 (1056) |
+  | slow ACF tau in task against the maze-entry ramp tau: Spearman | 0.05 (567) | 0.04 (138) |
+  | Murray tau in task against the reward ramp tau: Spearman | -0.01 (588) | 0.17 (303) |
+
+  - The fast intrinsic timescale is a unit property: it correlates across rest and task, and in
+    LEC it is shorter in rest.
+  - The slow timescale barely correlates across contexts and runs longer in rest. Rest windows
+    carry the shared decline above.
+  - Neither timescale tracks the event kernels' time constants. The SSM reading predicted they would.
+
+Predictions in the plan:
+
+| prediction | held? |
+|---|---|
+| many units change rate over the first minutes of rest, mostly through sleep onset | partly: the LEC population rate falls 16-21% over 20 min, but LEC rests are mostly free of DOWN states, so it is not sleep onset |
+| maze-entry ramp units ramp after rest entry too, with similar tau and sign | no: no enrichment, sign 0.59, rest taus 4x longer and unrelated |
+| the slow ACF tau tracks the entry-ramp tau; the fast tau tracks the reward kernel's | no: Spearman 0.04-0.05 and -0.01-0.17 |
+| non-SWS rest drifts at the task's rate | no: see `POPULATION_DRIFT.md` |
+
+### What was done
+
+| file | role |
+|---|---|
+| `code/rest_kernels.py` (+ mirror, new) | the proxy, calibrated on the recday's real task sessions; signal-loss QC; `relative_pop_rate`, the median divisor; `build_rest_design`, with `down_frac` deciles and a 0 bin, plus the division; the reset test; low- and high-DOWN windows; Murray's tau; drift segments |
+| `code/rest_kernels_synthetics.py` (+ mirror, new) | the planted sleep process and units, `proxy_power`, the shared-ramp option |
+| `code/run_rest_kernels.py` (+ mirror, new) | one job per recday, two half fits; `--merge`; `--gate` with the no-state and shared-ramp controls |
+| `code/rest_lfp_check.py` (LEC only, new) | the LFP check; the Spearman readout |
+| `code/event_kernels_plots.py` (+ mirror) | F31-F37 and their tables |
+| `code/event_kernels_M4_rest.ipynb` | load mode. Figures in `data/figures/event_kernels/M4/` |
+| `sbatch_files/submit_event_kernels.sh`, `code/check_mirror_parity.py` | runner `rest`; the three pairs |
+
+- **Rows:** 250 ms rows of every valid rest block: at least 2 min, not a misclick, truncated at
+  signal loss and dropped below 5 min, with the final 20 s left out. LEC 267 blocks; PFC 239 shards,
+  none in the 4 tokenless recdays.
+- **Design:** leave one rest block out, centred within block, Freedman-Lane with 100 permutations.
+  The groups are `ev_rest_entry` (lags 0-2400 s) and `state`. Each unit half is divided by the
+  other half's relative population rate.
+- **Runs:** 25 + 25 jobs, every one `EXIT=0`. Not fitted for rest entry, because fewer than 10 units
+  per half reach 0.3 Hz: PFC ah03 x2, me08_06092021_09092021, me08_12092021_13092021,
+  me10_17122021_19122021, me11_12122021_13122021. So ah03 and me08 have no rest-entry fit.
+
+### Gates (round 5: quick 3771856/57, full 3771858/59, every one `EXIT=0`)
+
+| row | planted | LEC full | PFC full |
+|---|---|---|---|
+| G1 | the proxy at the real unit count: SWS-window AUC; planted high-DOWN recall / quiet wake high-DOWN | 1.000; 1.000 / 0.008 | 1.000 (reported); 1.000 / 0.000 |
+| G2 | rest-entry ramps locked; Stage 2 tau within 2x | 0.833; 0.8 | 1.0; 1.0 |
+| G3 | units at 0.3x in SWS, locked with / without the state terms | 0 of 8 / 8 of 8 | 0 of 8 / 8 of 8 |
+| G4 | noise locked, with / without the state terms | 0 of 54 / 24 of 54 | 1 of 20 / 15 of 20 |
+| G4b | a ramp shared by every unit: noise locked with / without (reported) | 2 of 54 / 49 of 54 | 0 of 20 / 20 of 20 |
+| G5 | day trends: the day term beats rest entry | 1.0 | 1.0 |
+| G6 | slow ACF tau ratio at 30 / 120 s; Murray tau within 2x at 0.25 s | 0.941 / 0.924; 1.0 | 0.986 / 1.124; 1.0 |
+| G7 | drift ratio, equal / 4x faster in rest | 0.935 / 2.204 | 0.909 / 2.293 |
+| G8 | the signal-loss cut on a planted dropout | within 60 s | within 60 s |
+
+**Four rounds failed first.** Each fix had a measured cause, recorded in the module docstrings and
+handoff §7:
+
+1. The gate calibrated the proxy on planted Poisson task data, which have no lulls. The cut was 0, so
+   the planted quiet wake read as SWS. Planted data now use the real calibration.
+2. Deciles of the population rate cannot follow a multiplicative shared change: 79 of 92 noise units
+   locked under a ramp shared by every unit. The rate now divides.
+3. A summed divisor moved 13-18% at rest entry in the PFC gate, from 6 planted ramp units. The
+   divisor is now a median.
+4. Tied deciles put `down_frac` 0-0.17 in one bin, with 4-5% of planted SWS windows. 0 is now its
+   own bin.
+5. G6 and G7 rested on 2 units and 10-25 segments; they now have 8 units and up to 120 segments. G6
+   scores rest windows clear of the planted quiet wake, as G7 does.
+
+### What was NOT established
+
+- **What rest-entry locking is.** It is relative to the population. A unit whose state dependence
+  differs from the population's locks on average, because state changes come at block-specific
+  times that average into a time course. State-locked units lock more often (0.33 against 0.24).
+  The gate plants only shared and SWS-specific state changes. 40% of LEC calls are matched by a
+  day trend.
+- **The rest-maze comparison is not like for like.** Rest kernels are relative to the population;
+  maze kernels are not. A clock shared by every unit after rest entry would be absorbed, and the
+  LEC population decline is such a shared change.
+- **Sleep staging.** No LFP-validated SWS, and no REM: quiet wake, drowsiness and REM are all in
+  low-DOWN rest.
+- **The low-DOWN class is loose where a recday's cut is high.** Cuts run 0.013-0.68 in LEC. ah08,
+  at 0.13-0.26, and ly06_20250613, at 0.68 with proxy AUC 0.755, admit DOWN-rich windows as low-DOWN.
+- **PFC's DOWN fraction** is high from the first minute in some blocks. In 20-60 units, silences
+  are not necessarily sleep.
+- **LEC vs PFC:** no contrast was tested.
+
+### Commands
+
+```
+python code/check_mirror_parity.py                                          # must exit 0
+for ds in lec pfc; do t=code; [ $ds = pfc ] && t=mFC_data/code
+  sbatch --time=0-02:00 --job-name=rk_gate_q_$ds sbatch_files/event_kernels.sbatch $t/run_rest_kernels.py --gate --dataset $ds --quick
+  sbatch --time=0-03:00 --job-name=rk_gate_f_$ds --dependency=afterok:<quick> sbatch_files/event_kernels.sbatch $t/run_rest_kernels.py --gate --dataset $ds
+done
+bash sbatch_files/submit_event_kernels.sh --dataset lec --runner rest --min-trials 5 --after <full gate>
+bash sbatch_files/submit_event_kernels.sh --dataset pfc --runner rest --min-trials 5 --after <full gate>
+sbatch --time=0-01:00 --mem=48G sbatch_files/event_kernels.sbatch code/run_rest_kernels.py --dataset lec --merge --min-trials 5 --n-perm 100
+sbatch --time=0-01:00 --mem=48G sbatch_files/event_kernels.sbatch mFC_data/code/run_rest_kernels.py --dataset pfc --merge --min-trials 5 --n-perm 100
+python code/rest_lfp_check.py --pick                                        # then one sbatch job per block, then --summarise
+sbatch --job-name=ek_nb_m4 --time=0-01:30 --mem=48G --cpus-per-task=4 sbatch_files/event_kernels.sbatch -m jupyter nbconvert --to notebook --execute --inplace --ExecutePreprocessor.timeout=3600 code/event_kernels_M4_rest.ipynb
+```
+
+Outputs: shards in `data/event_kernels/rest/shards/<ds>_mt5_np100/`; merged
+`data/event_kernels/rest/rest_<ds>_mt5_np100.pkl` with CSVs; gate runs in
+`data/event_kernels/rest/runner_gate/`; the LFP check in `data/event_kernels/rest/lfp_check/`.
+
+## 2026-10-15 — PFC entry kernels peak at the end of the recording
+
+Found while captioning F4 for the results page (https://claude.ai/artifact/557jgXBgUcq5jMarZvJBrp).
+M2's `table_entry_peak_bins` counts only the first minute and the overflow bin, so it missed this.
+
+**Measured.** Entry-locked units of the merged Stage 1 tables, anchor `entry`; the bin holding each
+unit's largest |beta| over the 15 lag bins and the overflow:
+
+| arm | entry-locked units | peak in 1200-1500 s | negative | per mouse, pooled units |
+|---|---|---|---|---|
+| PFC, >= 10 trials | 424 | 202 (0.48) | 196 | 0.20-0.79 |
+| PFC, >= 5 trials | 414 | 184 (0.44) | 178 | 0.17-0.64 |
+| LEC, >= 10 trials | 790 | 16 (0.02) | | 0.01-0.03 |
+| LEC, >= 5 trials, V3 | 972 | 16 (0.016) | | 0.00-0.02 |
+
+- The reference bin is 960-1200 s in every recday of both datasets. The overflow, beyond 1500 s,
+  has no estimate in any PFC unit.
+- Rows of the 1200-1500 s bin that fall after the last trial: PFC 88% over 194 sessions, where the
+  task ends a median 1153 s after bin 0 and the recording 1219 s; LEC 59% over 191 ABCD sessions
+  (1194 s and 1233 s).
+- Stage 2 classes of the 184 PFC units: other 119, bump 27, ramp up 20, none 11, ramp down 7. So
+  they are 119 of PFC's 130 `other` entry units. LEC's 16: other 8, ramp up 5, none 2, bump 1.
+- In PFC the remaining 230 entry-locked units are ramps up 73, ramps down 58, bumps 56, none 32,
+  other 11.
+
+**Not established.**
+
+- How many PFC entry calls survive with the post-task segment, or the 1200-1500 s bin, set aside.
+  Its share of each unit's held-out cpd was not separated.
+- What the drop is: handling at the end of the session, or a feature of the shard's last seconds.
+- What it changes in the PFC entry fraction, the reset test, the leaky test and the ramp test.
+
+**Commands.**
+
+```
+cd code && python - <<'EOF'
+import pickle, numpy as np, event_kernels_plots as P
+for ds, f in [('PFC', 'stage1_pfc_kin-strict_mt5_np100.pkl'), ('LEC', 'stage1_lec_kin-strict_mt5_np100.v1.pkl')]:
+    M = pickle.load(open('../data/event_kernels/stage1/' + f, 'rb'))
+    d = P._rows(M, 'ev_entry'); d = d[d['locked']]
+    B, _, _ = P.kernel_rows(M, 'entry', d)
+    j = np.nanargmax(np.where(np.isfinite(B), np.abs(B), -np.inf), axis=1)
+    s = np.sign(B[np.arange(len(B)), j])
+    print(ds, len(j), int((j == 14).sum()), int(((j == 14) & (s < 0)).sum()))
+EOF
+# post-task share of 1200-1500 s: mFC_data/data/processed/pfc_session_index.v2.csv (first_A_bin, n_core,
+# n_post) and data/processed_data/full_sessions_v4/full_sessions_*.csv (n_pre, n_core, n_post), 25 ms bins
+```
+
 ## 2026-10-14 — M3 part 2: Tsao's stepwise table, Kanter's single-unit timescales, the ramp test
 
 User decisions, 2026-10-13/14:

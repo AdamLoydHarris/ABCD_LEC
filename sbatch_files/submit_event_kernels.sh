@@ -6,6 +6,7 @@
 #   bash sbatch_files/submit_event_kernels.sh --dataset lec --runner stage2 --min-trials 5   # Stage 2
 #   bash sbatch_files/submit_event_kernels.sh --dataset lec --runner timescales --min-trials 5   # M3 part 2: Tsao, Kanter units, ramp test
 #   bash sbatch_files/submit_event_kernels.sh --dataset lec --runner drift2 --min-trials 5       # M3 part 2: Kanter population
+#   bash sbatch_files/submit_event_kernels.sh --dataset lec --runner rest --min-trials 5         # M4 part 1: rest
 #   bash sbatch_files/submit_event_kernels.sh --dataset lec --min-trials 5        # the sensitivity arm
 #   bash sbatch_files/submit_event_kernels.sh --dataset lec --n-perm 20 --recdays ah10_20250616_20250617
 #   bash sbatch_files/submit_event_kernels.sh --dataset lec --after 123:124       # start only if those exit 0
@@ -47,8 +48,8 @@ case "$DATASET" in
     *) echo "--dataset lec|pfc is required" >&2; exit 2 ;;
 esac
 case "$RUNNER" in
-    stage1|drift|stage2|leaky|timescales|drift2) ;;
-    *) echo "--runner stage1|drift|stage2|leaky|timescales|drift2" >&2; exit 2 ;;
+    stage1|drift|stage2|leaky|timescales|drift2|rest) ;;
+    *) echo "--runner stage1|drift|stage2|leaky|timescales|drift2|rest" >&2; exit 2 ;;
 esac
 
 if [ "${#RECDAYS[@]}" -eq 0 ]; then
@@ -95,6 +96,12 @@ for rd in "${RECDAYS[@]}"; do
               --recday "$rd" --min-trials "$MIN_TRIALS" --n-perm "$N_PERM")
         echo "  $rd -> $jid"
         n=$((n + 1))
+    elif [ "$RUNNER" = rest ]; then
+        jid=$("${SB[@]}" --time=0-04:00 --job-name="rk_${DATASET}_mt${MIN_TRIALS}_${rd}" \
+              sbatch_files/event_kernels.sbatch "$TREE/run_rest_kernels.py" --dataset "$DATASET" \
+              --recday "$rd" --min-trials "$MIN_TRIALS" --n-perm "$N_PERM")
+        echo "  $rd -> $jid"
+        n=$((n + 1))
     elif [ "$RUNNER" = drift2 ]; then
         jid=$("${SB[@]}" --time=0-02:00 --job-name="pd2_${DATASET}_mt${MIN_TRIALS}_${rd}" \
               sbatch_files/event_kernels.sbatch "$TREE/run_population_drift.py" --dataset "$DATASET" \
@@ -131,6 +138,8 @@ elif [ "$RUNNER" = timescales ]; then
     echo "  python $TREE/run_unit_timescales.py --dataset $DATASET --merge --min-trials $MIN_TRIALS --n-perm $N_PERM"
 elif [ "$RUNNER" = drift2 ]; then
     echo "  python $TREE/run_population_drift.py --dataset $DATASET --part2 --merge --min-trials $MIN_TRIALS"
+elif [ "$RUNNER" = rest ]; then
+    echo "  python $TREE/run_rest_kernels.py --dataset $DATASET --merge --min-trials $MIN_TRIALS --n-perm $N_PERM"
 else
     echo "  python $TREE/run_population_drift.py --dataset $DATASET --merge --min-trials $MIN_TRIALS"
 fi

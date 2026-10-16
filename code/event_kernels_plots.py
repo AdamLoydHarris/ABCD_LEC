@@ -1,5 +1,6 @@
 """Figures and tables for the event-kernel reports, from the merged pickles: F1-F14 (M2), F15-F18
-(M3 part 1, Stage 2), F19-F21 (entry clock vs leaky reward count), F22-F30 (M3 part 2).
+(M3 part 1, Stage 2), F19-F21 (entry clock vs leaky reward count), F22-F30 (M3 part 2), F31-F37
+(M4 part 1, rest: `run_rest_kernels.py --merge` and the LEC LFP check).
 
 Inputs are what `run_event_kernels.py --merge` and `run_population_drift.py --merge` write
 (`load_latest` finds the highest `.vN`). Every summary is per mouse: recday mean first, then the
@@ -1742,6 +1743,385 @@ def plot_ramp_envelope(TS: dict, out_path=None):
         fig.suptitle('F30. The ramp test against its gate: slow ramps vs a fast transient locked to bin 0')
     _save(fig, out_path)
     return fig
+
+
+# ---------------------------------------------------------------------------
+# M4 part 1: rest (F31-F37)
+# ---------------------------------------------------------------------------
+
+REST_DIR = os.path.join(REPO, 'data', 'event_kernels', 'rest')
+LFP_DIR = os.path.join(REST_DIR, 'lfp_check')
+M4_FIG_DIR = os.path.join(REPO, 'data', 'figures', 'event_kernels', 'M4')
+REST_CONTEXTS = {'rest_low': 'rest, low DOWN', 'rest_high': 'rest, high DOWN', 'task': 'task'}
+MURRAY_MIN_S = 0.05             # Murray's fit starts at the 50 ms lag: a smaller tau is not resolved
+
+
+def _block_stage(M: dict) -> pd.DataFrame:
+    """(recday, block, stage): LEC's recording index says pre / post; PFC's blocks carry none, so a
+    block that is its day's first recording (hours since day start 0) is 'pre'."""
+    B = M['blocks'][['recday', 'index', 'stage', 'hours_since_day_start']].rename(columns={'index': 'block'})
+    B['stage'] = np.where(B['stage'].isna(), np.where(B['hours_since_day_start'] < 1e-6, 'pre', 'post'), B['stage'])
+    return B[['recday', 'block', 'stage']]
+
+
+def load_rest(ds: str, min_trials: int = 5, n_perm: int = 100) -> dict:
+    """The merged rest pickle of one dataset (`run_rest_kernels --merge`)."""
+    return load_latest(os.path.join(REST_DIR, f'rest_{ds.lower()}_mt{min_trials}_np{n_perm}'))
+
+
+def table_m4_gates(datasets=('LEC', 'PFC'), mode: str = 'full') -> pd.DataFrame:
+    """Every row of the latest rest gate run per dataset."""
+    out = []
+    for ds in datasets:
+        hits = sorted(glob.glob(os.path.join(REST_DIR, 'runner_gate', f'{ds.lower()}_{mode}_*', 'gate.csv')))
+        if hits:
+            out.append(pd.read_csv(hits[-1]).assign(dataset=ds, run=os.path.basename(os.path.dirname(hits[-1]))))
+    return pd.concat(out, ignore_index=True) if out else pd.DataFrame()
+
+
+def plot_lfp_check(out_path=None):
+    """F31: the DOWN-state fraction against LFP delta power in LEC, 2 blocks per mouse: Spearman per
+    block by kind, and the between-task block with the most DOWN states as a trace."""
+    S = pd.read_csv(os.path.join(LFP_DIR, 'summary.csv'))
+    ex = S[S['kind'] == 'post'].sort_values('down_frac_nonzero').iloc[-1]
+    t = pd.read_csv(os.path.join(LFP_DIR, f"{ex['recday']}_sb{int(ex['block'])}.csv")).dropna(subset=['delta'])
+    with mpl.rc_context(_rc()):
+        fig, (a1, a2) = plt.subplots(1, 2, figsize=(6.8, 2.4), layout='constrained', gridspec_kw=dict(width_ratios=[1, 2.4]))
+        for i, k in enumerate(('pre', 'post')):
+            d = S[S['kind'] == k].sort_values('mouse')
+            x = i + _jitter(len(d), 0.35)
+            a1.scatter(x, d['spearman_log_delta'], s=12, color=DATASET_COLORS['LEC'], lw=0, zorder=3)
+            for xi, (_, r) in zip(x, d.iterrows()):
+                a1.annotate(r['mouse'], (xi, r['spearman_log_delta']), fontsize=4, xytext=(2, 1), textcoords='offset points')
+        a1.axhline(0, color=NULL, lw=0.6)
+        a1.set_xticks([0, 1], ['before the\nfirst task', 'between\ntasks'])
+        a1.set_xlim(-0.6, 1.6)
+        a1.set_ylabel('Spearman, DOWN fraction\nvs log delta, per 10 s window')
+        m = t['t_s'] / 60.0
+        a2.plot(m, t['down_frac'], color=INK, lw=0.7, label='DOWN fraction')
+        a2.set_xlabel('time since rest entry (min)')
+        a2.set_ylabel('DOWN fraction')
+        b = a2.twinx()
+        b.spines['right'].set_visible(True)
+        b.plot(m, np.log10(t['delta']), color=DATASET_COLORS['LEC'], lw=0.7)
+        b.set_ylabel('log10 delta power', color=DATASET_COLORS['LEC'])
+        a2.set_title(f"{ex['recday']} block {int(ex['block'])}: Spearman {ex['spearman_log_delta']:.2f}", fontsize=7)
+        fig.suptitle('F31. The spike-based DOWN-state fraction tracks LFP delta power in rest between tasks (LEC)')
+    _save(fig, out_path)
+    return fig
+
+
+def table_rest_locking(R: dict) -> pd.DataFrame:
+    """Per dataset, group (rest entry, state terms) and mouse: the fraction of units locked
+    (recday mean, then mouse mean)."""
+    rows = []
+    for ds, M in R.items():
+        s = M['stage1']
+        for g in ('ev_rest_entry', 'state'):
+            d = s[s['group'] == g].assign(v=lambda x: x['locked'].astype(float))
+            rows += [dict(dataset=ds, group=g, mouse=m, fraction=v, n_units=int((d['mouse'] == m).sum()))
+                     for m, v in per_mouse(d, 'v').items()]
+    return pd.DataFrame(rows)
+
+
+def table_rest_vs_maze(R: dict) -> pd.DataFrame:
+    """Per dataset and mouse: the fraction locked to rest entry among maze-entry-locked units and
+    among the rest (Stage 1, >= 5 trials), over units with both fits."""
+    rows = []
+    for ds, M in R.items():
+        s = M['stage1']
+        s = s[s['group'] == 'ev_rest_entry'][['recday', 'mouse', 'unit', 'locked']]
+        m = s.merge(_stage1_calls(ds)[['recday', 'unit', 'ev_entry']], on=['recday', 'unit'], how='inner')
+        for maze, d in m.groupby('ev_entry'):
+            rows += [dict(dataset=ds, maze_entry_locked=bool(maze), mouse=mo, p_rest_locked=v, n_units=int((d['mouse'] == mo).sum()))
+                     for mo, v in per_mouse(d.assign(v=d['locked'].astype(float)), 'v').items()]
+    return pd.DataFrame(rows)
+
+
+def plot_rest_locking(R: dict, n_perm: int = 100, out_path=None):
+    """F32: per mouse, the fraction of units locked to rest entry and to the state terms; and the
+    rest-entry fraction among maze-entry-locked units against the others."""
+    t, o = table_rest_locking(R), table_rest_vs_maze(R)
+    with mpl.rc_context(_rc()):
+        fig, (a1, a2) = plt.subplots(1, 2, figsize=(6.4, 2.5), layout='constrained')
+        w = 0.8 / max(len(R), 1)
+        for j, g in enumerate(('ev_rest_entry', 'state')):
+            for i, ds in enumerate(R):
+                d = t[(t['dataset'] == ds) & (t['group'] == g)]
+                x = j + (i - (len(R) - 1) / 2) * w
+                if len(d):
+                    a1.bar(x, d['fraction'].mean(), width=w * 0.9, color=DATASET_COLORS[ds], alpha=0.4, lw=0,
+                           label=ds if j == 0 else None)
+                    a1.scatter(x + _jitter(len(d), w * 0.6), d['fraction'], s=8, color=DATASET_COLORS[ds], lw=0, zorder=3)
+        a1.axhline(alpha_null(n_perm), color=NULL, ls='--', lw=0.8)
+        a1.set_xticks([0, 1], ['rest entry', 'state terms'])
+        a1.set_ylabel('fraction of units locked')
+        a1.set_ylim(0, 1)
+        a1.legend(frameon=False)
+        for i, ds in enumerate(R):
+            d = o[o['dataset'] == ds].pivot_table(index='mouse', columns='maze_entry_locked', values='p_rest_locked')
+            for mo, r in d.iterrows():
+                a2.plot([2 * i, 2 * i + 1], [r.get(True, np.nan), r.get(False, np.nan)], color=DATASET_COLORS[ds], lw=0.7,
+                        marker='o', ms=3)
+        a2.axhline(alpha_null(n_perm), color=NULL, ls='--', lw=0.8)
+        a2.set_xticks(range(2 * len(R)), sum([[f'{ds}\nmaze-entry\nlocked', f'{ds}\nother'] for ds in R], []), fontsize=6)
+        a2.set_ylabel('fraction locked to rest entry')
+        fig.suptitle('F32. Units locked to rest entry, held out by rest block, beyond the state terms; '
+                     'point = mouse, dashed = exact null rate')
+    _save(fig, out_path)
+    return fig
+
+
+def table_rest_tau(R: dict) -> pd.DataFrame:
+    """Units ramp-classed by Stage 2 after both rest entry and maze entry, locked in each: both
+    taus and shapes."""
+    rows = []
+    for ds, M in R.items():
+        r = M['stage2']
+        r = r[(r['role'] == 'locked') & r['shape'].isin(['ramp_up', 'ramp_down'])]
+        S2 = load_latest(os.path.join(STAGE2_DIR, f'stage2_{ds.lower()}_kin-strict_mt5_np100'))['table']
+        m = S2[(S2['event'] == 'entry') & (S2['role'] == 'locked') & S2['shape'].isin(['ramp_up', 'ramp_down'])]
+        j = r[['recday', 'mouse', 'unit', 'shape', 'tau_median']].merge(
+            m[['recday', 'unit', 'shape', 'tau_median']], on=['recday', 'unit'], suffixes=('_rest', '_maze'))
+        rows.append(j.assign(dataset=ds, same_sign=j['shape_rest'] == j['shape_maze']))
+    return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
+
+
+def plot_rest_stage2(R: dict, out_path=None):
+    """F33: Stage 2 shape of rest-entry-locked units (point = mouse, open = null sample), and tau after
+    rest entry against tau after maze entry for units that ramp after both."""
+    tab = table_rest_tau(R)
+    with mpl.rc_context(_rc()):
+        fig, (a1, a2) = plt.subplots(1, 2, figsize=(6.6, 2.6), layout='constrained')
+        w = 0.8 / max(len(R), 1)
+        for i, (ds, M) in enumerate(R.items()):
+            T = M['stage2']
+            for j, c in enumerate(CLASSES):
+                x = j + (i - (len(R) - 1) / 2) * w
+                lk = per_mouse(T[T['role'] == 'locked'].assign(v=lambda d: (d['shape'] == c).astype(float)), 'v')
+                nl = T[T['role'] == 'null_sample']
+                if len(lk):
+                    a1.bar(x, lk.mean(), width=w * 0.9, color=DATASET_COLORS[ds], alpha=0.4, lw=0, label=ds if j == 0 else None)
+                    a1.scatter(x + _jitter(len(lk), w * 0.6), lk.values, s=6, color=DATASET_COLORS[ds], lw=0, zorder=3)
+                if len(nl):
+                    a1.scatter(x, (nl['shape'] == c).mean(), s=14, facecolor='none', edgecolor=INK, lw=0.7, zorder=4)
+        a1.set_xticks(range(len(CLASSES)), [c.replace('_', ' ') for c in CLASSES], rotation=45)
+        a1.set_ylabel('fraction of rest-entry-locked units')
+        a1.set_ylim(0, 1)
+        a1.legend(frameon=False)
+        for ds in R:
+            d = tab[tab['dataset'] == ds] if len(tab) else tab
+            if len(d):
+                a2.scatter(d['tau_median_maze'], d['tau_median_rest'], s=8, color=DATASET_COLORS[ds], lw=0, alpha=0.7,
+                           label=f"{ds}: {len(d)} units, same sign {d['same_sign'].mean():.2f}")
+        a2.set_xscale('log')
+        a2.set_yscale('log')
+        lim = [5, 1e4]
+        a2.plot(lim, lim, color=NULL, lw=0.6)
+        a2.set_xlabel('tau after maze entry (s)')
+        a2.set_ylabel('tau after rest entry (s)')
+        a2.legend(frameon=False)
+        fig.suptitle('F33. Shapes of rest-entry kernels, and their time constants against maze entry')
+    _save(fig, out_path)
+    return fig
+
+
+def table_rest_timescales(R: dict) -> pd.DataFrame:
+    """Per unit: slow ACF tau and Murray tau in low-DOWN rest and in task, with the unit's Stage 2
+    maze-entry ramp tau and reward ramp tau where they exist."""
+    rows = []
+    for ds, M in R.items():
+        T = M['timescales'].copy()
+        T.loc[~T['murray_ok'].astype(bool) | (T['murray_tau_s'] < MURRAY_MIN_S), 'murray_tau_s'] = np.nan
+        p = T.pivot_table(index=['recday', 'mouse', 'unit'], columns='context', values=['acf_tau_s', 'murray_tau_s'])
+        p.columns = [f'{a}_{b}' for a, b in p.columns]
+        p = p.reset_index()
+        S2 = load_latest(os.path.join(STAGE2_DIR, f'stage2_{ds.lower()}_kin-strict_mt5_np100'))['table']
+        for ev, col in (('entry', 'entry_tau_s'), ('reward', 'reward_tau_s')):
+            s = S2[(S2['event'] == ev) & (S2['role'] == 'locked') & S2['shape'].isin(['ramp_up', 'ramp_down'])]
+            p = p.merge(s[['recday', 'unit', 'tau_median']].rename(columns={'tau_median': col}), on=['recday', 'unit'], how='left')
+        rows.append(p.assign(dataset=ds))
+    return pd.concat(rows, ignore_index=True)
+
+
+def plot_rest_timescales(R: dict, out_path=None):
+    """F34: per unit, the slow ACF tau and Murray's fast tau in low-DOWN rest against task; and the task
+    values against the unit's maze-entry ramp tau and reward ramp tau."""
+    t = table_rest_timescales(R)
+    pairs = (('acf_tau_s_task', 'acf_tau_s_rest_low', 'slow ACF tau, task (s)', 'slow ACF tau, low-DOWN rest (s)'),
+             ('murray_tau_s_task', 'murray_tau_s_rest_low', 'Murray tau, task (s)', 'Murray tau, low-DOWN rest (s)'),
+             ('entry_tau_s', 'acf_tau_s_task', 'maze-entry ramp tau (s)', 'slow ACF tau, task (s)'),
+             ('reward_tau_s', 'murray_tau_s_task', 'reward ramp tau (s)', 'Murray tau, task (s)'))
+    with mpl.rc_context(_rc()):
+        fig, axes = plt.subplots(1, 4, figsize=(7.4, 2.2), layout='constrained')
+        for ax, (xc, yc, xl, yl) in zip(axes, pairs):
+            for ds in R:
+                d = t[(t['dataset'] == ds)][[xc, yc, 'mouse']].dropna() if {xc, yc} <= set(t.columns) else pd.DataFrame()
+                if not len(d):
+                    continue
+                from scipy.stats import spearmanr
+                rho = spearmanr(d[xc], d[yc]).correlation if len(d) > 3 else np.nan
+                ax.scatter(d[xc], d[yc], s=3, color=DATASET_COLORS[ds], lw=0, alpha=0.5,
+                           label=f'{ds}: n {len(d)}, rho {rho:.2f}, median ratio {np.median(d[yc] / d[xc]):.2f}')
+            ax.set_xscale('log')
+            ax.set_yscale('log')
+            if 'tau_s_' in xc and 'tau_s_' in yc:
+                lo, hi = ax.get_xlim()
+                ax.plot([lo, hi], [lo, hi], color=NULL, lw=0.6)
+            ax.set_xlabel(xl)
+            ax.set_ylabel(yl)
+            ax.legend(frameon=False, fontsize=4)
+        fig.suptitle('F34. Intrinsic timescales in rest and task, and against the event kernels\' time constants')
+    _save(fig, out_path)
+    return fig
+
+
+def table_rest_drift(R: dict, set_name: str = 'all_n20') -> pd.DataFrame:
+    """Per dataset, context and mouse: drift growth and within-segment epoch decoding over chance
+    (segments, then draws, then recday, then mouse)."""
+    rows = []
+    for ds, M in R.items():
+        D = M['drift']
+        D = D[D['set'] == set_name]
+        g = D.groupby(['mouse', 'recday', 'context'])[['growth', 'acc', 'chance']].mean().reset_index()
+        g['acc_over_chance'] = g['acc'] / g['chance']
+        for ctx, d in g.groupby('context'):
+            pm = d.groupby('mouse')[['growth', 'acc_over_chance']].mean()
+            rows += [dict(dataset=ds, context=ctx, mouse=m, growth=r['growth'], acc_over_chance=r['acc_over_chance'],
+                          n_recdays=int((d['mouse'] == m).sum())) for m, r in pm.iterrows()]
+    return pd.DataFrame(rows)
+
+
+def plot_rest_drift(R: dict, out_path=None):
+    """F35: Kanter's drift measures on 60 s segments of low-DOWN rest, high-DOWN rest and task, at 20
+    units: distance growth (lags 7-9 minus lag 1) and epoch decoding over chance, point = mouse."""
+    t = table_rest_drift(R)
+    ctxs = [c for c in REST_CONTEXTS if c in set(t['context'])]
+    with mpl.rc_context(_rc()):
+        fig, axes = plt.subplots(1, 2, figsize=(6.4, 2.4), layout='constrained')
+        w = 0.8 / max(len(R), 1)
+        for ax, col, lab in zip(axes, ('growth', 'acc_over_chance'), ('drift growth (cosine distance)', 'epoch decoding / chance')):
+            for i, ds in enumerate(R):
+                for j, c in enumerate(ctxs):
+                    d = t[(t['dataset'] == ds) & (t['context'] == c)]
+                    x = j + (i - (len(R) - 1) / 2) * w
+                    if len(d):
+                        ax.bar(x, d[col].mean(), width=w * 0.9, color=DATASET_COLORS[ds], alpha=0.4, lw=0, label=ds if j == 0 else None)
+                        ax.scatter(x + _jitter(len(d), w * 0.6), d[col], s=6, color=DATASET_COLORS[ds], lw=0, zorder=3)
+            ax.set_xticks(range(len(ctxs)), [REST_CONTEXTS[c] for c in ctxs])
+            ax.set_ylabel(lab)
+            if col == 'acc_over_chance':
+                ax.axhline(1, color=NULL, lw=0.6, ls='--')
+        axes[0].legend(frameon=False)
+        fig.suptitle('F35. Population drift within 60 s segments of rest and task (Kanter Fig 2), 20-unit draws')
+    _save(fig, out_path)
+    return fig
+
+
+def table_rest_course(R: dict, bin_s: float = 60.0) -> pd.DataFrame:
+    """Per dataset, block stage (before the first task / between tasks), mouse and minute since rest
+    entry: the population rate relative to its block's mean, and the DOWN fraction."""
+    rows = []
+    for ds, M in R.items():
+        W = M['windows'].drop(columns='stage').merge(_block_stage(M), on=['recday', 'block'], how='left')
+        W['rel_rate'] = W['pop_rate_hz'] / W.groupby(['recday', 'block'])['pop_rate_hz'].transform('mean')
+        W['minute'] = (W['t_s'] // bin_s).astype(int)
+        g = W.groupby(['stage', 'mouse', 'recday', 'minute'])[['rel_rate', 'down_frac']].mean().reset_index()
+        g = g.groupby(['stage', 'mouse', 'minute'])[['rel_rate', 'down_frac']].mean().reset_index()
+        rows.append(g.assign(dataset=ds))
+    return pd.concat(rows, ignore_index=True)
+
+
+def plot_rest_course(R: dict, max_min: int = 40, out_path=None):
+    """F36: the shared state after rest entry, which the design absorbs: the population rate relative
+    to its block's mean and the DOWN fraction, per mouse, by block stage."""
+    t = table_rest_course(R)
+    t = t[t['minute'] < max_min]
+    with mpl.rc_context(_rc()):
+        fig, axes = plt.subplots(2, len(R), figsize=(3.4 * len(R), 3.6), layout='constrained', squeeze=False, sharex=True)
+        for k, ds in enumerate(R):
+            for r, (col, lab) in enumerate((('rel_rate', 'population rate / block mean'), ('down_frac', 'DOWN fraction'))):
+                ax = axes[r, k]
+                for st, ls in (('pre', '--'), ('post', '-')):
+                    for mo, d in t[(t['dataset'] == ds) & (t['stage'] == st)].groupby('mouse'):
+                        ax.plot(d['minute'] + 0.5, d[col], color=DATASET_COLORS[ds], lw=0.6, ls=ls, alpha=0.7)
+                ax.set_ylabel(lab)
+                if r == 0:
+                    ax.set_title(f'{ds}: solid between tasks, dashed before the first task', fontsize=7)
+                    ax.axhline(1, color=NULL, lw=0.5)
+            axes[-1, k].set_xlabel('time since rest entry (min)')
+        fig.suptitle('F36. The shared state after rest entry, per mouse: what the division and the DOWN-fraction terms absorb')
+    _save(fig, out_path)
+    return fig
+
+
+def table_rest_gate_locking(datasets=('LEC', 'PFC'), mode: str = 'full') -> pd.DataFrame:
+    """Per dataset, planted kind and run: the fraction of planted units locked to rest entry, with
+    and without the state terms, from the latest gate run's pickles."""
+    rows = []
+    runs = (('', 'with', 'planted'), ('_no_state', 'without', 'planted'), ('_shared_ramp', 'with', 'shared ramp'),
+            ('_shared_ramp_no_state', 'without', 'shared ramp'))
+    for ds in datasets:
+        hits = sorted(glob.glob(os.path.join(REST_DIR, 'runner_gate', f'{ds.lower()}_{mode}_*', 'gate.csv')))
+        if not hits:
+            continue
+        root = os.path.dirname(hits[-1])
+        rd = os.path.basename(min(glob.glob(os.path.join(root, '*.pkl')), key=len))[:-len('.pkl')]
+        for tag, state, world in runs:
+            p = os.path.join(root, f'{rd}{tag}.pkl')
+            if not os.path.exists(p):
+                continue
+            with open(p, 'rb') as fh:
+                d = pickle.load(fh)['data']
+            s = d['stage1'][d['stage1']['group'] == 'ev_rest_entry'].merge(d['truth'][['unit', 'kind']], on='unit')
+            for kind in ('rest_ramp', 'sws_gain', 'noise'):
+                k = s[s['kind'] == kind]['locked']
+                if len(k):
+                    rows.append(dict(dataset=ds, world=world, kind=kind, state_terms=state, locked=float(k.mean()), n=len(k)))
+    return pd.DataFrame(rows)
+
+
+def plot_rest_gates(n_perm: int = 100, out_path=None):
+    """F37: the rest gate's planted envelope (full runs): the fraction of planted units locked to rest
+    entry with and without the state terms, per kind; what must stay at chance does so only with
+    them, and the planted rest-entry ramps survive them."""
+    t = table_rest_gate_locking()
+    cats = [('planted', 'rest_ramp', 'G2 rest-entry\nramps'), ('planted', 'sws_gain', 'G3 units at\n0.3x in SWS'),
+            ('planted', 'noise', 'G4 noise'), ('shared ramp', 'noise', 'G4b noise, ramp\nshared by all units')]
+    with mpl.rc_context(_rc()):
+        fig, ax = plt.subplots(figsize=(6.4, 2.4), layout='constrained')
+        ds_list = sorted(t['dataset'].unique()) if len(t) else []
+        w = 0.8 / max(2 * len(ds_list), 1)
+        for j, (world, kind, _) in enumerate(cats):
+            for i, ds in enumerate(ds_list):
+                for s, (state, alpha) in enumerate((('with', 0.9), ('without', 0.35))):
+                    d = t[(t['dataset'] == ds) & (t['world'] == world) & (t['kind'] == kind) & (t['state_terms'] == state)]
+                    x = j + (2 * i + s - (2 * len(ds_list) - 1) / 2) * w
+                    if len(d):
+                        ax.bar(x, d['locked'].iloc[0], width=w * 0.9, color=DATASET_COLORS[ds], alpha=alpha, lw=0,
+                               label=f'{ds}, {state} the state terms' if j == 0 else None)
+        ax.axhline(alpha_null(n_perm), color=NULL, ls='--', lw=0.8)
+        ax.set_xticks(range(len(cats)), [c[2] for c in cats])
+        ax.set_ylabel('fraction locked to rest entry')
+        ax.set_ylim(0, 1.05)
+        ax.legend(frameon=False, fontsize=5, loc='upper left', bbox_to_anchor=(1.0, 1.0))
+        fig.suptitle('F37. The rest gate (full runs): planted units locked to rest entry with and without the state terms')
+    _save(fig, out_path)
+    return fig
+
+
+def make_m4(R: dict, n_perm: int = 100) -> dict:
+    """Every M4 part 1 figure under M4_FIG_DIR; returns {figure id: path stem}."""
+    out = {}
+    for fid, fn, a in (('F31_lfp_check', plot_lfp_check, ()), ('F32_rest_locking', plot_rest_locking, (R,)),
+                       ('F33_rest_stage2', plot_rest_stage2, (R,)), ('F34_rest_timescales', plot_rest_timescales, (R,)),
+                       ('F35_rest_drift', plot_rest_drift, (R,)), ('F36_rest_course', plot_rest_course, (R,)),
+                       ('F37_rest_gates', plot_rest_gates, (n_perm,))):
+        p = os.path.join(M4_FIG_DIR, fid)
+        fig = fn(*a, out_path=p)
+        plt.close(fig)
+        out[fid] = p
+    return out
 
 
 # ---------------------------------------------------------------------------

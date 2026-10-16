@@ -6,6 +6,50 @@ from other sessions (locked clock alone), and whether the population trajectory 
 events. Plan, decisions and code map: `docs/handoff/EVENT_KERNELS_HANDOFF.md`. Per-neuron kernels:
 `code/EVENT_KERNELS.md`.
 
+## 2026-10-16 — M4 part 1: drift in rest against task (Kanter Fig 2)
+
+Rest-entry kernels and timescales are in `EVENT_KERNELS.md`, same date.
+
+**Outcome.** Kanter found drift in REM equal to drift in foraging. Here, low-DOWN rest drifts more
+than task within 60 s segments, but its epochs decode worse.
+
+| 20-unit draws, mean over segments, draws and recdays, per mouse | LEC, 5 mice | PFC, 6 mice |
+|---|---|---|
+| drift growth, low-DOWN rest | 0.014-0.026 | 0.029-0.072 |
+| drift growth, task | -0.003 to 0.017 | 0.005-0.056 |
+| rest above task | 5 of 5 mice | 5 of 6 mice |
+| epoch decoding over chance, low-DOWN rest | 1.41-1.56 | 1.94-3.32 |
+| epoch decoding over chance, task | 1.49-1.85 | 1.90-2.98 |
+| rest below task | 5 of 5 mice | 3 of 6 mice |
+
+- High-DOWN rest has segments in one LEC mouse, ly07: growth 0.062, decoding 1.03. In PFC it has
+  them in 5 mice: growth -0.004 to 0.013, decoding 1.36-1.68.
+- The gate's planted equal drift reads 0.935 (LEC) and 0.909 (PFC) on 54 and 89 segments, and 4x
+  faster drift reads 2.20 and 2.29.
+
+### What was done
+
+- `rest_kernels.drift_segments`: 60 s segments at 1 s bins and 6 s epochs, every non-overlapping one
+  in each low-DOWN or high-DOWN run of at least 72 s. Task segments come from sessions without their
+  first 2 and last 1 min, matched in number; each context is capped at 120.
+- `rest_kernels.segment_drift`: distance growth, lags 7-9 minus lag 1, and kNN decoding of the 6 s
+  epoch within the segment. M2's unit sets; the tables read the 20-unit draws.
+
+### What was NOT established
+
+- **That rest drift is faster in the representational sense.** Low-DOWN rest mixes quiet wake,
+  drowsiness and REM, and state changes move population vectors. Kanter's soft normalisation keeps
+  rate changes.
+- **That task is the right reference.** A 60 s task segment holds about one loop, median 43.6 s, so
+  its distance-by-lag curve carries the task's period. Foraging had none.
+- **REM.** It cannot be separated without LFP or tracking.
+- **LEC vs PFC.** No contrast was tested.
+
+### Commands
+
+As `EVENT_KERNELS.md`, 2026-10-16: drift runs inside `run_rest_kernels.py`; F35 is in
+`code/event_kernels_M4_rest.ipynb`.
+
 ## 2026-10-14 — M3 part 2: Kanter part 2 (boundaries, coding axes, Fano removal), and the ramp test
 
 The ramp test itself is in `EVENT_KERNELS.md`, same date. It answers the caution below. M2's

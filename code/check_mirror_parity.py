@@ -71,6 +71,10 @@ BYTE_PAIRS = [
     ('code/unit_timescales.py', 'mFC_data/code/unit_timescales.py'),
     ('code/unit_timescales_synthetics.py', 'mFC_data/code/unit_timescales_synthetics.py'),
     ('code/run_unit_timescales.py', 'mFC_data/code/run_unit_timescales.py'),
+    # Added 2026-10-15 with M4 part 1 (rest): both datasets' rest shards come from these files.
+    ('code/rest_kernels.py', 'mFC_data/code/rest_kernels.py'),
+    ('code/rest_kernels_synthetics.py', 'mFC_data/code/rest_kernels_synthetics.py'),
+    ('code/run_rest_kernels.py', 'mFC_data/code/run_rest_kernels.py'),
     # Added 2026-10-09 with the spatial pipelines: one pipeline for mEC, LEC and PFC (user rule), so
     # every module and its gate must be the same bytes in both trees.
     ('code/spatial_common.py', 'mFC_data/code/spatial_common.py'),

@@ -266,6 +266,195 @@ Design choices inside `event_kernels.py`, each with its reason:
 
 ## 7. Status
 
+### 2026-10-16, afternoon: M4 part 1 complete, stopped for review
+
+Details: `code/EVENT_KERNELS.md` and `code/POPULATION_DRIFT.md`, entries 2026-10-16. Notebook:
+`code/event_kernels_M4_rest.ipynb`, no error outputs. Figures F31-F37: `data/figures/event_kernels/M4/`.
+Uncommitted.
+
+- **Runs.** Round 5 gates pass in both datasets. 50 recday jobs, every one `EXIT=0`; merged 25 + 25
+  shards, PFC with the 4 tokenless recdays skipped. 6 small PFC recdays have no rest-entry fit, so
+  ah03 and me08 drop out of it.
+- **Results.**
+  - The LEC population rate falls 16-21% over the first 20 min of rest in every mouse.
+  - LEC mice rarely reach DOWN-rich states: high-DOWN windows are 0.4-3.9% per mouse; PFC 9-38%.
+  - Relative to the population, 29% of LEC units (mice 0.14-0.35) and 13% of PFC units lock to rest
+    entry. Most are slow ramps of mixed sign, median tau 1280 s; 60% beat a day trend.
+  - They are unrelated to maze-entry locking: no enrichment; sign agreement 0.59 in 107 units.
+  - The fast intrinsic timescale is a unit property: Spearman across rest and task 0.47-0.50, and
+    in LEC it is shorter in rest, ratio 0.66. The slow one is not, Spearman 0.14-0.26. Neither
+    tracks the event kernels' tau, Spearman -0.01 to 0.17.
+  - Low-DOWN rest drifts more than task within 60 s in 5 of 5 LEC mice, but its epochs decode worse.
+- **Caveats to put to the user:**
+  - rest-entry locking may be unit-specific state dependence, which the gate does not plant;
+  - the low-DOWN class is loose where a recday's cut is high: ah08, ly06_20250613;
+  - task segments of 60 s carry the loop's period.
+- **Decisions to put to the user:**
+  1. Commit M4 part 1?
+  2. Next is the PFC end-of-recording check (decided 2026-10-15). Also open: a gate row for
+     unit-specific state dependence, and M4 part 2.
+
+### 2026-10-16: M4 part 1 revised, gates and runs submitted
+
+- **User decisions, 2026-10-15:**
+  - fix M4 part 1 first, then the PFC end-of-recording check (§8);
+  - continuous state terms only, with no binary SWS flag: the pre-set fallback, because the LFP
+    check could not validate staging;
+  - add a population-rate term to the rest design.
+- **Why the first gates failed,** read from their pickles:
+  - the gate calibrated the proxy on planted Poisson task data, which have no lulls. So the cut
+    was 0.0000, and any 100 ms lull marked a window SWS: the proxy's onset fell 5-130 s before the
+    planted onset in 10 of 11 LEC blocks, inside the planted quiet wake;
+  - that misfit, and the quiet wake's 0.7x dip in every unit, are locked to rest entry on average.
+    High-rate units reach p = 1/101: locked noise in the LEC quick gate had a median of 9.7 Hz,
+    against 1.4 Hz unlocked;
+  - the LFP rule failed both ways: theta/delta < 0.8 in 82-100% of every block's windows, and rest
+    delta at a median 0-20% of the awake threshold;
+  - Murray's 0.25 s fits failed at the planted OU units' real low rates, LEC median 0.8 Hz.
+- **What changed,** in `rest_kernels.py`, `rest_kernels_synthetics.py` and
+  `run_rest_kernels.py`, mirrored, and `rest_lfp_check.py`:
+  - the `state` group replaces `sws`. It holds deciles of `down_frac` and of the other half's
+    population rate per 10 s window. Units are split even / odd, each half is fitted with the
+    other half's rate, and a recday needs at least 10 units per half;
+  - the proxy is applied with the real recday's calibration, in the gate too;
+  - low-DOWN windows, within the awake range, and high-DOWN windows, at least 0.1, replace
+    non-SWS / SWS for the timescales and drift. Drift draws up to 3 segments per run;
+  - planted OU units at a fixed 5 Hz; new reported row G4b, a ramp shared by every unit;
+  - the LFP readout is the Spearman of `down_frac` with log delta.
+- **Jobs.** Quick gates 3771441 (LEC) and 3771442 (PFC). Full gates 3771443 and 3771444, each
+  `afterok` on its quick gate. Recday jobs LEC 3771449-3771473 and PFC 3771474-3771498, `afterok`
+  on the full gates.
+- **Do not edit any registered rest file until every one of these jobs has ended.** A requeued job
+  re-runs the parity check, and the shards stamp the files' sha1.
+- **Result, 2026-10-16 08:25: both quick gates fail (`EXIT=1`).** The full gates and the 50 recday
+  jobs could then never start, and were cancelled.
+
+  | row | LEC quick | PFC quick |
+  |---|---|---|
+  | G1 proxy AUC at the real unit count; planted high-DOWN recall / quiet wake high-DOWN | 1.000, pass; 0.999 / 0.008 | 1.000; 0.998 / 0.021 |
+  | G3 SWS-gain units locked with the state terms | 4 of 4, fail | 4 of 4, fail |
+  | G4 noise locked with / without the state terms | 2 of 92, pass / 21 of 92 | 12 of 58, fail / 39 of 58 |
+  | G4b shared ramp: noise locked with / without the state terms | 79 of 92 / 86 of 92 | 54 of 58 / 57 of 58 |
+  | G6 slow tau ratio at 120 s | 0.684, fail | 1.466, fail |
+  | G7 drift_equal ratio, 12 segments | 1.36, fail | 0.91, pass |
+
+  G2, G5, G6 at 30 s, Murray at 0.25 s, G7 fast and G8 pass in both.
+  - The real calibration works: the planted quiet wake is now high-DOWN in 0.8-2.1% of windows.
+  - **Deciles of the population rate cannot absorb a multiplicative shared change.** In the
+    shared-ramp run the top rate decile holds 90% (LEC) and 94% (PFC) of its windows from the
+    first 5 min, spanning 9.8-14.5 Hz per unit in LEC. The rate keeps falling inside that one
+    decile, and the rest-entry kernel takes what is left. G3's SWS gain multiplies the shared
+    process in the same way.
+  - G6 at 120 s and G7 rest on 2 OU units per tau and on 12 segments in the quick gate. They
+    moved in both directions across runs: 0.68 and 1.47; 1.36 and 0.91.
+- **User decisions, 2026-10-16:** divide each unit's counts by the other half's population rate;
+  and give G6 and G7 more units and segments.
+- **The divisor has to be robust.** Ramping units move a summed population rate, and dividing by
+  it gives every other unit the opposite ramp. Shift of each half's summed rate at rest entry from
+  the planted rest-entry ramps, computed from the gate's truth and task rates:
+
+  | gate | ramp units per half | shift |
+  |---|---|---|
+  | LEC quick / full | 3 / 6 of 77 | -0.6 to +3.4% |
+  | PFC quick / full | 3 / 6 of 60 | -6.9 to +17.7% |
+
+  So the divisor, `rest_kernels.relative_pop_rate`, is the median over the half's units of each
+  unit's count over the centred 30 s, divided by its own mean. Units under 0.3 Hz are left out,
+  because their counts are too sparse; a half needs 10 qualifying units, and the divisor is floored
+  at 0.2. The planted ramps stay strong, so G4 tests the robustness. Also: 4 OU units per tau in
+  the quick gate, and `MAX_SEGMENTS` 40.
+- **Jobs, round 4:** quick gates 3771769 (LEC) and 3771771 (PFC); full gates 3771772 and 3771773,
+  `afterok`; recday jobs LEC 3771779-3771803 and PFC 3771805-3771830, `afterok` on the full gates.
+- **Round 4 result, 09:42: both quick gates fail; the held jobs were cancelled.**
+
+  | row | LEC quick | PFC quick |
+  |---|---|---|
+  | G3 SWS-gain units locked with the state terms | 3 of 4, fail | 4 of 4, fail |
+  | G4 noise, with / without the state terms | 1 of 84, pass / 7 of 84 | 1 of 50, pass / 20 of 50 |
+  | G4b shared ramp, noise with / without | 3 of 84 / 77 of 84 | 8 of 50 / 49 of 50 |
+  | G6 slow tau ratio at 120 s, 4 units | 0.855, pass | 1.443, fail |
+  | G7 drift_equal ratio | 0.703 on 21 segments, fail | 1.017 on 25, pass |
+
+  - The median divisor works: noise stays at chance with the state terms, and the shared ramp is
+    absorbed.
+  - **G3 had a coding cause.** `down_frac` is 0 in about 36% of windows. With so many ties the
+    quantile edges collapse, and `np.digitize` puts everything from 0 to the next distinct edge in
+    one bin: 0-0.172 in LEC and 0-0.147 in PFC. That bin held 5% (LEC) and 4% (PFC) of the
+    planted SWS windows, so the SWS gain leaked into time since entry. Now 0 is its own bin, with
+    deciles over the positive values.
+  - **G6 and G7 are still short of data.** G7's equal-drift ratio has read 0.70-1.36 across eight
+    runs. So drift takes every non-overlapping segment, capped at 120 per context, and G6 plants
+    8 OU units per tau. G6 also scores rest windows clear of the planted quiet wake, as G7 does,
+    because that 0.7x step adds slow structure that the planted OU does not have.
+- **Jobs, round 5:** quick gates 3771856 (LEC) and 3771857 (PFC); full gates 3771858 and 3771859,
+  `afterok`; recday jobs LEC 3771862-3771888 and PFC 3771889-3771913, `afterok` on the full gates.
+- **Round 5 quick gates pass, 09:59, both `EXIT=0`:**
+
+  | row | LEC quick | PFC quick |
+  |---|---|---|
+  | G3 SWS-gain locked, with / without the state terms | 0 of 4 / 1.00 | 1 of 4, p 0.177 / 1.00 |
+  | G4 noise, with / without | 0 of 68 / 13 of 68 | 2 of 34 / 25 of 34 |
+  | G4b shared ramp, noise with / without | 1 of 68 / 63 of 68 | 5 of 34 / 34 of 34 |
+  | G6 slow tau ratio at 30 / 120 s | 0.911 / 1.25, 9 windows | 1.08 / 1.256, 11 windows |
+  | G7 drift_equal / drift_fast | 0.92 / 1.907, 61 segments | 0.937 / 2.746, 74 segments |
+
+  G1, G2, G5, Murray at 0.25 s and G8 pass. G6 at 120 s sits near its 1.33 limit, on 9-11 rest
+  windows clear of quiet wake.
+- **Round 5 full gates pass, 10:29, both `EXIT=0`; the 50 recday jobs then started:**
+
+  | row | LEC full | PFC full |
+  |---|---|---|
+  | G2 rest-entry ramps locked / Stage 2 tau within 2x | 0.833 / 0.8 | 1.0 / 1.0 |
+  | G3 SWS-gain locked, with / without the state terms | 0 of 8 / 1.00 | 0 of 8 / 1.00 |
+  | G4 noise, with / without | 0 of 54 / 24 of 54 | 1 of 20 / 15 of 20 |
+  | G4b shared ramp, noise with / without | 2 of 54 / 49 of 54 | 0 of 20 / 20 of 20 |
+  | G6 slow tau ratio at 30 / 120 s | 0.941 / 0.924, 6 windows | 0.986 / 1.124, 12 windows |
+  | G7 drift_equal / drift_fast | 0.935 / 2.204, 54 segments | 0.909 / 2.293, 89 segments |
+
+  Murray's tau at 0.25 s is within 2x in every planted unit, median 0.231 and 0.210 s, and G1,
+  G5 and G8 pass.
+
+### 2026-10-15: M4 part 1 (rest) approved, in progress
+
+- **Plan:** `~/.claude/plans/please-read-this-handoff-crystalline-pinwheel.md`. Four parts:
+  - a spike-based SWS proxy, with an LFP check on 2 blocks per LEC mouse;
+  - rest-entry kernels against maze entry;
+  - intrinsic timescales in rest vs task vs event tau;
+  - rest drift vs task drift.
+
+  Part 2 comes later: offline co-activity and preceding-task memory.
+- **Code:** `rest_kernels.py`, `rest_kernels_synthetics.py`, `run_rest_kernels.py` (+ mirrors), and
+  the LEC-only `rest_lfp_check.py`.
+- **The proxy needs its recday's own calibration.**
+  - Real awake data have far more low-count 25 ms bins than Poisson: the LEC ah10 task 1st
+    percentile is 4 spikes, against 14 for Poisson at the same rates. So the power check scores
+    planted sleep with the real theta and cut.
+  - PFC task shards can end in a silent 10 s window, which pushed me11's cut to 1.0. Dead windows
+    are now excluded from calibration.
+  - In PFC, awake windows spend more than half their time in silent runs (me11's cut is 0.56). The
+    proxy then recovers no planted SWS, so PFC staging is flagged unusable. A usable recday needs
+    AUC >= 0.95, recall >= 0.8 and quiet wake <= 5%.
+- **2026-10-15, afternoon: every rest gate run fails; the production runs are cancelled.**
+  - Runs 3769494 / 3769495 (LEC quick / full) and 3769496 / 3769497 (PFC), all `EXIT=1`. G1 now
+    passes on both gate recdays: 154 LEC and 46 PFC units, AUC 1.00, recall 1.00, quiet wake 0.042.
+
+    | row | LEC quick | LEC full | PFC quick | PFC full |
+    |---|---|---|---|---|
+    | G3 SWS-gain units locked with the nuisance (must be chance) | 1/4, pass | 7/8, fail | 4/4, fail | 7/8, fail |
+    | G4 noise locked (chance, p > 0.01) | 26/92, fail | 8/70, p 0.022, pass | 2/58, pass | 0/36, pass |
+    | G6 Murray tau within 2x at 0.25 s | 2/2 | 2/4, fail | 2/2 | 3/4, fail |
+    | G7 drift_equal ratio (0.8-1.25) | 1.15 | 1.12 | 1.06 | 0.73, fail |
+
+    G2, G5, G6 slow, G7 fast and G8 pass in all four. The cause of G3/G4 is not diagnosed.
+  - The 50 production jobs (3769498-3769547) were held behind the full gates; the PFC ones could
+    never start. All 50 were cancelled.
+  - LFP check v2 (absolute delta threshold, the 99th percentile of the nearest task session's first
+    10 min): LFP-SWS in 0.00-0.02 of windows in all 10 blocks, so the pre-set AUC rule cannot be
+    applied. Spearman of `down_frac` with log delta: 0.60-0.86 in the four between-task blocks with
+    variance, -0.08 to 0.45 before the first task. `data/event_kernels/rest/lfp_check/summary.csv`.
+- **Results page** (user request, 2026-10-15): https://claude.ai/artifact/557jgXBgUcq5jMarZvJBrp,
+  M1 to M4 part 1 with F1-F30. Captioning F4 found the PFC end-of-recording peak in §8.
+
 ### 2026-10-14, evening: M3 part 2 complete, stopped for review
 
 Details: `code/EVENT_KERNELS.md` and `code/POPULATION_DRIFT.md`, entries 2026-10-14. Notebook:
@@ -617,6 +806,12 @@ sessions have no ROI file); that is fixed.
 
 ## 8. Open questions and risks
 
+- **PFC entry calls lean on the end of the recording (found 2026-10-15).** At >= 5 trials, 184 of
+  414 PFC entry-locked units put their largest kernel weight in the 1200-1500 s bin, 178 of them
+  negative (LEC: 16 of 972). In PFC 88% of that bin's rows are after the last trial (LEC 59%). They
+  are 119 of PFC's 130 Stage 2 `other` entry units. Test how many PFC entry calls, and which PFC
+  entry results, survive with the post-task segment or that bin set aside. `code/EVENT_KERNELS.md`,
+  2026-10-15.
 - **Outstanding follow-ups from M3 part 2 (user, 2026-10-14).** Not run; M4 comes first.
   1. What carries the 40% (LEC) and 51% (PFC) of M2's held-out first-minute decoding left after
      dividing out the entry-locked units' kernels? Size-matched non-locked units decode minute 1 at
@@ -680,6 +875,8 @@ Read logs to their `EXIT=` line. `sbatch_files/slurm_outputs/event_kernels-<name
 
 ## 10. Pointers
 
+- Results page, private: https://claude.ai/artifact/557jgXBgUcq5jMarZvJBrp. Update it in place
+  after each milestone.
 - `docs/handoff/SPIKE_CLOCK_V4.md`: the v4 clock and the run order for new ephys.
 - `docs/handoff/SPIKE_CLOCK_V2_MISALIGNMENT.md`: the original finding; its root-cause section is
   superseded.
