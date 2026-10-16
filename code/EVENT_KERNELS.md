@@ -100,7 +100,7 @@ Predictions in the plan:
 | G8 | the signal-loss cut on a planted dropout | within 60 s | within 60 s |
 
 **Four rounds failed first.** Each fix had a measured cause, recorded in the module docstrings and
-handoff §7:
+in `docs/handoff/EVENT_KERNELS_LOG.md`, 2026-10-16:
 
 1. The gate calibrated the proxy on planted Poisson task data, which have no lulls. The cut was 0, so
    the planted quiet wake read as SWS. Planted data now use the real calibration.
